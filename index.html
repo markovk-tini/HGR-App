@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Download HGR App</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="badge">HGR App</div>
+      <h1>Download HGR App</h1>
+      <p class="subtitle">Choose the version for your device. The installer will place HGR App in the default location, and you can change it during installation.</p>
+    </header>
+
+    <main class="platform-grid">
+      <section class="platform-card recommended" id="windows-card">
+        <div class="platform-head">
+          <h2>Windows</h2>
+          <span class="pill">Recommended on this device</span>
+        </div>
+        <p>Downloads the Windows installer. Users can choose the install location, keep the default, and optionally create a desktop shortcut.</p>
+        <a class="download-button" href="../releases/windows/HGR-App-Setup.exe">Download for Windows</a>
+        <p class="helper">Installer file: <code>HGR-App-Setup.exe</code></p>
+      </section>
+
+      <section class="platform-card" id="mac-card">
+        <div class="platform-head">
+          <h2>macOS</h2>
+          <span class="pill ghost">Mac build</span>
+        </div>
+        <p>Downloads the macOS installer package. It installs HGR App into the Applications folder by default.</p>
+        <a class="download-button secondary" href="../releases/macos/HGR-App-mac.pkg">Download for macOS</a>
+        <p class="helper">Installer file: <code>HGR-App-mac.pkg</code></p>
+      </section>
+    </main>
+
+    <section class="notes">
+      <h3>Before you publish this page</h3>
+      <ol>
+        <li>Replace the placeholder files in <code>releases/windows</code> and <code>releases/macos</code> with your real installers.</li>
+        <li>Host this folder on a static website host, such as GitHub Pages.</li>
+        <li>Share the page link instead of sending raw app files separately.</li>
+      </ol>
+    </section>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
