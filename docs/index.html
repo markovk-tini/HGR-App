@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Download HGR App</title>
+  <title>Download HGR App v1.0.2</title>
   <style>
     :root {
       --bg1: #07131d;
@@ -127,6 +127,19 @@
       font-size: 14px;
     }
 
+    .version {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      width: fit-content;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
     .cards {
       padding: 24px;
       display: grid;
@@ -201,7 +214,6 @@
       gap: 12px;
     }
 
-    ol,
     ul {
       margin: 0;
       padding-left: 20px;
@@ -250,6 +262,7 @@
           <h1>Download HGR App</h1>
         </div>
       </div>
+      <div class="version">Current version: v1.0.0</div>
       <p>Choose the installer for your device. The Windows installer is an <code>.exe</code>. The macOS installer is a <code>.pkg</code>.</p>
       <div id="recommended" class="recommended">Checking your device…</div>
     </section>
@@ -293,13 +306,7 @@
     </section>
 
     <section class="notes">
-      <h3>Before you publish this page</h3>
-      <ol>
-        <li>Upload the current installer files to the latest GitHub release.</li>
-        <li>Keep the release asset filenames matched to the download links on this page.</li>
-        <li>Host this file on GitHub Pages and share the page link instead of sending installer files separately.</li>
-      </ol>
-      <p><strong>How to use this page</strong></p>
+      <h3>How to use this page</h3>
       <ul>
         <li>Click the button for your operating system to download the installer.</li>
         <li>The Windows installer downloads <code>HGR_App_Installer.exe</code>.</li>
@@ -349,4 +356,3 @@
   </script>
 </body>
 </html>
-
