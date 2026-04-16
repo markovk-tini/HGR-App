@@ -2179,6 +2179,17 @@ class MainWindow(QMainWindow):
                 image_name="Left Hand Four.png",
             ),
             GestureGuideCard(
+                title="Left Hand Fist",
+                action="Cancel voice commands at any stage",
+                how_to=(
+                    "Use your left hand with your palm facing your monitor and close all five fingers into a compact fist. "
+                    "Hold the pose steadily so HGR reads it as a true fist. This cancels the current voice command at any stage — "
+                    "while listening, while confirming, or during dictation — and returns voice control to idle."
+                ),
+                gesture_key="fist",
+                image_name="Left Fist.png",
+            ),
+            GestureGuideCard(
                 title="Right Hand Two",
                 action="Open or focus Spotify",
                 how_to=(
