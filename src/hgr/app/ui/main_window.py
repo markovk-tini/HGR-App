@@ -844,12 +844,24 @@ class GestureGuideCard(QFrame):
         detail_label = QLabel(how_to)
         detail_label.setObjectName("gestureCardBody")
         detail_label.setWordWrap(True)
+        detail_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        detail_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        desc_scroll = QScrollArea()
+        desc_scroll.setFrameShape(QFrame.NoFrame)
+        desc_scroll.setWidgetResizable(True)
+        desc_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        desc_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        desc_scroll.setMaximumHeight(90)
+        desc_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        desc_scroll.setWidget(detail_label)
+        desc_scroll.setStyleSheet("background: transparent; border: none;")
 
         text_layout.addWidget(title_label)
         text_layout.addWidget(action_label)
         text_layout.addSpacing(2)
         text_layout.addWidget(how_header)
-        text_layout.addWidget(detail_label)
+        text_layout.addWidget(desc_scroll)
         text_layout.addStretch(1)
         layout.addLayout(text_layout, 1)
 
@@ -2157,6 +2169,16 @@ class MainWindow(QMainWindow):
                 image_name="Left Three.png",
             ),
             GestureGuideCard(
+                title="Left Hand Four",
+                action="Toggle drawing mode on or off",
+                how_to=(
+                    "Use your left hand with your palm facing your monitor. Extend your index, middle, ring, and pinky fingers while keeping your thumb folded in. "
+                    "Hold the pose steady for about half a second. HGR will confirm by toggling drawing mode on or off."
+                ),
+                gesture_key="four",
+                image_name="Left Hand Four.png",
+            ),
+            GestureGuideCard(
                 title="Right Hand Two",
                 action="Open or focus Spotify",
                 how_to=(
@@ -2190,69 +2212,172 @@ class MainWindow(QMainWindow):
                 title="Gesture Wheel",
                 action="Open the Spotify gesture wheel",
                 how_to=(
-                    "Use your right hand and make the gesture wheel pose. Keep the pose steady until the wheel opens. Once it appears, you can move toward a slice "
+                    "Use your right hand and make the gesture wheel pose. Keep the pose steady until the wheel opens. Once it appears, move toward a slice "
                     "and hold there to trigger that Spotify action."
                 ),
                 gesture_key="wheel_pose",
                 image_name="Wheel Pose.png",
+            ),
+            GestureGuideCard(
+                title="Screen Wheel",
+                action="Open the screen utility wheel for screenshots, recordings, and clips",
+                how_to=(
+                    "Use your right hand with your palm facing your monitor. Extend your index finger and pinky while keeping your thumb, middle, and ring fingers folded — "
+                    "like a rock or horns shape. Hold the pose steady for about one second until the screen utility wheel opens. "
+                    "Then move your hand toward a slice and hold to trigger that action: full screenshot, custom area screenshot, full screen record, custom area record, save last 30 s clip, or save last 1 minute clip."
+                ),
+                gesture_key="mute",
+                image_name="ScreenWheel.png",
             ),
         ]
 
         dynamic_cards = [
             GestureGuideCard(
                 title="Swipe Left",
-                action="Go to the previous song or previous page, depending on context",
+                action="Go to the previous song in Spotify or navigate back in Chrome",
                 how_to=(
                     "Start with your right hand open and your palm facing your monitor. Move your hand smoothly to the left in one clean horizontal motion. "
-                    "Try to avoid large up-and-down movement while swiping."
+                    "Try to avoid large up-and-down movement while swiping. A confident motion works better than a slow drift."
                 ),
                 gesture_key="open_hand",
-                video_name="Swipe Left.mp4",
+                video_name="SwipeLeft.mp4",
             ),
             GestureGuideCard(
                 title="Swipe Right",
-                action="Go to the next song or next page, depending on context",
+                action="Go to the next song in Spotify or navigate forward in Chrome",
                 how_to=(
                     "Start with your right hand open and your palm facing your monitor. Move your hand smoothly to the right in one clean horizontal motion. "
                     "A confident side-to-side swipe works better than a slow drift."
                 ),
                 gesture_key="open_hand",
-                video_name="Swipe Right.mp4",
+                video_name="SwipeRight.mp4",
             ),
             GestureGuideCard(
                 title="Volume Control",
-                action="Adjust system volume up or down",
+                action="Adjust system volume or app volume up or down",
                 how_to=(
-                    "Use your right hand with your palm facing your monitor. Keep your index and middle fingers open and together, while the thumb, ring, and pinky stay folded. "
-                    "After the pose is active, move your hand up to raise volume or down to lower it."
+                    "Use your right hand with your palm facing your monitor. Keep your index and middle fingers open and together while the thumb, ring, and pinky stay folded. "
+                    "Once the volume overlay appears, move your hand up to raise volume or down to lower it. "
+                    "If Spotify or Chrome audio is active, two bars appear — move your palm slightly left from your starting position to control app volume, "
+                    "or slightly right to control system volume. Up and down adjusts whichever bar is highlighted."
                 ),
                 gesture_key="volume_pose",
-                video_name="Vol Control.mp4",
+                video_name="VolControl.mp4",
             ),
             GestureGuideCard(
                 title="Refresh / Repeat",
-                action="Refresh in Chrome or toggle repeat in Spotify",
+                action="Refresh the current page in Chrome or toggle repeat mode in Spotify",
                 how_to=(
-                    "Use your right hand and trace a small smooth circle with the active gesture pose. The motion should look like a repeat loop rather than a swipe. "
-                    "In Chrome this refreshes the page. In Spotify this toggles repeat."
+                    "Use your right hand and trace a small smooth circle with the active gesture pose. The motion should feel like drawing a loop. "
+                    "In Chrome this refreshes the current page. In Spotify this toggles repeat mode on or off."
                 ),
                 gesture_key="one",
-                video_name="Refresh.mp4",
+                video_name="Repeat.mp4",
             ),
             GestureGuideCard(
                 title="Mouse Controls",
-                action="Move the cursor, left click, and right click while mouse mode is active",
+                action="Move the cursor, left click, right click, and scroll while mouse mode is active",
                 how_to=(
-                    "First turn mouse mode on with the left-hand three gesture. Then use your right hand with all fingers open and separated to move the cursor. "
-                    "For a left click, bend and unbend your index finger like a mouse button. For a right click, bend and unbend your middle finger."
+                    "First turn mouse mode on with the left-hand three gesture. Then use your right hand with all fingers open and spread to move the cursor. "
+                    "Bend and straighten your index finger to left-click. Bend and straighten your middle finger to right-click. "
+                    "Move your hand upward or downward while in the scrolling pose to scroll."
                 ),
                 gesture_key="open_hand",
-                video_name="Mouse.mp4",
+                video_name="MouseControl.mp4",
+            ),
+            GestureGuideCard(
+                title="Maximize Window",
+                action="Maximize the active window using a two-hand spread gesture",
+                how_to=(
+                    "Hold both hands in frame with palms facing the monitor. Start with both hands close together or pinched. "
+                    "Then slowly spread both hands apart and hold the spread position. The active window will expand to fill the screen. "
+                    "This is a two-hand gesture — both hands must be visible."
+                ),
+                gesture_key="open_hand",
+                video_name="Maximize.mp4",
+            ),
+            GestureGuideCard(
+                title="Minimize Window",
+                action="Minimize the active window using a two-hand pinch gesture",
+                how_to=(
+                    "Hold both hands in frame with palms facing the monitor. Start with both hands spread apart. "
+                    "Then bring both hands together into a pinch or close position and hold. The active window will minimize to the taskbar. "
+                    "This is a two-hand gesture — both hands must be visible."
+                ),
+                gesture_key="open_hand",
+                video_name="Minimize.mp4",
+            ),
+            GestureGuideCard(
+                title="Restore Window",
+                action="Restore the active window to its floating size",
+                how_to=(
+                    "Hold both hands in frame with palms facing the monitor. From either a spread or pinched position, "
+                    "move your hands to a mid-distance position and hold. The active window will return to its previous floating size. "
+                    "This is a two-hand gesture — both hands must be visible."
+                ),
+                gesture_key="open_hand",
+                video_name="restore.mp4",
+            ),
+        ]
+
+        drawing_cards = [
+            GestureGuideCard(
+                title="Drawing",
+                action="Draw freehand strokes on screen (requires drawing mode)",
+                how_to=(
+                    "First activate drawing mode using the left-hand four gesture. Then use your right hand with your index finger extended "
+                    "and other fingers folded — like pointing. Move your hand to draw on screen. The stroke follows your index fingertip. "
+                    "Lift or change pose to stop drawing."
+                ),
+                gesture_key="one",
+                video_name="Drawing.mp4",
+            ),
+            GestureGuideCard(
+                title="Erasing",
+                action="Erase drawn strokes on screen (requires drawing mode)",
+                how_to=(
+                    "Drawing mode must be active first (left-hand four gesture). Switch to eraser mode from the drawing settings or toolbar. "
+                    "Then move your hand over drawn strokes to erase them. You can adjust eraser size in the drawing settings wheel."
+                ),
+                gesture_key="fist",
+                video_name="Erasing.mp4",
+            ),
+            GestureGuideCard(
+                title="Clear Canvas",
+                action="Remove all strokes from the drawing canvas at once (requires drawing mode)",
+                how_to=(
+                    "Drawing mode must be active first (left-hand four gesture). Perform the clear canvas gesture to wipe the entire canvas. "
+                    "All drawn strokes are removed at once. This cannot be undone with the undo gesture."
+                ),
+                gesture_key="fist",
+                video_name="ClearCanvas.mp4",
+            ),
+            GestureGuideCard(
+                title="Undo Drawing",
+                action="Remove the last drawn stroke (requires drawing mode)",
+                how_to=(
+                    "Drawing mode must be active first (left-hand four gesture). Perform the undo gesture to remove the most recent stroke. "
+                    "You can repeat this to continue undoing previous strokes one at a time."
+                ),
+                gesture_key="one",
+                video_name="UndoDraw.mp4",
+            ),
+            GestureGuideCard(
+                title="Drawing Settings Wheel",
+                action="Open drawing options: pen color, size, brush type, and eraser (requires drawing mode)",
+                how_to=(
+                    "Drawing mode must be active first (left-hand four gesture). Then make the gesture wheel pose with your right hand and hold it steady. "
+                    "The drawing settings wheel opens, letting you choose pen color, adjust brush size, switch brush type, or switch to eraser mode. "
+                    "Move toward a slice and hold to select."
+                ),
+                gesture_key="wheel_pose",
+                video_name="DrawingSettingsWheel.mp4",
             ),
         ]
 
         sections_layout.addWidget(GestureGuideSection("Static Gestures", static_cards))
         sections_layout.addWidget(GestureGuideSection("Dynamic Gestures", dynamic_cards))
+        sections_layout.addWidget(GestureGuideSection("Drawing Gestures (activate drawing mode first)", drawing_cards))
         sections_layout.addStretch(1)
 
         scroll.setWidget(container)

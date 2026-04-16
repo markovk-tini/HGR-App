@@ -78,6 +78,7 @@ class GestureWorker(QObject):
         self._volume_dual_active = False
         self._volume_app_level: float | None = None
         self._volume_app_label = ""
+        self._volume_app_process = ""
         self._volume_bar_selected = "sys"
         self._volume_init_palm_x: float | None = None
         self._volume_app_check_until = 0.0
@@ -1556,12 +1557,16 @@ class GestureWorker(QObject):
             candidate_scores = self.engine.last_static_scores
             stable_gesture = result.prediction.stable_label
 
+        tracker_level = current_level
+        if self._volume_dual_active and self._volume_bar_selected == "app" and self._volume_overlay_visible:
+            tracker_level = self._volume_app_level if self._volume_app_level is not None else current_level
+
         update = self.volume_tracker.update(
             features=features,
             landmarks=landmarks,
             candidate_scores=candidate_scores,
             stable_gesture=stable_gesture,
-            current_level=current_level,
+            current_level=tracker_level,
             current_muted=current_muted,
             now=now,
             allow_mute_toggle=now >= self._mute_block_until,
@@ -1580,9 +1585,14 @@ class GestureWorker(QObject):
             self._volume_bar_selected = "sys"
             app_name, app_level = self.volume_controller.get_app_audio_info(["spotify", "chrome"])
             self._volume_dual_active = app_name is not None
+            self._volume_app_process = app_name or ""
             self._volume_app_label = app_name.capitalize() if app_name else ""
-            self._volume_app_level = app_level
-            self._volume_app_check_until = now + 1.0
+            if app_name == "spotify":
+                spotify_vol = self.spotify_controller.get_volume()
+                self._volume_app_level = spotify_vol / 100.0 if spotify_vol is not None else (app_level or 0.5)
+            else:
+                self._volume_app_level = app_level
+            self._volume_app_check_until = now + 3.0
 
         if update.overlay_visible and self._volume_dual_active:
             palm_center = getattr(getattr(result.hand_reading, "palm", None), "center", None) if result.hand_reading is not None else None
@@ -1606,14 +1616,21 @@ class GestureWorker(QObject):
 
         if update.active and update.level is not None:
             if self._volume_dual_active and self._volume_bar_selected == "app":
-                delta = update.level - (current_level or update.level)
-                new_app = max(0.0, min(1.0, (self._volume_app_level or 0.5) + delta))
-                process_names = ["spotify", "chrome"]
-                if self.volume_controller.set_app_audio_level(process_names, new_app):
+                new_app = max(0.0, min(1.0, float(update.level)))
+                if self._volume_app_process == "spotify":
+                    vol_pct = int(round(new_app * 100))
+                    threading.Thread(
+                        target=self.spotify_controller.set_volume,
+                        args=(vol_pct,),
+                        daemon=True,
+                    ).start()
                     self._volume_app_level = new_app
                 else:
-                    controller_error_message = "app volume adjust failed"
-                    controller_error_status = "error"
+                    if self.volume_controller.set_app_audio_level(["chrome"], new_app):
+                        self._volume_app_level = new_app
+                    else:
+                        controller_error_message = "app volume adjust failed"
+                        controller_error_status = "error"
             else:
                 if self.volume_controller.set_level(update.level):
                     current_level = update.level
@@ -1624,11 +1641,18 @@ class GestureWorker(QObject):
                     controller_error_message = self.volume_controller.message or "set_level failed"
                     controller_error_status = "error"
 
-        if update.overlay_visible and self._volume_dual_active and now >= self._volume_app_check_until:
-            self._volume_app_check_until = now + 1.0
-            _, fresh_app = self.volume_controller.get_app_audio_info(["spotify", "chrome"])
-            if fresh_app is not None and not (update.active and self._volume_bar_selected == "app"):
-                self._volume_app_level = fresh_app
+        if update.overlay_visible and self._volume_dual_active and now >= self._volume_app_check_until and not (update.active and self._volume_bar_selected == "app"):
+            self._volume_app_check_until = now + 3.0
+            if self._volume_app_process == "spotify":
+                def _refresh_spotify_vol():
+                    vol = self.spotify_controller.get_volume()
+                    if vol is not None:
+                        self._volume_app_level = vol / 100.0
+                threading.Thread(target=_refresh_spotify_vol, daemon=True).start()
+            else:
+                _, fresh_app = self.volume_controller.get_app_audio_info(["chrome"])
+                if fresh_app is not None:
+                    self._volume_app_level = fresh_app
 
         if not update.overlay_visible:
             self._volume_dual_active = False

@@ -257,6 +257,29 @@ class SpotifyController:
         self._message = "spotify shuffle failed"
         return False
 
+    def get_volume(self) -> int | None:
+        player = self.get_player_state()
+        if player is None:
+            return None
+        device = player.get("device") or {}
+        vol = device.get("volume_percent")
+        return int(vol) if vol is not None else None
+
+    def set_volume(self, volume_percent: int) -> bool:
+        volume_percent = max(0, min(100, int(volume_percent)))
+        if not self._ensure_authenticated():
+            return False
+        status, _ = self._request_json(
+            "PUT",
+            "/me/player/volume",
+            params={"volume_percent": volume_percent},
+        )
+        if status in {200, 202, 204}:
+            self._message = f"spotify volume {volume_percent}%"
+            return True
+        self._message = "spotify volume set failed"
+        return False
+
     def is_window_active(self) -> bool:
         handles = self._spotify_window_handles()
         if not handles:
