@@ -149,11 +149,11 @@ class ScreenVolumeOverlay(QWidget):
         painter.setBrush(self._track)
         painter.drawRoundedRect(bar_rect, 14, 14)
 
-        if self._current_fraction > 0.0:
+        if self._current_fraction > 0.005:
             inner = bar_rect.adjusted(4, 4, -4, -4)
-            fill_height = max(inner.width(), inner.height() * self._current_fraction)
+            fill_height = inner.height() * self._current_fraction
             fill_rect = QRectF(inner.left(), inner.bottom() - fill_height, inner.width(), fill_height)
-            fill_radius = min(fill_rect.width() / 2.0, 10.0)
+            fill_radius = min(fill_rect.width() / 2.0, fill_height / 2.0, 10.0)
             glow = QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 84)
             painter.setPen(Qt.NoPen)
             painter.setBrush(glow)
@@ -242,11 +242,11 @@ class ScreenVolumeOverlay(QWidget):
             painter.setPen(QPen(border_color, 1.2))
             painter.setBrush(track_color)
             painter.drawRoundedRect(bar_rect, 13, 13)
-            if fraction > 0.0:
+            if fraction > 0.005:
                 inner = bar_rect.adjusted(4, 4, -4, -4)
-                fill_height = max(inner.width(), inner.height() * fraction)
+                fill_height = inner.height() * fraction
                 fill_rect = QRectF(inner.left(), inner.bottom() - fill_height, inner.width(), fill_height)
-                fill_radius = min(fill_rect.width() / 2.0, 10.0)
+                fill_radius = min(fill_rect.width() / 2.0, fill_height / 2.0, 10.0)
                 glow = QColor(accent.red(), accent.green(), accent.blue(), 84 if selected else 30)
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(glow)

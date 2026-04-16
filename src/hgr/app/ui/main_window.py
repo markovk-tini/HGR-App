@@ -785,7 +785,7 @@ class GestureMediaWidget(QFrame):
             return
         status_name = getattr(status, "name", str(status))
         if "EndOfMedia" in status_name:
-            self._loop_timer.start(1000)
+            self._restart_video()
 
     def _restart_video(self) -> None:
         if self._player is None:
@@ -2318,56 +2318,57 @@ class MainWindow(QMainWindow):
                 gesture_key="open_hand",
                 video_name="restore.mp4",
             ),
-        ]
-
-        drawing_cards = [
             GestureGuideCard(
                 title="Drawing",
-                action="Draw freehand strokes on screen (requires drawing mode)",
+                action="Draw freehand strokes on screen",
                 how_to=(
-                    "First activate drawing mode using the left-hand four gesture. Then use your right hand with your index finger extended "
-                    "and other fingers folded — like pointing. Move your hand to draw on screen. The stroke follows your index fingertip. "
-                    "Lift or change pose to stop drawing."
+                    "Drawing mode must be active first — hold the left-hand four static gesture to toggle drawing mode on. "
+                    "Then use your right hand with your index finger extended and other fingers folded — like pointing. "
+                    "Move your hand to draw on screen; the stroke follows your index fingertip. Lift or change pose to stop drawing."
                 ),
                 gesture_key="one",
                 video_name="Drawing.mp4",
             ),
             GestureGuideCard(
                 title="Erasing",
-                action="Erase drawn strokes on screen (requires drawing mode)",
+                action="Erase drawn strokes on screen",
                 how_to=(
-                    "Drawing mode must be active first (left-hand four gesture). Switch to eraser mode from the drawing settings or toolbar. "
-                    "Then move your hand over drawn strokes to erase them. You can adjust eraser size in the drawing settings wheel."
+                    "Drawing mode must be active first — hold the left-hand four static gesture to toggle drawing mode on. "
+                    "Switch to eraser mode from the drawing settings wheel, then move your hand over drawn strokes to erase them. "
+                    "You can adjust eraser size in the drawing settings wheel."
                 ),
                 gesture_key="fist",
                 video_name="Erasing.mp4",
             ),
             GestureGuideCard(
                 title="Clear Canvas",
-                action="Remove all strokes from the drawing canvas at once (requires drawing mode)",
+                action="Remove all strokes from the drawing canvas at once",
                 how_to=(
-                    "Drawing mode must be active first (left-hand four gesture). Perform the clear canvas gesture to wipe the entire canvas. "
-                    "All drawn strokes are removed at once. This cannot be undone with the undo gesture."
+                    "Drawing mode must be active first — hold the left-hand four static gesture to toggle drawing mode on. "
+                    "Perform the clear canvas gesture to wipe the entire canvas. All drawn strokes are removed at once. "
+                    "This cannot be undone with the undo gesture."
                 ),
                 gesture_key="fist",
                 video_name="ClearCanvas.mp4",
             ),
             GestureGuideCard(
                 title="Undo Drawing",
-                action="Remove the last drawn stroke (requires drawing mode)",
+                action="Remove the last drawn stroke",
                 how_to=(
-                    "Drawing mode must be active first (left-hand four gesture). Perform the undo gesture to remove the most recent stroke. "
-                    "You can repeat this to continue undoing previous strokes one at a time."
+                    "Drawing mode must be active first — hold the left-hand four static gesture to toggle drawing mode on. "
+                    "Perform the undo gesture to remove the most recent stroke. You can repeat this to continue undoing "
+                    "previous strokes one at a time."
                 ),
                 gesture_key="one",
                 video_name="UndoDraw.mp4",
             ),
             GestureGuideCard(
                 title="Drawing Settings Wheel",
-                action="Open drawing options: pen color, size, brush type, and eraser (requires drawing mode)",
+                action="Open drawing options: pen color, size, brush type, and eraser",
                 how_to=(
-                    "Drawing mode must be active first (left-hand four gesture). Then make the gesture wheel pose with your right hand and hold it steady. "
-                    "The drawing settings wheel opens, letting you choose pen color, adjust brush size, switch brush type, or switch to eraser mode. "
+                    "Drawing mode must be active first — hold the left-hand four static gesture to toggle drawing mode on. "
+                    "Then make the gesture wheel pose with your right hand and hold it steady. The drawing settings wheel opens, "
+                    "letting you choose pen color, adjust brush size, switch brush type, or switch to eraser mode. "
                     "Move toward a slice and hold to select."
                 ),
                 gesture_key="wheel_pose",
@@ -2377,7 +2378,6 @@ class MainWindow(QMainWindow):
 
         sections_layout.addWidget(GestureGuideSection("Static Gestures", static_cards))
         sections_layout.addWidget(GestureGuideSection("Dynamic Gestures", dynamic_cards))
-        sections_layout.addWidget(GestureGuideSection("Drawing Gestures (activate drawing mode first)", drawing_cards))
         sections_layout.addStretch(1)
 
         scroll.setWidget(container)

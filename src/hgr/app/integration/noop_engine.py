@@ -130,6 +130,10 @@ class GestureWorker(QObject):
         self.spotify_router = SpotifyGestureRouter(static_hold_seconds=0.5, static_cooldown_seconds=1.5, dynamic_cooldown_seconds=1.5)
         self._spotify_control_text = self.spotify_controller.message
         self._spotify_info_text = "-"
+        self._spotify_vol_lock = threading.Lock()
+        self._spotify_vol_target: int | None = None
+        self._spotify_vol_last_sent: int | None = None
+        self._spotify_vol_worker: threading.Thread | None = None
 
         self.voice_listener = VoiceCommandListener(preferred_input_device=getattr(config, "preferred_microphone_name", None))
         self.voice_processor = VoiceCommandProcessor(
@@ -1619,11 +1623,7 @@ class GestureWorker(QObject):
                 new_app = max(0.0, min(1.0, float(update.level)))
                 if self._volume_app_process == "spotify":
                     vol_pct = int(round(new_app * 100))
-                    threading.Thread(
-                        target=self.spotify_controller.set_volume,
-                        args=(vol_pct,),
-                        daemon=True,
-                    ).start()
+                    self._queue_spotify_volume(vol_pct)
                     self._volume_app_level = new_app
                 else:
                     if self.volume_controller.set_app_audio_level(["chrome"], new_app):
@@ -2015,6 +2015,35 @@ class GestureWorker(QObject):
     def _read_system_mute(self) -> bool:
         muted = self.volume_controller.get_mute()
         return bool(muted) if muted is not None else False
+
+    def _queue_spotify_volume(self, volume_percent: int) -> None:
+        volume_percent = max(0, min(100, int(volume_percent)))
+        with self._spotify_vol_lock:
+            self._spotify_vol_target = volume_percent
+            worker = self._spotify_vol_worker
+            if worker is not None and worker.is_alive():
+                return
+            self._spotify_vol_worker = threading.Thread(
+                target=self._spotify_vol_worker_loop,
+                daemon=True,
+            )
+            self._spotify_vol_worker.start()
+
+    def _spotify_vol_worker_loop(self) -> None:
+        min_interval = 0.12
+        while True:
+            with self._spotify_vol_lock:
+                target = self._spotify_vol_target
+                last = self._spotify_vol_last_sent
+                if target is None or target == last:
+                    self._spotify_vol_worker = None
+                    return
+                self._spotify_vol_last_sent = target
+            try:
+                self.spotify_controller.set_volume(target)
+            except Exception:
+                pass
+            time.sleep(min_interval)
 
     def _update_runtime_status(self) -> None:
         if self._dictation_active:
