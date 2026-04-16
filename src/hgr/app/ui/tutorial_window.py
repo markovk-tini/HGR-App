@@ -1231,10 +1231,41 @@ class TutorialWindow(QDialog):
                 else:
                     self._voice_overlay_widget().show_result("Command not understood", command_text=heard_text, duration=1.9)
                 normalized = heard_text.lower()
-                if self._practice_steps[self._step_index].key == "voice_command" and "youtube" in normalized and "chrome" in normalized:
-                    self._complete_step(f"Voice command detected. Part {self._step_index + 1}/6 completed!")
+                if self._practice_steps[self._step_index].key == "voice_command" and (
+                    "youtube" in normalized or "you tube" in normalized
+                ):
+                    QTimer.singleShot(3000, self._check_youtube_opened)
+
+    def _check_youtube_opened(self) -> None:
+        if self._step_completed:
+            return
+        if self._practice_steps[self._step_index].key != "voice_command":
+            return
+        if self._chrome_controller.has_youtube_open():
+            self._complete_step(f"YouTube opened in Chrome! Part {self._step_index + 1}/6 completed!")
+        else:
+            QTimer.singleShot(2000, self._check_youtube_opened_final)
+
+    def _check_youtube_opened_final(self) -> None:
+        if self._step_completed:
+            return
+        if self._practice_steps[self._step_index].key != "voice_command":
+            return
+        if self._chrome_controller.has_youtube_open():
+            self._complete_step(f"YouTube opened in Chrome! Part {self._step_index + 1}/6 completed!")
+        else:
+            self._complete_step(f"Voice command detected. Part {self._step_index + 1}/6 completed!")
+
+    def _try_adopt_parent_voice_listener(self) -> None:
+        worker = self._resolve_parent_worker()
+        if worker is None:
+            return
+        parent_listener = getattr(worker, "voice_listener", None)
+        if parent_listener is not None and parent_listener is not self._voice_listener:
+            self._voice_listener = parent_listener
 
     def _start_voice_practice(self) -> None:
+        self._try_adopt_parent_voice_listener()
         if self._voice_listening:
             return
         self._voice_listening = True

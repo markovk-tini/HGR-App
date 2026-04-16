@@ -158,6 +158,57 @@ class VolumeController:
             return None
         return not current
 
+    def get_app_audio_info(self, process_names: list[str]) -> tuple[str | None, float | None]:
+        if platform.system() != "Windows":
+            return None, None
+        try:
+            self._ensure_com_ready()
+            from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+
+            sessions = AudioUtilities.GetAllSessions()
+            for session in sessions:
+                proc = session.Process
+                if proc is None:
+                    continue
+                proc_name = (proc.name() or "").lower()
+                for target in process_names:
+                    if target.lower() in proc_name:
+                        try:
+                            simple = session._ctl.QueryInterface(ISimpleAudioVolume)
+                            level = float(simple.GetMasterVolume())
+                            return target, level
+                        except Exception:
+                            return target, None
+        except Exception:
+            pass
+        return None, None
+
+    def set_app_audio_level(self, process_names: list[str], scalar: float) -> bool:
+        if platform.system() != "Windows":
+            return False
+        scalar = max(0.0, min(1.0, float(scalar)))
+        try:
+            self._ensure_com_ready()
+            from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+
+            sessions = AudioUtilities.GetAllSessions()
+            for session in sessions:
+                proc = session.Process
+                if proc is None:
+                    continue
+                proc_name = (proc.name() or "").lower()
+                for target in process_names:
+                    if target.lower() in proc_name:
+                        try:
+                            simple = session._ctl.QueryInterface(ISimpleAudioVolume)
+                            simple.SetMasterVolume(scalar, None)
+                            return True
+                        except Exception:
+                            return False
+        except Exception:
+            pass
+        return False
+
     def status(self) -> VolumeStatus:
         return VolumeStatus(
             available=self.available,

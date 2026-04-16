@@ -1327,7 +1327,7 @@ class _HandSelectorBase(QWidget):
         ny = (float(source_global.y()) - float(geo.top())) / float(max(geo.height() - 1, 1))
         nx = max(0.0, min(1.0, nx))
         ny = max(0.0, min(1.0, ny))
-        _sensitivity = 1.2
+        _sensitivity = 1.4
         nx = max(0.0, min(1.0, 0.5 + (nx - 0.5) * _sensitivity))
         ny = max(0.0, min(1.0, 0.5 + (ny - 0.5) * _sensitivity))
         pad_x = 18

@@ -75,6 +75,12 @@ class GestureWorker(QObject):
         self._volume_muted = self._read_system_mute()
         self._volume_overlay_visible = False
         self._mute_block_until = 0.0
+        self._volume_dual_active = False
+        self._volume_app_level: float | None = None
+        self._volume_app_label = ""
+        self._volume_bar_selected = "sys"
+        self._volume_init_palm_x: float | None = None
+        self._volume_app_check_until = 0.0
         self._chrome_active_cache = False
         self._chrome_active_cache_until = 0.0
         self._spotify_active_cache = False
@@ -1516,6 +1522,8 @@ class GestureWorker(QObject):
             self._volume_mode_active = False
             self._volume_status_text = "paused"
             self._volume_overlay_visible = False
+            self._volume_dual_active = False
+            self._volume_init_palm_x = None
             self._update_volume_overlay()
             return
         if self._drawing_mode_enabled:
@@ -1525,6 +1533,8 @@ class GestureWorker(QObject):
             self._volume_mode_active = False
             self._volume_status_text = "paused"
             self._volume_overlay_visible = False
+            self._volume_dual_active = False
+            self._volume_init_palm_x = None
             self._update_volume_overlay()
             return
         if hand_handedness == "Right" and result.prediction.dynamic_label in {"swipe_left", "swipe_right"}:
@@ -1557,6 +1567,32 @@ class GestureWorker(QObject):
             allow_mute_toggle=now >= self._mute_block_until,
         )
 
+        entering_overlay = self._volume_overlay_visible is False and update.overlay_visible
+        if entering_overlay:
+            refreshed = self.volume_controller.refresh_cache()
+            if refreshed.level_scalar is not None:
+                current_level = refreshed.level_scalar
+            refreshed_muted = self.volume_controller.get_mute()
+            if refreshed_muted is not None:
+                current_muted = bool(refreshed_muted)
+            palm_center = getattr(getattr(result.hand_reading, "palm", None), "center", None) if result.hand_reading is not None else None
+            self._volume_init_palm_x = float(palm_center[0]) if palm_center is not None else None
+            self._volume_bar_selected = "sys"
+            app_name, app_level = self.volume_controller.get_app_audio_info(["spotify", "chrome"])
+            self._volume_dual_active = app_name is not None
+            self._volume_app_label = app_name.capitalize() if app_name else ""
+            self._volume_app_level = app_level
+            self._volume_app_check_until = now + 1.0
+
+        if update.overlay_visible and self._volume_dual_active:
+            palm_center = getattr(getattr(result.hand_reading, "palm", None), "center", None) if result.hand_reading is not None else None
+            if palm_center is not None and self._volume_init_palm_x is not None:
+                dx = float(palm_center[0]) - self._volume_init_palm_x
+                if dx < -0.06:
+                    self._volume_bar_selected = "app"
+                elif dx > 0.06:
+                    self._volume_bar_selected = "sys"
+
         controller_error_message: str | None = None
         controller_error_status: str | None = None
         if update.trigger_mute_toggle:
@@ -1569,23 +1605,34 @@ class GestureWorker(QObject):
                 controller_error_status = "error"
 
         if update.active and update.level is not None:
-            if self.volume_controller.set_level(update.level):
-                current_level = update.level
-                read_back_level = self.volume_controller.get_level()
-                if read_back_level is not None:
-                    current_level = read_back_level
+            if self._volume_dual_active and self._volume_bar_selected == "app":
+                delta = update.level - (current_level or update.level)
+                new_app = max(0.0, min(1.0, (self._volume_app_level or 0.5) + delta))
+                process_names = ["spotify", "chrome"]
+                if self.volume_controller.set_app_audio_level(process_names, new_app):
+                    self._volume_app_level = new_app
+                else:
+                    controller_error_message = "app volume adjust failed"
+                    controller_error_status = "error"
             else:
-                controller_error_message = self.volume_controller.message or "set_level failed"
-                controller_error_status = "error"
+                if self.volume_controller.set_level(update.level):
+                    current_level = update.level
+                    read_back_level = self.volume_controller.get_level()
+                    if read_back_level is not None:
+                        current_level = read_back_level
+                else:
+                    controller_error_message = self.volume_controller.message or "set_level failed"
+                    controller_error_status = "error"
 
-        entering_overlay = self._volume_overlay_visible is False and update.overlay_visible
-        if entering_overlay:
-            refreshed = self.volume_controller.refresh_cache()
-            if refreshed.level_scalar is not None:
-                current_level = refreshed.level_scalar
-            refreshed_muted = self.volume_controller.get_mute()
-            if refreshed_muted is not None:
-                current_muted = bool(refreshed_muted)
+        if update.overlay_visible and self._volume_dual_active and now >= self._volume_app_check_until:
+            self._volume_app_check_until = now + 1.0
+            _, fresh_app = self.volume_controller.get_app_audio_info(["spotify", "chrome"])
+            if fresh_app is not None and not (update.active and self._volume_bar_selected == "app"):
+                self._volume_app_level = fresh_app
+
+        if not update.overlay_visible:
+            self._volume_dual_active = False
+            self._volume_init_palm_x = None
 
         self._volume_mode_active = update.active
         self._volume_level = current_level if current_level is not None else update.level
@@ -1917,12 +1964,24 @@ class GestureWorker(QObject):
         return update.consume_other_routes
 
     def _update_volume_overlay(self) -> None:
-        self.volume_overlay.set_level(
-            self._volume_level,
-            muted=self._volume_muted,
-            active=self._volume_mode_active,
-            message=self._volume_message if self._volume_mode_active else self._volume_status_text,
-        )
+        msg = self._volume_message if self._volume_mode_active else self._volume_status_text
+        if self._volume_dual_active:
+            self.volume_overlay.set_dual_level(
+                self._volume_app_level,
+                self._volume_level,
+                self._volume_app_label,
+                muted=self._volume_muted,
+                active=self._volume_mode_active,
+                selected_bar=self._volume_bar_selected,
+                message=msg,
+            )
+        else:
+            self.volume_overlay.set_level(
+                self._volume_level,
+                muted=self._volume_muted,
+                active=self._volume_mode_active,
+                message=msg,
+            )
         if self._volume_overlay_visible:
             if not self.volume_overlay.isVisible():
                 self.volume_overlay.show_overlay()
@@ -2756,7 +2815,7 @@ class GestureWorker(QObject):
         if mode == "save_prompt":
             self.voice_status_overlay.show_listening(
                 "Listening...",
-                hint_text="Where would you like to save? Say Auto or Default or Ignore for preset location",
+                hint_text=self._save_prompt_text,
             )
             self.command_detected.emit(self._save_prompt_text)
             self._emit_status("save prompt active")
@@ -2840,7 +2899,7 @@ class GestureWorker(QObject):
                     if self._voice_mode == "dictation":
                         self.voice_status_overlay.show_processing("Dictation active", command_text="")
                     elif self._voice_mode == "save_prompt":
-                        self.voice_status_overlay.show_listening(self._save_prompt_text)
+                        self.voice_status_overlay.show_listening("Listening...", hint_text=self._save_prompt_text)
                     else:
                         if self._selection_prompt_active and getattr(self.voice_status_overlay, "_mode", "") == "selection":
                             self.voice_status_overlay.update_selection_status("Listening...")

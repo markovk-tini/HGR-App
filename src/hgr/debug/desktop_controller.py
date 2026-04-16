@@ -1340,6 +1340,7 @@ try {
         normalized = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", normalized)
         normalized = re.sub(r"(?<=\d)(?=[A-Za-z])", " ", normalized)
         normalized = normalized.lower()
+        normalized = re.sub(r'\b(hgr)([a-z])', r'\1 \2', normalized)
         replacements = (
             ("dot ", ""),
             ("you tube", "youtube"),
@@ -2362,8 +2363,8 @@ try {
             if any(
                 term and (
                     normalized_query == term
-                    or normalized_query in term
-                    or term in normalized_query
+                    or bool(re.search(rf'\b{re.escape(term)}\b', normalized_query))
+                    or bool(re.search(rf'\b{re.escape(normalized_query)}\b', term))
                     or self._application_match_score(normalized_query, term) >= 0.84
                 )
                 for term in known_terms
@@ -2387,7 +2388,7 @@ try {
             matched = False
             for term in close_terms:
                 for haystack in haystacks:
-                    if term == haystack or term in haystack or haystack in term or self._application_match_score(term, haystack) >= 0.82:
+                    if term == haystack or bool(re.search(rf'\b{re.escape(term)}\b', haystack)) or bool(re.search(rf'\b{re.escape(haystack)}\b', term)) or self._application_match_score(term, haystack) >= 0.82:
                         matched = True
                         break
                 if matched:

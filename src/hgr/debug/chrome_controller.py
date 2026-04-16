@@ -395,6 +395,42 @@ class ChromeController:
             return []
         return handles
 
+    def has_youtube_open(self) -> bool:
+        if not self._available:
+            return False
+        chrome_pids = {
+            int(proc.info["pid"])
+            for proc in psutil.process_iter(["pid", "name"])
+            if "chrome" in (proc.info.get("name") or "").lower()
+        }
+        if not chrome_pids:
+            return False
+        user32 = ctypes.windll.user32
+        found = [False]
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _enum_cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in chrome_pids:
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if "youtube" in buf.value.lower():
+                found[0] = True
+            return True
+
+        try:
+            user32.EnumWindows(_enum_cb, 0)
+        except Exception:
+            return False
+        return found[0]
+
     def _wait_for_window_handles(self, timeout_seconds: float = 4.0) -> list[int]:
         deadline = time.monotonic() + timeout_seconds
         handles = self._chrome_window_handles()
