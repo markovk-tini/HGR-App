@@ -29,6 +29,7 @@ from ...gesture.recognition.engine import GestureRecognitionEngine
 from ...gesture.rendering.overlay import draw_hand_overlay
 from ...gesture.ui.test_window import SpotifyWheelOverlay
 from ...gesture.ui.voice_status_overlay import VoiceStatusOverlay
+from ...live_dictation import DictationController, DictationState
 from ...voice.command_processor import VoiceCommandContext, VoiceCommandProcessor
 from ...voice.dictation import DictationProcessor
 from ..camera.camera_utils import open_camera_by_index, open_preferred_or_first_available
@@ -160,6 +161,7 @@ class GestureWorker(QObject):
         self._voice_listening = False
         self._dictation_active = False
         self._dictation_backend = "idle"
+        self._live_dictation: DictationController | None = None
         self._voice_mode = "ready"
         self._voice_display_text = "-"
         self._dictation_toggle_release_required = False
@@ -2814,19 +2816,15 @@ class GestureWorker(QObject):
     def _start_dictation_capture(self) -> None:
         if self._voice_listening or self._dictation_active:
             return
-        if not self.text_input_controller.available:
-            self._voice_control_text = self.text_input_controller.message
-            return
-        # Mark active and show the compact mic indicator immediately so the
-        # user always sees their gesture was recognized. Win+H and any window
-        # focus work runs on a background thread so the engine frame loop
-        # doesn't stall while Windows is being asked to surface Notepad or
-        # switch focus.
+        # Always mark the state machine active and show the compact mic
+        # overlay immediately so the user sees their gesture was
+        # recognized. The actual ASR backend (sherpa-onnx or Windows
+        # System.Speech) boots on its own worker thread.
         self._dictation_active = True
         self._dictation_toggle_release_required = True
         self._dictation_release_candidate_since = 0.0
         self._dictation_stop_rearm_at = time.monotonic() + 2.5
-        self._dictation_backend = "windows"
+        self._dictation_backend = "live"
         self._voice_mode = "dictation"
         self._voice_control_text = "dictation active"
         try:
@@ -2835,13 +2833,39 @@ class GestureWorker(QObject):
             pass
         self._emit_status("dictation active")
 
-        def _fire_dictation() -> None:
+        if self._live_dictation is None:
+            self._live_dictation = DictationController(observer=self._build_dictation_observer())
+
+        def _boot_dictation() -> None:
+            controller = self._live_dictation
+            if controller is None:
+                return
             try:
-                self.text_input_controller.start_windows_dictation()
+                controller.start()
             except Exception:
                 pass
 
-        threading.Thread(target=_fire_dictation, daemon=True).start()
+        threading.Thread(target=_boot_dictation, daemon=True).start()
+
+    def _build_dictation_observer(self):
+        engine = self
+
+        class _Observer:
+            def on_state_changed(self_, state: DictationState, message: str | None) -> None:
+                if state == DictationState.ERROR and message:
+                    engine._voice_control_text = f"dictation error: {message}"
+                    engine._emit_status(engine._voice_control_text)
+
+            def on_debug(self_, msg: str) -> None:
+                # Kept light: dictation commits are frequent, so don't
+                # spam the status label. Uncomment for live debugging.
+                # engine._voice_control_text = msg
+                pass
+
+            def on_typed(self_, text: str) -> None:
+                pass
+
+        return _Observer()
 
     def _stop_dictation_capture(self) -> None:
         if not self._dictation_active:
@@ -2862,7 +2886,14 @@ class GestureWorker(QObject):
         except Exception:
             pass
 
+        controller = self._live_dictation
+
         def _fire_stop() -> None:
+            if controller is not None:
+                try:
+                    controller.stop()
+                except Exception:
+                    pass
             try:
                 self.text_input_controller.stop_windows_dictation()
             except Exception:
@@ -3374,6 +3405,12 @@ class GestureWorker(QObject):
                 self.text_input_controller.stop_windows_dictation()
             except Exception:
                 pass
+            controller = self._live_dictation
+            if controller is not None:
+                try:
+                    controller.stop()
+                except Exception:
+                    pass
         self._reset_voice_state()
         if was_active:
             self._voice_control_text = "voice canceled"
