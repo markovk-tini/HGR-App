@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import platform
+import subprocess
 import time
 from ctypes import wintypes
 
@@ -75,6 +76,16 @@ class TextInputController:
                 self._user32.IsWindow.restype = wintypes.BOOL
                 self._user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
                 self._user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+                self._user32.IsWindowVisible.argtypes = [wintypes.HWND]
+                self._user32.IsWindowVisible.restype = wintypes.BOOL
+                self._user32.IsIconic.argtypes = [wintypes.HWND]
+                self._user32.IsIconic.restype = wintypes.BOOL
+                self._user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+                self._user32.GetClassNameW.restype = ctypes.c_int
+                self._user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+                self._user32.GetWindowTextW.restype = ctypes.c_int
+                self._user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+                self._user32.EnumWindows.restype = wintypes.BOOL
                 self._user32.OpenClipboard.argtypes = [wintypes.HWND]
                 self._user32.OpenClipboard.restype = wintypes.BOOL
                 self._user32.CloseClipboard.argtypes = []
@@ -243,34 +254,169 @@ class TextInputController:
         if not self._available or self._user32 is None:
             self._message = "windows dictation unavailable on this platform"
             return False
-        # Give the user a short grace period so a click into a text field
-        # just before/after the gesture can register, and so transient own-window
-        # overlays are not mistaken for "no target clicked".
-        captured = self.capture_target_window()
-        if not captured:
-            deadline = time.monotonic() + 0.75
-            while time.monotonic() < deadline:
-                time.sleep(0.05)
-                if self.capture_target_window():
-                    captured = True
-                    break
-        target_hwnd = int(self._target_hwnd or self._last_external_hwnd or 0)
-        # Best-effort focus restore — if we have any remembered external window,
-        # bring it forward. If not, fall back to sending Win+H regardless so
-        # Windows dictation attaches to whatever the user currently has focused.
-        if target_hwnd > 0:
-            self._restore_target_window()
-            time.sleep(0.15)
-        else:
-            foreground = self._foreground_window()
-            if foreground > 0 and self._is_own_window(foreground):
-                # Our app is foreground and we have no remembered text field.
-                self._message = "click into a text field before starting dictation"
+
+        # 1) If an external window is already foreground, use it directly.
+        self.remember_active_window()
+        foreground = self._foreground_window()
+        if foreground > 0 and not self._is_own_window(foreground):
+            self._target_hwnd = foreground
+            self._last_external_hwnd = foreground
+            time.sleep(0.05)
+            if not self.toggle_windows_dictation():
                 return False
+            self._message = "dictation active at the current cursor"
+            return True
+
+        # 2) Poll briefly — the user may be switching focus, or the HGR overlay
+        # may momentarily be foreground.
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            self.remember_active_window()
+            fg = self._foreground_window()
+            if fg > 0 and not self._is_own_window(fg):
+                self._target_hwnd = fg
+                self._last_external_hwnd = fg
+                if not self.toggle_windows_dictation():
+                    return False
+                self._message = "dictation active at the current cursor"
+                return True
+
+        # 3) Try to restore a previously remembered external window.
+        target_hwnd = int(self._last_external_hwnd or self._target_hwnd or 0)
+        if target_hwnd > 0:
+            try:
+                if not bool(self._user32.IsWindow(wintypes.HWND(target_hwnd))):
+                    target_hwnd = 0
+            except Exception:
+                target_hwnd = 0
+        if target_hwnd > 0:
+            self._target_hwnd = target_hwnd
+            if self._restore_target_window():
+                time.sleep(0.15)
+                if not self.toggle_windows_dictation():
+                    return False
+                self._message = "dictation active at the current cursor"
+                return True
+
+        # 4) Look for an already-open external text-editor window.
+        existing = self._find_external_text_window()
+        if existing > 0:
+            self._target_hwnd = existing
+            self._last_external_hwnd = existing
+            if self._restore_target_window():
+                time.sleep(0.15)
+                if not self.toggle_windows_dictation():
+                    return False
+                self._message = "dictation active at the current cursor"
+                return True
+
+        # 5) Nothing clicked anywhere — launch a fresh Notepad and dictate there.
+        if not self._launch_notepad_for_dictation(timeout=4.0):
+            self._message = "could not open notepad for dictation"
+            return False
+        time.sleep(0.25)
         if not self.toggle_windows_dictation():
             return False
-        self._message = "dictation active at the current cursor"
+        self._message = "dictation active in Notepad"
         return True
+
+    def _find_external_text_window(self) -> int:
+        if not self._available or self._user32 is None:
+            return 0
+        preferred_classes = {
+            "notepad",
+            "edit",
+            "richedit",
+            "richedit20w",
+            "richeditd2dpt",
+            "richedit50w",
+            "opusapp",  # Word
+            "wordpadclass",
+            "chrome_widgetwin_1",  # Chromium-based (Chrome, Edge, VS Code)
+            "mozillawindowclass",
+            "applicationframewindow",  # Modern Win11 Notepad wrapper
+        }
+        found: list[tuple[int, int]] = []  # (priority, hwnd)
+
+        EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _callback(hwnd, _lparam):
+            try:
+                if not bool(self._user32.IsWindowVisible(wintypes.HWND(hwnd))):
+                    return True
+                if bool(self._user32.IsIconic(wintypes.HWND(hwnd))):
+                    return True
+                if self._is_own_window(int(hwnd)):
+                    return True
+                class_name = self._window_class_name(int(hwnd)).lower()
+                title = self._window_text(int(hwnd))
+                if not title and class_name not in preferred_classes:
+                    return True
+                priority = 1 if class_name in preferred_classes else 3
+                if class_name == "notepad" or "notepad" in title.lower():
+                    priority = 0
+                found.append((priority, int(hwnd)))
+            except Exception:
+                pass
+            return True
+
+        try:
+            self._user32.EnumWindows(EnumProc(_callback), 0)
+        except Exception:
+            return 0
+        if not found:
+            return 0
+        found.sort(key=lambda item: item[0])
+        return found[0][1]
+
+    def _window_class_name(self, hwnd: int) -> str:
+        if not self._available or self._user32 is None or hwnd <= 0:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            self._user32.GetClassNameW(wintypes.HWND(hwnd), buf, 256)
+            return str(buf.value or "")
+        except Exception:
+            return ""
+
+    def _window_text(self, hwnd: int) -> str:
+        if not self._available or self._user32 is None or hwnd <= 0:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(512)
+            self._user32.GetWindowTextW(wintypes.HWND(hwnd), buf, 512)
+            return str(buf.value or "")
+        except Exception:
+            return ""
+
+    def _launch_notepad_for_dictation(self, *, timeout: float = 4.0) -> bool:
+        launched = False
+        for cmd in (["notepad.exe"], ["cmd", "/c", "start", "", "notepad.exe"]):
+            try:
+                subprocess.Popen(cmd, shell=False)
+                launched = True
+                break
+            except Exception:
+                continue
+        if not launched:
+            return False
+        deadline = time.monotonic() + float(timeout)
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            hwnd = self._foreground_window()
+            if hwnd > 0 and not self._is_own_window(hwnd):
+                self._target_hwnd = hwnd
+                self._last_external_hwnd = hwnd
+                return True
+            candidate = self._find_external_text_window()
+            if candidate > 0:
+                self._target_hwnd = candidate
+                self._last_external_hwnd = candidate
+                self._restore_target_window()
+                time.sleep(0.15)
+                return True
+        return False
 
     def stop_windows_dictation(self) -> bool:
         if not self._available or self._user32 is None:
