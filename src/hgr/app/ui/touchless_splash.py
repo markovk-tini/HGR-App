@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import platform
+
 from PySide6.QtCore import (
     QEasingCurve,
-    QPropertyAnimation,
     Qt,
     QTimer,
     QVariantAnimation,
 )
 from PySide6.QtGui import (
+    QBitmap,
     QColor,
     QFont,
     QFontDatabase,
@@ -23,13 +25,10 @@ class TouchlessSplash(QWidget):
     _LETTER_STAGGER_MS = 140
     _LETTER_DURATION_MS = 560
     _WAVE_OFFSET_PX = 24
-    _SIDE_PADDING = 80
-    _VERTICAL_PADDING = 90
+    _SIDE_PADDING = 16
+    _VERTICAL_PADDING = 12
 
     def __init__(self, accent_color: str, parent: QWidget | None = None) -> None:
-        # Qt.SplashScreen adds a subtle DWM frame/shadow on Windows. Drop it
-        # and use a plain frameless tool window so only our painted letters
-        # show up on screen.
         super().__init__(
             parent,
             Qt.FramelessWindowHint
@@ -37,9 +36,6 @@ class TouchlessSplash(QWidget):
             | Qt.WindowStaysOnTopHint
             | Qt.NoDropShadowWindowHint,
         )
-        # Render the letters straight to a translucent window -- no child
-        # widgets, no layouts, no QGraphicsEffects. That way nothing can draw
-        # a frame or faint outline around the word.
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -50,8 +46,6 @@ class TouchlessSplash(QWidget):
         self._font = self._pick_display_font()
         self._metrics = QFontMetrics(self._font)
 
-        # Pre-compute each letter's horizontal offset inside the window so
-        # paintEvent is cheap and the baseline never jitters.
         self._letter_positions: list[int] = []
         cursor_x = self._SIDE_PADDING
         extra_spacing = int(round(self._metrics.averageCharWidth() * 0.08))
@@ -59,22 +53,25 @@ class TouchlessSplash(QWidget):
             self._letter_positions.append(cursor_x)
             cursor_x += self._metrics.horizontalAdvance(char) + extra_spacing
         total_width = cursor_x + self._SIDE_PADDING
-        total_height = self._metrics.height() + self._VERTICAL_PADDING * 2
+        total_height = (
+            self._metrics.height()
+            + self._WAVE_OFFSET_PX
+            + self._VERTICAL_PADDING * 2
+        )
 
         self._letter_opacities: list[float] = [0.0] * len(self._WORD)
         self._letter_offsets: list[float] = [float(self._WAVE_OFFSET_PX)] * len(self._WORD)
 
         self._finished = False
         self._animations: list[QVariantAnimation] = []
+        self._dwm_tweaked = False
 
         self.resize(total_width, total_height)
         self._center_on_screen()
+        self._apply_text_shape_mask()
 
     @staticmethod
     def _pick_display_font() -> QFont:
-        # Humanist / softly-curved faces that ship with Windows. Corbel and
-        # Candara have rounded terminals (no sharp corners), and we tilt them
-        # with italic for the slight slant the user asked for.
         preferred = (
             "Corbel",
             "Candara",
@@ -101,6 +98,71 @@ class TouchlessSplash(QWidget):
             geom.center().x() - self.width() // 2,
             geom.center().y() - self.height() // 2,
         )
+
+    def _apply_text_shape_mask(self) -> None:
+        # Build a bitmap mask from the letter glyphs so the window region only
+        # contains the text shape. Anything outside the glyphs (including any
+        # stray compositor fill that would read as a border) is clipped out.
+        bitmap = QBitmap(self.size())
+        bitmap.clear()
+        painter = QPainter(bitmap)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setFont(self._font)
+        painter.setPen(Qt.color1)
+        baseline_y = (
+            self.height() + self._metrics.ascent() - self._metrics.descent()
+        ) // 2
+        # Draw each letter at every possible wave offset so the mask covers
+        # the full vertical travel of the animation. Slight horizontal
+        # dilation keeps anti-aliased edges inside the mask.
+        travel_steps = 6
+        for index, char in enumerate(self._WORD):
+            x = self._letter_positions[index]
+            for step in range(travel_steps + 1):
+                frac = step / travel_steps
+                offset_y = int(round(self._WAVE_OFFSET_PX * (1.0 - frac)))
+                for dx in (-2, -1, 0, 1, 2):
+                    painter.drawText(x + dx, baseline_y + offset_y, char)
+        painter.end()
+        self.setMask(bitmap)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._dwm_tweaked and platform.system() == "Windows":
+            self._dwm_tweaked = True
+            self._apply_windows_dwm_tweaks()
+
+    def _apply_windows_dwm_tweaks(self) -> None:
+        # Strip out the Windows 11 rounded-corner preference and disable DWM
+        # non-client rendering for this HWND. Either of those can otherwise
+        # produce a faint 1-px frame around a translucent tool window.
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            dwmapi = ctypes.windll.dwmapi
+
+            DWMWA_NCRENDERING_POLICY = 2
+            DWMNCRP_DISABLED = 1
+            policy = ctypes.c_int(DWMNCRP_DISABLED)
+            dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_NCRENDERING_POLICY,
+                ctypes.byref(policy),
+                ctypes.sizeof(policy),
+            )
+
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            DWMWCP_DONOTROUND = 1
+            corner = ctypes.c_int(DWMWCP_DONOTROUND)
+            dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                ctypes.byref(corner),
+                ctypes.sizeof(corner),
+            )
+        except Exception:
+            pass
 
     def start_animation(self) -> None:
         for index in range(len(self._WORD)):
@@ -149,9 +211,6 @@ class TouchlessSplash(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        # Force the window's backing store to fully transparent pixels before
-        # we draw the letters. Without this, some Windows compositor paths
-        # leave a faint rectangular fill behind that reads as a border.
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(self.rect(), Qt.transparent)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
@@ -160,7 +219,9 @@ class TouchlessSplash(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         painter.setFont(self._font)
 
-        baseline_y = (self.height() + self._metrics.ascent() - self._metrics.descent()) // 2
+        baseline_y = (
+            self.height() + self._metrics.ascent() - self._metrics.descent()
+        ) // 2
 
         for index, char in enumerate(self._WORD):
             opacity = max(0.0, min(1.0, self._letter_opacities[index]))
@@ -180,14 +241,13 @@ class TouchlessSplash(QWidget):
 
     @staticmethod
     def run_with(callback_build_window, accent_color: str, app) -> QWidget:
-        """Show splash, play the "Touchless" reveal, then build AND fade in
-        the main window before the splash disappears. The fade-in hides the
-        hollow window frame that Windows would otherwise show for the first
-        few paint cycles of the main window."""
+        """Show splash, play the reveal, pre-render the main window
+        off-screen while the splash is visible, then close the splash and
+        show the main window. Pre-rendering off-screen means the main window
+        never flashes a hollow frame on its first paint."""
         splash = TouchlessSplash(accent_color)
         splash.show()
         splash.raise_()
-        # Paint the splash before animations start.
         for _ in range(4):
             app.processEvents()
 
@@ -195,26 +255,22 @@ class TouchlessSplash(QWidget):
         while not splash.is_finished():
             app.processEvents()
 
-        # Build the main window behind the finished splash. Start fully
-        # transparent so its initial unpainted frame never flashes.
+        # Build the main window but render it off-screen so its first paint
+        # cycle happens without ever appearing to the user. When we then
+        # call show() after closing the splash, the window already has its
+        # content ready and doesn't flash any intermediate frame.
         window = callback_build_window()
-        window.setWindowOpacity(0.0)
+        window.setAttribute(Qt.WA_DontShowOnScreen, True)
         window.show()
-        window.raise_()
-        # Let the main window go through its first paint cycle while still
-        # invisible. Only then do we fade it in.
         for _ in range(6):
             app.processEvents()
+        window.hide()
+        window.setAttribute(Qt.WA_DontShowOnScreen, False)
 
-        fade_in = QPropertyAnimation(window, b"windowOpacity", window)
-        fade_in.setStartValue(0.0)
-        fade_in.setEndValue(1.0)
-        fade_in.setDuration(260)
-        fade_in.setEasingCurve(QEasingCurve.OutCubic)
-        fade_in.start(QPropertyAnimation.DeleteWhenStopped)
-
-        # Close the splash immediately -- the main window is already painted
-        # (but still opacity 0), so as it fades up the splash disappears in
-        # sync with no blank frame in between.
         splash.close()
+        for _ in range(2):
+            app.processEvents()
+
+        window.show()
+        window.raise_()
         return window
