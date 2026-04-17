@@ -2,87 +2,88 @@ from __future__ import annotations
 
 from PySide6.QtCore import (
     QEasingCurve,
-    QParallelAnimationGroup,
-    QPoint,
     QPropertyAnimation,
-    QSequentialAnimationGroup,
     Qt,
     QTimer,
+    QVariantAnimation,
 )
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication
-from PySide6.QtWidgets import (
-    QGraphicsOpacityEffect,
-    QHBoxLayout,
-    QLabel,
-    QWidget,
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QFontMetrics,
+    QGuiApplication,
+    QPainter,
 )
+from PySide6.QtWidgets import QWidget
 
 
 class TouchlessSplash(QWidget):
     _WORD = "Touchless"
-    _LETTER_STAGGER_MS = 130
-    _LETTER_DURATION_MS = 520
-    _WAVE_OFFSET_PX = 22
+    _LETTER_STAGGER_MS = 140
+    _LETTER_DURATION_MS = 560
+    _WAVE_OFFSET_PX = 24
+    _SIDE_PADDING = 80
+    _VERTICAL_PADDING = 90
 
     def __init__(self, accent_color: str, parent: QWidget | None = None) -> None:
         super().__init__(
             parent,
-            Qt.FramelessWindowHint | Qt.SplashScreen | Qt.WindowStaysOnTopHint,
+            Qt.FramelessWindowHint
+            | Qt.SplashScreen
+            | Qt.WindowStaysOnTopHint
+            | Qt.Tool,
         )
+        # Render the letters straight to a translucent window -- no child
+        # widgets, no layouts, no QGraphicsEffects. That way nothing can draw
+        # a frame or faint outline around the word.
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        # Wipe any inherited frame/background so only the letters are visible.
-        self.setStyleSheet("QWidget { background: transparent; border: none; }")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        self._accent_color = accent_color
-        self._labels: list[QLabel] = []
-        self._wave_animations: list[QPropertyAnimation] = []
-        self._fade_animations: list[QPropertyAnimation] = []
-        self._effects: list[QGraphicsOpacityEffect] = []
-        self._animation_group: QSequentialAnimationGroup | None = None
-        self._finished = False
+        self._accent_color = QColor(accent_color)
+        self._font = self._pick_display_font()
+        self._metrics = QFontMetrics(self._font)
 
-        font = self._pick_display_font()
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(60, 40, 60, 40)
-        layout.setSpacing(0)
-
+        # Pre-compute each letter's horizontal offset inside the window so
+        # paintEvent is cheap and the baseline never jitters.
+        self._letter_positions: list[int] = []
+        cursor_x = self._SIDE_PADDING
+        extra_spacing = int(round(self._metrics.averageCharWidth() * 0.08))
         for char in self._WORD:
-            label = QLabel(char, self)
-            label.setFont(font)
-            label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet(
-                f"color: {accent_color}; background: transparent; border: none;"
-            )
-            effect = QGraphicsOpacityEffect(label)
-            effect.setOpacity(0.0)
-            label.setGraphicsEffect(effect)
-            layout.addWidget(label)
-            self._labels.append(label)
-            self._effects.append(effect)
+            self._letter_positions.append(cursor_x)
+            cursor_x += self._metrics.horizontalAdvance(char) + extra_spacing
+        total_width = cursor_x + self._SIDE_PADDING
+        total_height = self._metrics.height() + self._VERTICAL_PADDING * 2
 
-        self.adjustSize()
+        self._letter_opacities: list[float] = [0.0] * len(self._WORD)
+        self._letter_offsets: list[float] = [float(self._WAVE_OFFSET_PX)] * len(self._WORD)
+
+        self._finished = False
+        self._animations: list[QVariantAnimation] = []
+
+        self.resize(total_width, total_height)
         self._center_on_screen()
 
     @staticmethod
     def _pick_display_font() -> QFont:
-        # Walk a short list of nicer display faces and use the first one the
-        # system actually has. Segoe UI Variable Display ships with Windows 11
-        # and looks noticeably cleaner at large sizes than the default.
+        # Favor geometric / slick display faces that ship with Windows. We
+        # walk the list and use the first one the user actually has installed.
         preferred = (
+            "Century Gothic",
+            "Candara",
+            "Corbel",
             "Segoe UI Variable Display",
             "Segoe UI Semibold",
             "Segoe UI",
-            "Calibri",
-            "Arial",
         )
         available = set(QFontDatabase.families())
         family = next((name for name in preferred if name in available), "Segoe UI")
         font = QFont(family)
-        font.setPointSize(86)
-        font.setWeight(QFont.DemiBold)
-        font.setLetterSpacing(QFont.PercentageSpacing, 104)
+        font.setPointSize(96)
+        font.setWeight(QFont.Bold)
+        font.setLetterSpacing(QFont.PercentageSpacing, 112)
         font.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
         return font
 
@@ -97,40 +98,40 @@ class TouchlessSplash(QWidget):
         )
 
     def start_animation(self) -> None:
-        group = QParallelAnimationGroup(self)
-        for index, (label, effect) in enumerate(zip(self._labels, self._effects)):
+        for index in range(len(self._WORD)):
             delay = index * self._LETTER_STAGGER_MS
 
-            fade = QPropertyAnimation(effect, b"opacity", self)
-            fade.setStartValue(0.0)
-            fade.setEndValue(1.0)
-            fade.setDuration(self._LETTER_DURATION_MS)
-            fade.setEasingCurve(QEasingCurve.OutCubic)
+            opacity_anim = QVariantAnimation(self)
+            opacity_anim.setDuration(self._LETTER_DURATION_MS)
+            opacity_anim.setStartValue(0.0)
+            opacity_anim.setEndValue(1.0)
+            opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
+            opacity_anim.valueChanged.connect(
+                lambda value, i=index: self._apply_opacity(i, value)
+            )
 
-            start_pos = label.pos() + QPoint(0, self._WAVE_OFFSET_PX)
-            end_pos = label.pos()
-            label.move(start_pos)
-            slide = QPropertyAnimation(label, b"pos", self)
-            slide.setStartValue(start_pos)
-            slide.setEndValue(end_pos)
-            slide.setDuration(self._LETTER_DURATION_MS)
-            slide.setEasingCurve(QEasingCurve.OutBack)
+            offset_anim = QVariantAnimation(self)
+            offset_anim.setDuration(self._LETTER_DURATION_MS)
+            offset_anim.setStartValue(float(self._WAVE_OFFSET_PX))
+            offset_anim.setEndValue(0.0)
+            offset_anim.setEasingCurve(QEasingCurve.OutBack)
+            offset_anim.valueChanged.connect(
+                lambda value, i=index: self._apply_offset(i, value)
+            )
 
-            letter_seq = QSequentialAnimationGroup(self)
-            if delay > 0:
-                letter_seq.addPause(delay)
-            letter_parallel = QParallelAnimationGroup(self)
-            letter_parallel.addAnimation(fade)
-            letter_parallel.addAnimation(slide)
-            letter_seq.addAnimation(letter_parallel)
-            group.addAnimation(letter_seq)
+            QTimer.singleShot(delay, opacity_anim.start)
+            QTimer.singleShot(delay, offset_anim.start)
+            self._animations.extend([opacity_anim, offset_anim])
 
-            self._fade_animations.append(fade)
-            self._wave_animations.append(slide)
+        QTimer.singleShot(self.total_animation_ms(), self._on_finished)
 
-        group.finished.connect(self._on_finished)
-        self._animation_group = group
-        group.start()
+    def _apply_opacity(self, index: int, value) -> None:
+        self._letter_opacities[index] = float(value)
+        self.update()
+
+    def _apply_offset(self, index: int, value) -> None:
+        self._letter_offsets[index] = float(value)
+        self.update()
 
     def _on_finished(self) -> None:
         self._finished = True
@@ -141,35 +142,68 @@ class TouchlessSplash(QWidget):
     def total_animation_ms(self) -> int:
         return (len(self._WORD) - 1) * self._LETTER_STAGGER_MS + self._LETTER_DURATION_MS
 
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setFont(self._font)
+
+        baseline_y = (self.height() + self._metrics.ascent() - self._metrics.descent()) // 2
+
+        for index, char in enumerate(self._WORD):
+            opacity = max(0.0, min(1.0, self._letter_opacities[index]))
+            if opacity <= 0.001:
+                continue
+            offset_y = int(round(self._letter_offsets[index]))
+            color = QColor(self._accent_color)
+            color.setAlphaF(opacity)
+            painter.setPen(color)
+            painter.drawText(
+                self._letter_positions[index],
+                baseline_y + offset_y,
+                char,
+            )
+
+        painter.end()
+
     @staticmethod
     def run_with(callback_build_window, accent_color: str, app) -> QWidget:
-        """Show splash, play the full "Touchless" reveal, then build AND show
-        the main window before the splash disappears. That way the user sees
-        the completed word right up until the window appears, with no gap."""
+        """Show splash, play the "Touchless" reveal, then build AND fade in
+        the main window before the splash disappears. The fade-in hides the
+        hollow window frame that Windows would otherwise show for the first
+        few paint cycles of the main window."""
         splash = TouchlessSplash(accent_color)
         splash.show()
         splash.raise_()
-        # Paint the splash before we start timing the animation. Without
-        # this, QPropertyAnimation starts advancing while the window is still
-        # blank.
+        # Paint the splash before animations start.
         for _ in range(4):
             app.processEvents()
 
         splash.start_animation()
-        # Don't starve the animation frames -- do not build the window yet.
         while not splash.is_finished():
             app.processEvents()
 
-        # Word is fully on screen. Build the main window behind the splash.
+        # Build the main window behind the finished splash. Start fully
+        # transparent so its initial unpainted frame never flashes.
         window = callback_build_window()
-        # Show the window while the splash is still visibly on top, then pump
-        # the event loop until the main window has actually painted at least
-        # once. Only THEN remove the splash so the two don't leave a blank
-        # frame gap between them.
+        window.setWindowOpacity(0.0)
         window.show()
         window.raise_()
+        # Let the main window go through its first paint cycle while still
+        # invisible. Only then do we fade it in.
         for _ in range(6):
             app.processEvents()
 
+        fade_in = QPropertyAnimation(window, b"windowOpacity", window)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setDuration(260)
+        fade_in.setEasingCurve(QEasingCurve.OutCubic)
+        fade_in.start(QPropertyAnimation.DeleteWhenStopped)
+
+        # Close the splash immediately -- the main window is already painted
+        # (but still opacity 0), so as it fades up the splash disappears in
+        # sync with no blank frame in between.
         splash.close()
         return window
