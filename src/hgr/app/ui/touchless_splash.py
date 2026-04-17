@@ -135,34 +135,31 @@ class TouchlessSplash(QWidget):
 
     @staticmethod
     def run_with(callback_build_window, accent_color: str, app) -> QWidget:
-        """Show splash, run its animation, then build the main window and
-        close the splash once both are ready. Returns the created window."""
+        """Show splash, play the full "Touchless" reveal, THEN build and
+        return the main window. We keep the animation and the window build
+        strictly sequential because MainWindow construction blocks the event
+        loop for long enough to prevent the splash from ever painting if the
+        two overlap."""
         splash = TouchlessSplash(accent_color)
         splash.show()
         splash.raise_()
-        splash.start_animation()
-
-        # Pump events until the intro animation has played out, regardless of
-        # whether the main window construction is faster or slower than the
-        # animation -- we want the full "Touchless" reveal every launch.
-        animation_total = splash.total_animation_ms()
-        window_ready: list[QWidget | None] = [None]
-
-        def _build() -> None:
-            window_ready[0] = callback_build_window()
-
-        # Build the window in the background between animation frames so we
-        # don't make the user wait twice. QTimer.singleShot yields to the
-        # event loop so the splash paints first.
-        QTimer.singleShot(0, _build)
-
-        # Spin the event loop until both the animation has finished AND the
-        # window has been constructed.
-        deadline_timer = QTimer()
-        deadline_timer.setSingleShot(True)
-        deadline_timer.start(animation_total)
-        while (not splash.is_finished()) or window_ready[0] is None:
+        # Force the splash to actually paint before we start timing the
+        # animation. Without this, the window exists but is still blank when
+        # QPropertyAnimation starts advancing.
+        for _ in range(4):
             app.processEvents()
 
-        splash.fade_out_and_close()
-        return window_ready[0]  # type: ignore[return-value]
+        splash.start_animation()
+        # Spin the event loop until the animation finishes. No window build
+        # happens during this phase, so the animation frames are never
+        # starved.
+        while not splash.is_finished():
+            app.processEvents()
+
+        # Full word is now on screen. Build the main window (this can block
+        # for a couple of seconds; the finished "Touchless" stays visible on
+        # top until we close it).
+        window = callback_build_window()
+
+        splash.close()
+        return window
