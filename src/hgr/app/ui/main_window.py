@@ -2581,11 +2581,24 @@ class MainWindow(QMainWindow):
             "Choose the default folders used for drawings, screenshots, screen recordings, and clips. Each output type keeps its own saved location.",
         )
 
+        scroll = QScrollArea()
+        scroll.setObjectName("saveLocationsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("saveLocationsScrollContent")
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(2, 2, 2, 2)
+        scroll_layout.setSpacing(16)
+
         box = QFrame()
         box.setObjectName("innerCard")
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(16, 16, 16, 16)
-        box_layout.setSpacing(12)
+        box_layout.setContentsMargins(18, 18, 18, 18)
+        box_layout.setSpacing(14)
 
         note = QLabel(
             "Type a folder path and press Save, or use Browse to choose a folder. "
@@ -2595,16 +2608,12 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         box_layout.addWidget(note)
 
-        locations_column = QVBoxLayout()
-        locations_column.setContentsMargins(0, 0, 0, 0)
-        locations_column.setSpacing(14)
-
         for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
             row_frame = QFrame()
             row_frame.setObjectName("saveLocationRow")
             row_layout = QVBoxLayout(row_frame)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(6)
+            row_layout.setContentsMargins(0, 4, 0, 4)
+            row_layout.setSpacing(8)
 
             label = QLabel(SAVE_LOCATION_LABELS.get(output_kind, output_kind.title()))
             label.setObjectName("saveLocationLabel")
@@ -2614,33 +2623,36 @@ class MainWindow(QMainWindow):
             path_edit.setObjectName(f"{output_kind}SaveLocationEdit")
             path_edit.setProperty("saveLocationPath", True)
             path_edit.setClearButtonEnabled(True)
-            path_edit.setMinimumWidth(240)
+            path_edit.setMinimumWidth(280)
+            path_edit.setMinimumHeight(40)
+            path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             path_edit.returnPressed.connect(lambda kind=output_kind, editor=path_edit: self._apply_save_location(kind, editor))
             self._save_location_inputs[output_kind] = path_edit
             row_layout.addWidget(path_edit)
 
             button_row = QHBoxLayout()
             button_row.setContentsMargins(0, 0, 0, 0)
-            button_row.setSpacing(8)
+            button_row.setSpacing(10)
             browse_button = QPushButton("Browse")
+            browse_button.setMinimumHeight(38)
             browse_button.clicked.connect(lambda _checked=False, kind=output_kind: self._browse_save_location(kind))
             save_button = QPushButton("Save")
+            save_button.setMinimumHeight(38)
             save_button.clicked.connect(lambda _checked=False, kind=output_kind, editor=path_edit: self._apply_save_location(kind, editor))
             button_row.addWidget(browse_button)
             button_row.addWidget(save_button)
             button_row.addStretch(1)
             row_layout.addLayout(button_row)
 
-            locations_column.addWidget(row_frame)
+            box_layout.addWidget(row_frame)
 
-        box_layout.addLayout(locations_column)
-        layout.addWidget(box)
+        scroll_layout.addWidget(box)
 
         name_box = QFrame()
         name_box.setObjectName("innerCard")
         name_box_layout = QVBoxLayout(name_box)
-        name_box_layout.setContentsMargins(16, 16, 16, 16)
-        name_box_layout.setSpacing(12)
+        name_box_layout.setContentsMargins(18, 18, 18, 18)
+        name_box_layout.setSpacing(14)
         name_note = QLabel(
             "Set the default file name prefix for each output type. "
             "The app auto-increments a counter (e.g. HGR_Drawing_1, HGR_Drawing_2) "
@@ -2650,28 +2662,45 @@ class MainWindow(QMainWindow):
         name_note.setWordWrap(True)
         name_box_layout.addWidget(name_note)
 
-        name_grid = QGridLayout()
-        name_grid.setHorizontalSpacing(10)
-        name_grid.setVerticalSpacing(10)
-        name_grid.setColumnStretch(1, 1)
+        for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
+            name_row_frame = QFrame()
+            name_row_layout = QVBoxLayout(name_row_frame)
+            name_row_layout.setContentsMargins(0, 4, 0, 4)
+            name_row_layout.setSpacing(8)
 
-        for row, output_kind in enumerate(SAVE_LOCATION_OUTPUT_ORDER):
-            label = QLabel(SAVE_LOCATION_LABELS.get(output_kind, output_kind.title()))
+            name_label = QLabel(SAVE_LOCATION_LABELS.get(output_kind, output_kind.title()))
+            name_label.setObjectName("saveLocationLabel")
+            name_row_layout.addWidget(name_label)
+
             current_name = configured_save_name(self.config, output_kind)
             name_edit = QLineEdit(current_name)
             name_edit.setObjectName(f"{output_kind}SaveNameEdit")
+            name_edit.setProperty("saveLocationPath", True)
             name_edit.setPlaceholderText(SAVE_NAME_DEFAULTS.get(output_kind, "HGR_File"))
+            name_edit.setMinimumWidth(280)
+            name_edit.setMinimumHeight(40)
+            name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             name_edit.returnPressed.connect(lambda kind=output_kind, editor=name_edit: self._apply_save_name(kind, editor))
-            save_btn = QPushButton("Save")
-            save_btn.clicked.connect(lambda _checked=False, kind=output_kind, editor=name_edit: self._apply_save_name(kind, editor))
             self._save_name_inputs[output_kind] = name_edit
-            name_grid.addWidget(label, row, 0)
-            name_grid.addWidget(name_edit, row, 1)
-            name_grid.addWidget(save_btn, row, 2)
+            name_row_layout.addWidget(name_edit)
 
-        name_box_layout.addLayout(name_grid)
-        layout.addWidget(name_box)
-        layout.addStretch(1)
+            name_button_row = QHBoxLayout()
+            name_button_row.setContentsMargins(0, 0, 0, 0)
+            name_button_row.setSpacing(10)
+            name_save_btn = QPushButton("Save")
+            name_save_btn.setMinimumHeight(38)
+            name_save_btn.clicked.connect(lambda _checked=False, kind=output_kind, editor=name_edit: self._apply_save_name(kind, editor))
+            name_button_row.addWidget(name_save_btn)
+            name_button_row.addStretch(1)
+            name_row_layout.addLayout(name_button_row)
+
+            name_box_layout.addWidget(name_row_frame)
+
+        scroll_layout.addWidget(name_box)
+        scroll_layout.addStretch(1)
+
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, 1)
         return panel
 
     def _apply_save_name(self, output_kind: str, editor: QLineEdit | None) -> None:
@@ -2980,6 +3009,31 @@ class MainWindow(QMainWindow):
         }}
         QScrollArea#gestureGuideScroll QScrollBar::add-page:vertical,
         QScrollArea#gestureGuideScroll QScrollBar::sub-page:vertical {{
+            background: transparent;
+        }}
+        QScrollArea#saveLocationsScroll, QScrollArea#saveLocationsScroll > QWidget,
+        QScrollArea#saveLocationsScroll QWidget#qt_scrollarea_viewport,
+        QWidget#saveLocationsScrollContent {{
+            background: transparent;
+            border: none;
+        }}
+        QScrollArea#saveLocationsScroll QScrollBar:vertical {{
+            background: rgba(255,255,255,0.06);
+            width: 14px;
+            border-radius: 7px;
+            margin: 2px 0;
+        }}
+        QScrollArea#saveLocationsScroll QScrollBar::handle:vertical {{
+            background: {self.config.accent_color};
+            min-height: 40px;
+            border-radius: 7px;
+        }}
+        QScrollArea#saveLocationsScroll QScrollBar::add-line:vertical,
+        QScrollArea#saveLocationsScroll QScrollBar::sub-line:vertical {{
+            height: 0px;
+        }}
+        QScrollArea#saveLocationsScroll QScrollBar::add-page:vertical,
+        QScrollArea#saveLocationsScroll QScrollBar::sub-page:vertical {{
             background: transparent;
         }}
         QComboBox#settingsCameraCombo QAbstractItemView, QComboBox#settingsMicrophoneCombo QAbstractItemView {{

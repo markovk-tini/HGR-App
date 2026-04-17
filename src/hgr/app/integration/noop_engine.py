@@ -2812,17 +2812,16 @@ class GestureWorker(QObject):
         self._start_voice_capture(mode="general", preferred_app="chrome" if chrome_mode_voice else None)
 
     def _start_dictation_capture(self) -> None:
-        if self._voice_listening:
+        if self._voice_listening or self._dictation_active:
             return
         if not self.text_input_controller.available:
             self._voice_control_text = self.text_input_controller.message
-            self.command_detected.emit(self._voice_control_text)
             return
-        if not self.text_input_controller.start_windows_dictation():
-            # Silent failure — no error overlay per user request. Just leave the
-            # state unchanged so the user can retry the gesture.
-            self._voice_control_text = self.text_input_controller.message
-            return
+        # Mark active and show the compact mic indicator immediately so the
+        # user always sees their gesture was recognized. Win+H and any window
+        # focus work runs on a background thread so the engine frame loop
+        # doesn't stall while Windows is being asked to surface Notepad or
+        # switch focus.
         self._dictation_active = True
         self._dictation_toggle_release_required = True
         self._dictation_release_candidate_since = 0.0
@@ -2830,9 +2829,19 @@ class GestureWorker(QObject):
         self._dictation_backend = "windows"
         self._voice_mode = "dictation"
         self._voice_control_text = "dictation active"
-        # Show the compact microphone indicator only (no hint text, no banner).
-        self.voice_status_overlay.show_listening("")
+        try:
+            self.voice_status_overlay.show_listening("")
+        except Exception:
+            pass
         self._emit_status("dictation active")
+
+        def _fire_dictation() -> None:
+            try:
+                self.text_input_controller.start_windows_dictation()
+            except Exception:
+                pass
+
+        threading.Thread(target=_fire_dictation, daemon=True).start()
 
     def _stop_dictation_capture(self) -> None:
         if not self._dictation_active:
@@ -2841,7 +2850,6 @@ class GestureWorker(QObject):
         self._dictation_toggle_release_required = False
         self._dictation_release_candidate_since = 0.0
         self._dictation_stop_rearm_at = 0.0
-        self.text_input_controller.stop_windows_dictation()
         self._voice_stop_event = None
         self._voice_request_id += 1
         self._voice_listening = False
@@ -2853,6 +2861,14 @@ class GestureWorker(QObject):
             self.voice_status_overlay.hide_overlay()
         except Exception:
             pass
+
+        def _fire_stop() -> None:
+            try:
+                self.text_input_controller.stop_windows_dictation()
+            except Exception:
+                pass
+
+        threading.Thread(target=_fire_stop, daemon=True).start()
 
     def _start_voice_capture(self, *, mode: str, preferred_app: str | None = None) -> None:
         if self._voice_listening:
