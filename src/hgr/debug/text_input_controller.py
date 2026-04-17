@@ -34,11 +34,39 @@ class KEYBDINPUT(ctypes.Structure):
     )
 
 
+# MOUSEINPUT and HARDWAREINPUT are declared purely so the INPUT union has
+# the same size Windows expects (MOUSEINPUT is the largest member on x64
+# at 28 bytes, which makes sizeof(INPUT) == 40). Without this, SendInput
+# silently rejects events because cbSize doesn't match the OS definition.
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = (
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    )
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = (
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    )
+
+
 class INPUT_UNION(ctypes.Union):
-    _fields_ = (("ki", KEYBDINPUT),)
+    _fields_ = (
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
+    )
 
 
 class INPUT(ctypes.Structure):
+    _anonymous_ = ("union",)
     _fields_ = (
         ("type", wintypes.DWORD),
         ("union", INPUT_UNION),
