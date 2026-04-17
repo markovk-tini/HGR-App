@@ -2901,60 +2901,77 @@ class GestureWorker(QObject):
                     return out
 
                 def _handle(event: LiveDictationEvent) -> None:
-                    name = event.event
-                    text = (event.text or "").strip()
-                    if name == "hypothesis":
-                        if not text:
+                    try:
+                        name = event.event
+                        text = (event.text or "").strip()
+                        if name == "hypothesis":
+                            if not text:
+                                return
+                            words = text.split()
+                            stable = _common_prefix(state["last_words"], words)
+                            state["last_words"] = words
+                            commit_words = stable[:-hold_back] if len(stable) > hold_back else []
+                            if not commit_words:
+                                return
+                            commit_text = " ".join(commit_words)
+                            committed = state["committed"]
+                            if commit_text.startswith(committed) and len(commit_text) > len(committed):
+                                suffix = commit_text[len(committed):]
+                                if self.text_input_controller.insert_text(suffix):
+                                    state["committed"] = commit_text
                             return
-                        words = text.split()
-                        stable = _common_prefix(state["last_words"], words)
-                        state["last_words"] = words
-                        commit_words = stable[:-hold_back] if len(stable) > hold_back else []
-                        if not commit_words:
-                            return
-                        commit_text = " ".join(commit_words)
-                        committed = state["committed"]
-                        if commit_text.startswith(committed) and len(commit_text) > len(committed):
-                            suffix = commit_text[len(committed):]
-                            if not committed:
-                                suffix = suffix
-                            if self.text_input_controller.insert_text(suffix):
-                                state["committed"] = commit_text
-                        return
-                    if name in ("final", "rejected"):
-                        if not text:
+                        if name in ("final", "rejected"):
+                            if not text:
+                                state["committed"] = ""
+                                state["last_words"] = []
+                                return
+                            committed = state["committed"]
+                            if text.startswith(committed):
+                                remainder = text[len(committed):]
+                            else:
+                                remainder = text
+                            to_type = remainder + " "
+                            self.text_input_controller.insert_text(to_type)
+                            current_display = state["final_display"] or ""
+                            state["final_display"] = (current_display + " " + text).strip() if current_display else text
                             state["committed"] = ""
                             state["last_words"] = []
-                            return
-                        committed = state["committed"]
-                        if text.startswith(committed):
-                            remainder = text[len(committed):]
-                        else:
-                            remainder = text
-                        to_type = remainder + " "
-                        self.text_input_controller.insert_text(to_type)
-                        state["final_display"] = (state["final_display"] + " " + text).strip() if state["final_display"] else text
-                        state["committed"] = ""
-                        state["last_words"] = []
-                        self._voice_queue.put(
-                            (
-                                request_id,
-                                {
-                                    "event": "dictation_chunk",
-                                    "success": True,
-                                    "heard_text": text,
-                                    "control_text": "dictation typing",
-                                    "display_text": state["final_display"],
-                                    "partial": False,
-                                },
+                            self._voice_queue.put(
+                                (
+                                    request_id,
+                                    {
+                                        "event": "dictation_chunk",
+                                        "success": True,
+                                        "heard_text": text,
+                                        "control_text": "dictation typing",
+                                        "display_text": state["final_display"],
+                                        "partial": False,
+                                    },
+                                )
                             )
-                        )
+                    except Exception:
+                        # Never let a handler exception kill the stream
+                        pass
 
                 streamer = self.live_dictation_streamer
+                # System.Speech occasionally ends its Multiple-mode session on
+                # its own (timeouts, audio device hiccups). Restart it until
+                # the user actually toggles dictation off.
                 try:
-                    ok = streamer.stream(stop_event=stop_event, event_callback=_handle)
-                    if not ok:
-                        final_message = streamer.message or final_message
+                    while True:
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                        # Reset per-utterance commit state so a fresh stream
+                        # doesn't try to diff against stale words.
+                        state["committed"] = ""
+                        state["last_words"] = []
+                        ok = streamer.stream(stop_event=stop_event, event_callback=_handle)
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                        if not ok:
+                            final_message = streamer.message or final_message
+                            break
+                        # Stream returned cleanly without stop_event -- loop and restart.
                 except Exception as exc:
                     final_message = f"dictation error: {exc}"
 
