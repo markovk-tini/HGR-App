@@ -154,41 +154,6 @@ class TextInputController:
         else:
             self._message = "could not focus dictation target"
         return ok
-    def insert_text_streaming(self, text: str) -> bool:
-        """Type ``text`` into the remembered external window via SendInput only.
-
-        Unlike :meth:`insert_text` this never touches the clipboard, so it's
-        safe to call many times per second for live dictation without
-        clobbering what the user has copied. Meant for bursts of 1-5 words.
-        """
-        if not self._available or self._user32 is None:
-            self._message = "text input unavailable on this platform"
-            return False
-        payload = str(text or "")
-        if not payload:
-            return False
-        if not self._restore_target_window():
-            self._message = "could not focus dictation target"
-            return False
-        inputs: list[INPUT] = []
-        for char in payload:
-            if char == "\n":
-                inputs.extend(self._vk_inputs(VK_RETURN))
-            elif char == "\t":
-                inputs.extend(self._vk_inputs(VK_TAB))
-            else:
-                inputs.extend(self._unicode_inputs(char))
-        if not inputs:
-            return False
-        array_type = INPUT * len(inputs)
-        sent = int(self._user32.SendInput(len(inputs), array_type(*inputs), ctypes.sizeof(INPUT)))
-        ok = sent == len(inputs)
-        if ok:
-            self._message = f"inserted dictated text ({len(payload)} chars)"
-        else:
-            self._message = "could not insert dictated text"
-        return ok
-
     def insert_text(self, text: str) -> bool:
         if not self._available or self._user32 is None:
             self._message = "text input unavailable on this platform"

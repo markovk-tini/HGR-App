@@ -2229,7 +2229,7 @@ class MainWindow(QMainWindow):
                     "while listening, while confirming, or during dictation — and returns voice control to idle."
                 ),
                 gesture_key="fist",
-                image_name="Left Fist.png",
+                image_name="LeftFist.png",
             ),
             GestureGuideCard(
                 title="Right Hand Two",

@@ -29,7 +29,6 @@ from ...gesture.recognition.engine import GestureRecognitionEngine
 from ...gesture.rendering.overlay import draw_hand_overlay
 from ...gesture.ui.test_window import SpotifyWheelOverlay
 from ...gesture.ui.voice_status_overlay import VoiceStatusOverlay
-from ...live_dictation import DictationController, DictationState
 from ...voice.command_processor import VoiceCommandContext, VoiceCommandProcessor
 from ...voice.dictation import DictationProcessor
 from ..camera.camera_utils import open_camera_by_index, open_preferred_or_first_available
@@ -161,7 +160,6 @@ class GestureWorker(QObject):
         self._voice_listening = False
         self._dictation_active = False
         self._dictation_backend = "idle"
-        self._live_dictation: DictationController | None = None
         self._voice_mode = "ready"
         self._voice_display_text = "-"
         self._dictation_toggle_release_required = False
@@ -2816,81 +2814,39 @@ class GestureWorker(QObject):
     def _start_dictation_capture(self) -> None:
         if self._voice_listening or self._dictation_active:
             return
-        # Latch whichever external window was focused just before the user
-        # looked at the HGR App to make the gesture -- that's the window
-        # dictated text must land in. Must happen BEFORE the overlay shows,
-        # because showing the overlay may steal foreground.
+        # Latch the external (non-HGR) window the user had focused before
+        # making the gesture -- that's where dictated text must land. Must
+        # happen BEFORE any overlay shows, because the overlay may pull
+        # foreground briefly.
         try:
             self.text_input_controller.capture_target_window()
         except Exception:
             pass
-
-        # Mark the state machine active and show the compact mic overlay
-        # immediately so the user sees their gesture was recognized. The
-        # ASR backend (sherpa-onnx or Windows System.Speech) boots on its
-        # own worker thread.
-        self._dictation_active = True
+        # Short toggle-off rearm so a second "two" stops dictation
+        # without feeling laggy. The release-required gate + candidate
+        # hold still prevent instant accidental re-toggles.
         self._dictation_toggle_release_required = True
         self._dictation_release_candidate_since = 0.0
-        # Short rearm so a second "two" toggles dictation off without
-        # feeling laggy. The release-required gate + candidate hold still
-        # prevent accidental instant toggles off the first gesture.
         self._dictation_stop_rearm_at = time.monotonic() + 0.9
-        self._dictation_backend = "live"
-        self._voice_mode = "dictation"
-        self._voice_control_text = "dictation active"
-        try:
-            self.voice_status_overlay.show_listening("")
-        except Exception:
-            pass
-        self._emit_status("dictation active")
-
-        if self._live_dictation is None:
-            self._live_dictation = DictationController(
-                observer=self._build_dictation_observer(),
-                text_sink=self.text_input_controller,
-            )
-
-        def _boot_dictation() -> None:
-            controller = self._live_dictation
-            if controller is None:
-                return
-            try:
-                controller.start()
-            except Exception:
-                pass
-
-        threading.Thread(target=_boot_dictation, daemon=True).start()
-
-    def _build_dictation_observer(self):
-        engine = self
-
-        class _Observer:
-            def on_state_changed(self_, state: DictationState, message: str | None) -> None:
-                if state == DictationState.ERROR and message:
-                    engine._voice_control_text = f"dictation error: {message}"
-                    engine._emit_status(engine._voice_control_text)
-
-            def on_debug(self_, msg: str) -> None:
-                # Kept light: dictation commits are frequent, so don't
-                # spam the status label. Uncomment for live debugging.
-                # engine._voice_control_text = msg
-                pass
-
-            def on_typed(self_, text: str) -> None:
-                pass
-
-        return _Observer()
+        # Route through the proven voice-capture pipeline: whisper.cpp
+        # (or faster-whisper) -> text_input_controller.insert_text.
+        # That path is what the rest of the app's voice features use
+        # and is known to actually type into the target window.
+        self._start_voice_capture(mode="dictation")
 
     def _stop_dictation_capture(self) -> None:
         if not self._dictation_active:
             return
+        # Signal the dictation worker to break out of its listen loop.
+        if self._voice_stop_event is not None:
+            try:
+                self._voice_stop_event.set()
+            except Exception:
+                pass
         self._dictation_active = False
         self._dictation_toggle_release_required = False
         self._dictation_release_candidate_since = 0.0
         self._dictation_stop_rearm_at = 0.0
-        self._voice_stop_event = None
-        self._voice_request_id += 1
         self._voice_listening = False
         self._dictation_backend = "idle"
         self._voice_mode = "ready"
@@ -2900,21 +2856,6 @@ class GestureWorker(QObject):
             self.voice_status_overlay.hide_overlay()
         except Exception:
             pass
-
-        controller = self._live_dictation
-
-        def _fire_stop() -> None:
-            if controller is not None:
-                try:
-                    controller.stop()
-                except Exception:
-                    pass
-            try:
-                self.text_input_controller.stop_windows_dictation()
-            except Exception:
-                pass
-
-        threading.Thread(target=_fire_stop, daemon=True).start()
 
     def _start_voice_capture(self, *, mode: str, preferred_app: str | None = None) -> None:
         if self._voice_listening:
@@ -3420,12 +3361,6 @@ class GestureWorker(QObject):
                 self.text_input_controller.stop_windows_dictation()
             except Exception:
                 pass
-            controller = self._live_dictation
-            if controller is not None:
-                try:
-                    controller.stop()
-                except Exception:
-                    pass
         self._reset_voice_state()
         if was_active:
             self._voice_control_text = "voice canceled"
