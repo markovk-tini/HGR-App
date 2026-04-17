@@ -17,7 +17,7 @@ from ...debug.chrome_gesture_router import ChromeGestureRouter
 from ...debug.mouse_controller import MouseController
 from ...debug.mouse_gesture import MouseGestureTracker
 from ...debug.mouse_overlay import draw_mouse_control_box_overlay, draw_mouse_monitor_overlay
-from ...debug.live_dictation_streamer import LiveDictationStreamer
+from ...debug.live_dictation_streamer import LiveDictationEvent, LiveDictationStreamer
 from ...debug.screen_volume_overlay import ScreenVolumeOverlay
 from ...debug.spotify_controller import SpotifyController
 from ...debug.spotify_gesture_router import SpotifyGestureRouter
@@ -2884,54 +2884,90 @@ class GestureWorker(QObject):
 
             def _dictation_worker() -> None:
                 final_message = "dictation stopped"
-                final_display = self.dictation_processor.full_text
-                while True:
-                    if stop_event is None or stop_event.is_set():
-                        break
-                    result = self.voice_listener.listen(
-                        max_seconds=12.0,
-                        stop_event=stop_event,
-                        transcript_mode="dictation",
-                    )
-                    if stop_event is None or stop_event.is_set():
-                        break
-                    if result.success and result.heard_text:
-                        update = self.dictation_processor.ingest(result.heard_text)
-                        final_display = update.display_text or final_display
-                        inserted = False
-                        control_text = "dictation heard no insertable text"
-                        if update.text_to_insert:
-                            inserted = self.text_input_controller.insert_text(update.text_to_insert)
-                            control_text = self.text_input_controller.message
+                hold_back = 2
+                state = {
+                    "committed": "",
+                    "last_words": [],
+                    "final_display": self.dictation_processor.full_text,
+                }
+
+                def _common_prefix(a: list[str], b: list[str]) -> list[str]:
+                    out: list[str] = []
+                    for x, y in zip(a, b):
+                        if x == y:
+                            out.append(x)
+                        else:
+                            break
+                    return out
+
+                def _handle(event: LiveDictationEvent) -> None:
+                    name = event.event
+                    text = (event.text or "").strip()
+                    if name == "hypothesis":
+                        if not text:
+                            return
+                        words = text.split()
+                        stable = _common_prefix(state["last_words"], words)
+                        state["last_words"] = words
+                        commit_words = stable[:-hold_back] if len(stable) > hold_back else []
+                        if not commit_words:
+                            return
+                        commit_text = " ".join(commit_words)
+                        committed = state["committed"]
+                        if commit_text.startswith(committed) and len(commit_text) > len(committed):
+                            suffix = commit_text[len(committed):]
+                            if not committed:
+                                suffix = suffix
+                            if self.text_input_controller.insert_text(suffix):
+                                state["committed"] = commit_text
+                        return
+                    if name in ("final", "rejected"):
+                        if not text:
+                            state["committed"] = ""
+                            state["last_words"] = []
+                            return
+                        committed = state["committed"]
+                        if text.startswith(committed):
+                            remainder = text[len(committed):]
+                        else:
+                            remainder = text
+                        to_type = remainder + " "
+                        self.text_input_controller.insert_text(to_type)
+                        state["final_display"] = (state["final_display"] + " " + text).strip() if state["final_display"] else text
+                        state["committed"] = ""
+                        state["last_words"] = []
                         self._voice_queue.put(
                             (
                                 request_id,
                                 {
                                     "event": "dictation_chunk",
-                                    "success": inserted,
-                                    "heard_text": update.raw_text,
-                                    "control_text": control_text,
-                                    "display_text": update.display_text,
+                                    "success": True,
+                                    "heard_text": text,
+                                    "control_text": "dictation typing",
+                                    "display_text": state["final_display"],
                                     "partial": False,
                                 },
                             )
                         )
-                        continue
-                    lowered = str(result.message or "").lower()
-                    if any(token in lowered for token in ("failed", "error", "unavailable", "not found")):
-                        final_message = result.message or final_message
-                        break
-                    # Silence or no usable text: keep dictation active and continue listening.
+
+                streamer = self.live_dictation_streamer
+                try:
+                    ok = streamer.stream(stop_event=stop_event, event_callback=_handle)
+                    if not ok:
+                        final_message = streamer.message or final_message
+                except Exception as exc:
+                    final_message = f"dictation error: {exc}"
+
                 if stop_event is None or not stop_event.is_set():
                     self._voice_queue.put(
                         (
                             request_id,
                             {
                                 "event": "dictation_complete",
-                                "success": bool(self.dictation_processor.full_text),
+                                "success": bool(state["final_display"]),
                                 "heard_text": "",
                                 "control_text": final_message,
-                                "display_text": final_display,
+                                "display_text": state["final_display"],
                             },
                         )
                     )
@@ -3349,18 +3385,12 @@ class GestureWorker(QObject):
         self.utility_wheel_overlay.show_overlay()
 
     def _cancel_all_voice_stages(self) -> None:
-        was_dictation = bool(self._dictation_active)
         was_active = bool(
             self._voice_listening
             or self._dictation_active
             or self._save_prompt_active
             or self._selection_prompt_active
         )
-        if was_dictation:
-            try:
-                self.text_input_controller.stop_windows_dictation()
-            except Exception:
-                pass
         self._reset_voice_state()
         if was_active:
             self._voice_control_text = "voice canceled"
