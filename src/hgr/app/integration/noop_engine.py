@@ -2819,13 +2819,9 @@ class GestureWorker(QObject):
             self.command_detected.emit(self._voice_control_text)
             return
         if not self.text_input_controller.start_windows_dictation():
+            # Silent failure — no error overlay per user request. Just leave the
+            # state unchanged so the user can retry the gesture.
             self._voice_control_text = self.text_input_controller.message
-            self.command_detected.emit(self._voice_control_text)
-            self.voice_status_overlay.show_result(
-                "Click a text field first",
-                command_text="",
-                duration=1.8,
-            )
             return
         self._dictation_active = True
         self._dictation_toggle_release_required = True
@@ -2833,12 +2829,9 @@ class GestureWorker(QObject):
         self._dictation_stop_rearm_at = time.monotonic() + 2.5
         self._dictation_backend = "windows"
         self._voice_mode = "dictation"
-        self._voice_control_text = "dictation active — Windows voice typing"
-        self.command_detected.emit(self._voice_control_text)
-        self.voice_status_overlay.show_listening(
-            "Dictating…",
-            hint_text="Windows voice typing is live. Show left-hand two again to stop.",
-        )
+        self._voice_control_text = "dictation active"
+        # Show the compact microphone indicator only (no hint text, no banner).
+        self.voice_status_overlay.show_listening("")
         self._emit_status("dictation active")
 
     def _stop_dictation_capture(self) -> None:
@@ -2855,9 +2848,9 @@ class GestureWorker(QObject):
         self._dictation_backend = "idle"
         self._voice_mode = "ready"
         self._voice_control_text = "dictation stopped"
-        self.command_detected.emit(self._voice_control_text)
+        # Hide the mic indicator silently — no result popup.
         try:
-            self.voice_status_overlay.show_result("Dictation stopped", command_text="", duration=1.4)
+            self.voice_status_overlay.hide_overlay()
         except Exception:
             pass
 

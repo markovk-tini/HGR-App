@@ -2595,29 +2595,45 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         box_layout.addWidget(note)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
-        grid.setColumnStretch(1, 1)
+        locations_column = QVBoxLayout()
+        locations_column.setContentsMargins(0, 0, 0, 0)
+        locations_column.setSpacing(14)
 
-        for row, output_kind in enumerate(SAVE_LOCATION_OUTPUT_ORDER):
+        for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
+            row_frame = QFrame()
+            row_frame.setObjectName("saveLocationRow")
+            row_layout = QVBoxLayout(row_frame)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+
             label = QLabel(SAVE_LOCATION_LABELS.get(output_kind, output_kind.title()))
+            label.setObjectName("saveLocationLabel")
+            row_layout.addWidget(label)
+
             path_edit = QLineEdit(str(self._save_output_directory(output_kind)))
             path_edit.setObjectName(f"{output_kind}SaveLocationEdit")
+            path_edit.setProperty("saveLocationPath", True)
             path_edit.setClearButtonEnabled(True)
+            path_edit.setMinimumWidth(240)
             path_edit.returnPressed.connect(lambda kind=output_kind, editor=path_edit: self._apply_save_location(kind, editor))
+            self._save_location_inputs[output_kind] = path_edit
+            row_layout.addWidget(path_edit)
+
+            button_row = QHBoxLayout()
+            button_row.setContentsMargins(0, 0, 0, 0)
+            button_row.setSpacing(8)
             browse_button = QPushButton("Browse")
             browse_button.clicked.connect(lambda _checked=False, kind=output_kind: self._browse_save_location(kind))
             save_button = QPushButton("Save")
             save_button.clicked.connect(lambda _checked=False, kind=output_kind, editor=path_edit: self._apply_save_location(kind, editor))
-            self._save_location_inputs[output_kind] = path_edit
+            button_row.addWidget(browse_button)
+            button_row.addWidget(save_button)
+            button_row.addStretch(1)
+            row_layout.addLayout(button_row)
 
-            grid.addWidget(label, row, 0)
-            grid.addWidget(path_edit, row, 1)
-            grid.addWidget(browse_button, row, 2)
-            grid.addWidget(save_button, row, 3)
+            locations_column.addWidget(row_frame)
 
-        box_layout.addLayout(grid)
+        box_layout.addLayout(locations_column)
         layout.addWidget(box)
 
         name_box = QFrame()
@@ -2925,6 +2941,46 @@ class MainWindow(QMainWindow):
             border: 1px solid rgba(29,233,182,0.35);
             border-radius: 12px;
             padding: 10px 12px;
+        }}
+        QLineEdit[saveLocationPath="true"] {{
+            background-color: #E3F2FD;
+            color: #0B2A45;
+            selection-background-color: {self.config.accent_color};
+            selection-color: #001B24;
+            border: 1px solid rgba(29,233,182,0.45);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-weight: 600;
+        }}
+        QLineEdit[saveLocationPath="true"]:focus {{
+            border: 1px solid {self.config.accent_color};
+            background-color: #F1F8FE;
+        }}
+        QLabel#saveLocationLabel {{
+            font-weight: 700;
+            color: {self.config.accent_color};
+        }}
+        QScrollArea#gestureGuideScroll QScrollBar:vertical {{
+            background: rgba(255,255,255,0.06);
+            width: 14px;
+            border-radius: 7px;
+            margin: 2px 0;
+        }}
+        QScrollArea#gestureGuideScroll QScrollBar::handle:vertical {{
+            background: {self.config.accent_color};
+            min-height: 40px;
+            border-radius: 7px;
+        }}
+        QScrollArea#gestureGuideScroll QScrollBar::handle:vertical:hover {{
+            background: {self.config.accent_color};
+        }}
+        QScrollArea#gestureGuideScroll QScrollBar::add-line:vertical,
+        QScrollArea#gestureGuideScroll QScrollBar::sub-line:vertical {{
+            height: 0px;
+        }}
+        QScrollArea#gestureGuideScroll QScrollBar::add-page:vertical,
+        QScrollArea#gestureGuideScroll QScrollBar::sub-page:vertical {{
+            background: transparent;
         }}
         QComboBox#settingsCameraCombo QAbstractItemView, QComboBox#settingsMicrophoneCombo QAbstractItemView {{
             background-color: rgba(15,23,42,0.98);

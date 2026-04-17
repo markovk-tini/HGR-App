@@ -255,34 +255,37 @@ class TextInputController:
             self._message = "windows dictation unavailable on this platform"
             return False
 
-        # 1) If an external window is already foreground, use it directly.
+        # Windows' built-in dictation (Win+H) types into whichever control has
+        # keyboard focus when the user speaks — so the goal here is just to make
+        # sure *some* external text-editor window holds focus by the time we
+        # press Win+H. We NEVER hard-fail: if nothing is available, we launch a
+        # fresh Notepad so the user always gets to dictate somewhere.
+
         self.remember_active_window()
         foreground = self._foreground_window()
+
+        # Fast path: user has a non-HGR window foreground (typically because
+        # they clicked into Notepad / Word / a browser textbox).
         if foreground > 0 and not self._is_own_window(foreground):
             self._target_hwnd = foreground
             self._last_external_hwnd = foreground
-            time.sleep(0.05)
-            if not self.toggle_windows_dictation():
-                return False
             self._message = "dictation active at the current cursor"
-            return True
+            return self.toggle_windows_dictation()
 
-        # 2) Poll briefly — the user may be switching focus, or the HGR overlay
-        # may momentarily be foreground.
-        deadline = time.monotonic() + 0.5
+        # HGR is foreground at the moment of the gesture. Poll briefly in case
+        # the user is mid-switch, or our own overlay is transiently on top.
+        deadline = time.monotonic() + 0.4
         while time.monotonic() < deadline:
-            time.sleep(0.05)
+            time.sleep(0.04)
             self.remember_active_window()
             fg = self._foreground_window()
             if fg > 0 and not self._is_own_window(fg):
                 self._target_hwnd = fg
                 self._last_external_hwnd = fg
-                if not self.toggle_windows_dictation():
-                    return False
                 self._message = "dictation active at the current cursor"
-                return True
+                return self.toggle_windows_dictation()
 
-        # 3) Try to restore a previously remembered external window.
+        # Try to restore the most recent remembered external window.
         target_hwnd = int(self._last_external_hwnd or self._target_hwnd or 0)
         if target_hwnd > 0:
             try:
@@ -292,34 +295,30 @@ class TextInputController:
                 target_hwnd = 0
         if target_hwnd > 0:
             self._target_hwnd = target_hwnd
-            if self._restore_target_window():
-                time.sleep(0.15)
-                if not self.toggle_windows_dictation():
-                    return False
-                self._message = "dictation active at the current cursor"
-                return True
+            self._restore_target_window()
+            time.sleep(0.12)
+            self._message = "dictation active at the current cursor"
+            return self.toggle_windows_dictation()
 
-        # 4) Look for an already-open external text-editor window.
+        # No remembered window — scan open top-level windows for a text editor.
         existing = self._find_external_text_window()
         if existing > 0:
             self._target_hwnd = existing
             self._last_external_hwnd = existing
-            if self._restore_target_window():
-                time.sleep(0.15)
-                if not self.toggle_windows_dictation():
-                    return False
-                self._message = "dictation active at the current cursor"
-                return True
+            self._restore_target_window()
+            time.sleep(0.12)
+            self._message = "dictation active at the current cursor"
+            return self.toggle_windows_dictation()
 
-        # 5) Nothing clicked anywhere — launch a fresh Notepad and dictate there.
+        # Nothing at all — spawn Notepad and dictate into it.
         if not self._launch_notepad_for_dictation(timeout=4.0):
-            self._message = "could not open notepad for dictation"
-            return False
-        time.sleep(0.25)
-        if not self.toggle_windows_dictation():
-            return False
+            # Even if Notepad launch didn't confirm foreground, still try Win+H
+            # so the user gets a chance to dictate if anything catches focus.
+            self._message = "dictation started (no text field detected)"
+            return self.toggle_windows_dictation()
+        time.sleep(0.2)
         self._message = "dictation active in Notepad"
-        return True
+        return self.toggle_windows_dictation()
 
     def _find_external_text_window(self) -> int:
         if not self._available or self._user32 is None:
