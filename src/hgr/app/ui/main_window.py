@@ -2587,9 +2587,12 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFocusPolicy(Qt.StrongFocus)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         scroll_content = QWidget()
         scroll_content.setObjectName("saveLocationsScrollContent")
+        scroll_content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(2, 2, 2, 2)
         scroll_layout.setSpacing(16)
@@ -2853,9 +2856,26 @@ class MainWindow(QMainWindow):
 
 
     def show_settings_section(self, index: int) -> None:
+        # Clear focus before switching so stale focus on a now-hidden line edit
+        # doesn't leave the incoming panel unable to receive clicks/wheel events.
+        current = self.settings_content_stack.currentWidget()
+        if current is not None:
+            focused = current.focusWidget()
+            if focused is not None:
+                focused.clearFocus()
         self.settings_content_stack.setCurrentIndex(index)
         for i, button in enumerate(self._settings_nav_buttons):
             button.setChecked(i == index)
+        # Force the newly-shown panel to recompute geometry. QStackedWidget
+        # occasionally skips this for scroll-area children, leaving the viewport
+        # at a stale size where wheel/click hit-testing silently misses.
+        new_widget = self.settings_content_stack.currentWidget()
+        if new_widget is not None:
+            layout = new_widget.layout()
+            if layout is not None:
+                layout.activate()
+            new_widget.updateGeometry()
+            QTimer.singleShot(0, new_widget.update)
 
     def _font_size_changed(self, value: int) -> None:
         self.config.hello_font_size = value
