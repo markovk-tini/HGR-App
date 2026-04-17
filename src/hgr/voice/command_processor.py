@@ -1295,6 +1295,15 @@ class VoiceCommandProcessor:
         if not query:
             return None
         normalized_query = self.desktop_controller._normalize_application_name(query)
+        if self._query_mentions_hgr_asset(query, normalized_query):
+            return ParsedVoiceCommand(
+                raw_text=raw_text,
+                normalized_text=text,
+                app_name="file_explorer",
+                action="open",
+                confidence=0.62,
+                query=query,
+            )
         matched_alias: str | None = None
         slots: dict[str, Any] = {}
         confidence = 0.78
@@ -1302,6 +1311,15 @@ class VoiceCommandProcessor:
             recovered = self._best_fuzzy_launch_match(query, text=text)
             if recovered is not None:
                 entry, recovered_score, matched_alias = recovered
+                if self._entry_is_running_hgr_app(entry):
+                    return ParsedVoiceCommand(
+                        raw_text=raw_text,
+                        normalized_text=text,
+                        app_name="file_explorer",
+                        action="open",
+                        confidence=0.62,
+                        query=query,
+                    )
                 query = entry.display_name
                 confidence = max(confidence, min(1.04, 0.86 + recovered_score * 0.28))
                 slots = {
@@ -1322,6 +1340,17 @@ class VoiceCommandProcessor:
                         query=query,
                     )
                 return None
+        else:
+            resolved = self.desktop_controller._resolve_application(query)
+            if resolved is not None and self._entry_is_running_hgr_app(resolved):
+                return ParsedVoiceCommand(
+                    raw_text=raw_text,
+                    normalized_text=text,
+                    app_name="file_explorer",
+                    action="open",
+                    confidence=0.62,
+                    query=query,
+                )
         return ParsedVoiceCommand(
             raw_text=raw_text,
             normalized_text=text,
@@ -1332,6 +1361,26 @@ class VoiceCommandProcessor:
             matched_alias=matched_alias,
             slots=slots,
         )
+
+    @staticmethod
+    def _query_mentions_hgr_asset(query: str, normalized_query: str) -> bool:
+        text = f" {(normalized_query or query or '').strip().lower()} "
+        if not text.strip():
+            return False
+        tokens = text.split()
+        if "hgr" in tokens and any(tok in {"clip", "clips", "recording", "recordings", "screenshot", "screenshots", "drawing", "drawings", "capture", "captures"} for tok in tokens):
+            return True
+        return False
+
+    @staticmethod
+    def _entry_is_running_hgr_app(entry: Any) -> bool:
+        display = str(getattr(entry, "display_name", "") or "").strip().lower()
+        target = str(getattr(entry, "target", "") or "").strip().lower()
+        if target.endswith("hgr app.exe") or target.endswith("hgr_app.exe"):
+            return True
+        if display == "hgr app" or display == "hgr":
+            return True
+        return False
 
     def _best_fuzzy_launch_match(
         self,

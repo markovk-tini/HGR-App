@@ -485,6 +485,13 @@ class DesktopController:
             self._message = "file open unavailable on this platform"
             return False
         resolved = Path(path)
+        try:
+            resolved_lower = str(resolved.resolve()).lower() if resolved.exists() else str(resolved).lower()
+        except Exception:
+            resolved_lower = str(resolved).lower()
+        if resolved_lower.endswith("hgr app.exe") or resolved_lower.endswith("hgr_app.exe"):
+            self._message = "cannot reopen the running HGR App"
+            return False
         if self._launch_target(str(resolved)):
             label = "folder" if resolved.is_dir() else "file"
             self._message = f"opened {label}: {resolved.name}"
@@ -1226,6 +1233,9 @@ try {
         ordered_folder_hints: list[str],
     ) -> list[tuple[float, float, Path]]:
         if desired_extension is not None and path.suffix.lower() != desired_extension:
+            return []
+        name_lower = path.name.lower()
+        if name_lower in {"hgr app.exe", "hgr_app.exe", "hgr app.lnk", "hgr_app.lnk"}:
             return []
         candidate_name = self._normalize_file_token_text(path.name)
         candidate_stem = self._normalize_file_token_text(path.stem)

@@ -349,9 +349,10 @@ class VoiceStatusOverlay(QWidget):
                 painter.setPen(QPen(hint_border, 1.2))
                 painter.setBrush(hint_fill)
                 painter.drawRoundedRect(hint_box, 10.0, 10.0)
-                hint_font = QFont("Segoe UI", 10)
+                hint_font = QFont("Segoe UI", 11)
+                hint_font.setBold(True)
                 painter.setFont(hint_font)
-                painter.setPen(QPen(QColor(220, 240, 255, 235)))
+                painter.setPen(QPen(QColor(240, 250, 255, 248)))
                 painter.drawText(hint_box.adjusted(8, 6, -8, -6), Qt.AlignCenter | Qt.TextWordWrap, self._hint_text)
             else:
                 icon_center_y = rect.center().y() - 4

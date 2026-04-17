@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from itertools import cycle
 from pathlib import Path
@@ -206,7 +207,11 @@ class ScreenDrawOverlay(QWidget):
         self._strokes: list[dict] = []
         self._active_stroke_points: list[tuple[float, float]] = []
         self._raster_dirty = False
+        self.shape_mode = False
         self._resize_to_screen()
+
+    def set_shape_mode(self, enabled: bool) -> None:
+        self.shape_mode = bool(enabled)
 
     def _resize_to_screen(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -425,18 +430,102 @@ class ScreenDrawOverlay(QWidget):
             if len(self._active_stroke_points) == 1:
                 x, y = self._active_stroke_points[0]
                 self._active_stroke_points.append((x + 0.01, y + 0.01))
+            points = list(self._active_stroke_points)
+            if self.shape_mode:
+                snapped = self._snap_stroke_to_shape(points)
+                if snapped and len(snapped) >= 2:
+                    points = snapped
             self._strokes.append(
                 {
                     "color": QColor(self.brush_color),
                     "thickness": int(self.brush_thickness),
-                    "points": list(self._active_stroke_points),
+                    "points": points,
                 }
             )
             self._active_stroke_points = []
+            if self.shape_mode:
+                self._rerender_from_strokes()
         self._last_draw_point = None
         if self._cursor_mode == "draw":
             self._cursor_mode = "hover"
         self.update()
+
+    def _snap_stroke_to_shape(self, points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        pts = [(float(x), float(y)) for x, y in points]
+        n = len(pts)
+        if n < 3:
+            return pts
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        width = max_x - min_x
+        height = max_y - min_y
+        span = max(width, height, 1.0)
+        if span < 14.0:
+            return pts
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        start_end_dist = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+        closed = start_end_dist < span * 0.32
+
+        if not closed:
+            return [pts[0], pts[-1]]
+
+        simplified = self._simplify_polyline(pts, span * 0.08)
+        if len(simplified) > 1:
+            if math.hypot(simplified[0][0] - simplified[-1][0], simplified[0][1] - simplified[-1][1]) < span * 0.06:
+                simplified = simplified[:-1]
+        corner_count = max(len(simplified), 1)
+
+        radii = [math.hypot(p[0] - cx, p[1] - cy) for p in pts]
+        avg_r = sum(radii) / len(radii) if radii else 0.0
+        if avg_r > 0:
+            deviation = sum(abs(r - avg_r) for r in radii) / len(radii) / avg_r
+        else:
+            deviation = 1.0
+        aspect = min(width, height) / max(width, height, 1.0)
+        is_circle = deviation < 0.18 and corner_count >= 5 and aspect > 0.55
+
+        if is_circle:
+            steps = 72
+            result: list[tuple[float, float]] = []
+            for i in range(steps + 1):
+                angle = 2.0 * math.pi * i / steps
+                result.append((cx + avg_r * math.cos(angle), cy + avg_r * math.sin(angle)))
+            return result
+        if corner_count == 3 and len(simplified) >= 3:
+            tri = [simplified[0], simplified[1], simplified[2]]
+            return [tri[0], tri[1], tri[2], tri[0]]
+        if corner_count == 4:
+            return [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y), (min_x, min_y)]
+        return [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y), (min_x, min_y)]
+
+    def _simplify_polyline(self, pts: list[tuple[float, float]], epsilon: float) -> list[tuple[float, float]]:
+        if len(pts) < 3:
+            return list(pts)
+        stack: list[tuple[int, int]] = [(0, len(pts) - 1)]
+        keep = [False] * len(pts)
+        keep[0] = True
+        keep[-1] = True
+        while stack:
+            start, end = stack.pop()
+            if end <= start + 1:
+                continue
+            ax, ay = pts[start]
+            bx, by = pts[end]
+            dmax = 0.0
+            idx = start
+            for i in range(start + 1, end):
+                d2 = self._point_to_segment_distance_sq(pts[i][0], pts[i][1], ax, ay, bx, by)
+                if d2 > dmax:
+                    dmax = d2
+                    idx = i
+            if dmax > epsilon * epsilon:
+                keep[idx] = True
+                stack.append((start, idx))
+                stack.append((idx, end))
+        return [pts[i] for i, k in enumerate(keep) if k]
 
     def map_normalized_to_screen(self, x: float, y: float) -> QPointF:
         geo = self.geometry()

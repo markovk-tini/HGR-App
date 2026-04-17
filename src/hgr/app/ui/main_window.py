@@ -5351,6 +5351,12 @@ class MainWindow(QMainWindow):
                     self.draw_overlay.clear_canvas()
                     self.last_action_label.setText("Last action: drawing cleared")
                     handled = True
+                elif request_action in {"shape_on", "shape_off"}:
+                    self.draw_overlay.set_shape_mode(request_action == "shape_on")
+                    self.last_action_label.setText(
+                        "Last action: shape mode on" if request_action == "shape_on" else "Last action: shape mode off"
+                    )
+                    handled = True
                 if handled:
                     self._last_drawing_request_token = request_token
                     if self._worker is not None and hasattr(self._worker, "acknowledge_drawing_request"):
@@ -5593,6 +5599,12 @@ class MainWindow(QMainWindow):
                 self.draw_overlay.push_undo_state()
                 self.draw_overlay.clear_canvas()
                 self.last_action_label.setText("Last action: drawing cleared")
+                handled = True
+            elif request_action in {"shape_on", "shape_off"}:
+                self.draw_overlay.set_shape_mode(request_action == "shape_on")
+                self.last_action_label.setText(
+                    "Last action: shape mode on" if request_action == "shape_on" else "Last action: shape mode off"
+                )
                 handled = True
             if handled:
                 self._last_drawing_request_token = request_token
@@ -6825,6 +6837,12 @@ def _stop_screen_recording(self) -> bool:
                 self.draw_overlay.push_undo_state()
                 self.draw_overlay.clear_canvas()
                 self.last_action_label.setText("Last action: drawing cleared")
+                handled = True
+            elif request_action in {"shape_on", "shape_off"}:
+                self.draw_overlay.set_shape_mode(request_action == "shape_on")
+                self.last_action_label.setText(
+                    "Last action: shape mode on" if request_action == "shape_on" else "Last action: shape mode off"
+                )
                 handled = True
             if handled:
                 self._last_drawing_request_token = request_token

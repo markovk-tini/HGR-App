@@ -187,6 +187,7 @@ class GestureWorker(QObject):
         self._drawing_request_token = 0
         self._drawing_swipe_cooldown_until = 0.0
         self._drawing_request_action = ""
+        self._drawing_shape_mode = False
         self._drawing_draw_grace_until = 0.0
         self._drawing_erase_grace_until = 0.0
         self._drawing_wheel_candidate = "neutral"
@@ -543,7 +544,13 @@ class GestureWorker(QObject):
             self._drawing_control_text = "drawing save"
             self.command_detected.emit("Saving drawing")
             return
-        self._drawing_control_text = "shape mode coming soon"
+        if key == "shape":
+            self._drawing_shape_mode = not self._drawing_shape_mode
+            self._queue_drawing_request("shape_on" if self._drawing_shape_mode else "shape_off")
+            self._drawing_control_text = "shape mode on" if self._drawing_shape_mode else "shape mode off"
+            self.command_detected.emit(self._drawing_control_text)
+            return
+        self._drawing_control_text = "drawing wheel action"
         self.command_detected.emit(self._drawing_control_text)
 
     def _update_drawing_wheel_selection(self, hand_reading, now: float) -> None:
@@ -2111,9 +2118,9 @@ class GestureWorker(QObject):
             else:
                 gesture_chip = "Drawing mode on"
         elif dynamic_display != "neutral":
-            gesture_chip = f"Dynamic: {dynamic_display.replace('_', ' ')}   (raw: {prediction.raw_label})"
+            gesture_chip = f"Dynamic: {dynamic_display.replace('_', ' ')}"
         else:
-            gesture_chip = f"Gesture: {banner_text}   (raw: {prediction.raw_label})"
+            gesture_chip = f"Gesture: {banner_text}"
 
         handedness = ""
         if result.found and result.tracked_hand is not None:
@@ -2241,6 +2248,7 @@ class GestureWorker(QObject):
             "drawing_render_target": self._drawing_render_target,
             "drawing_request_token": int(self._drawing_request_token),
             "drawing_request_action": self._drawing_request_action,
+            "drawing_shape_mode": bool(self._drawing_shape_mode),
             "utility_request_token": int(self._utility_request_token),
             "utility_request_action": self._utility_request_action,
             "utility_capture_selection_active": bool(self._utility_capture_selection_active),
@@ -2510,7 +2518,7 @@ class GestureWorker(QObject):
 
     def _wheel_selection_key(self, dx: float, dy: float, items: tuple[tuple[str, str, float], ...]) -> str | None:
         radius = math.hypot(dx, dy)
-        if radius < 0.30 or radius > 1.25:
+        if radius < 0.59 or radius > 1.25:
             return None
         angle = (math.degrees(math.atan2(-dy, dx)) + 360.0) % 360.0
         slice_span = 360.0 / max(1, len(items))
@@ -2713,6 +2721,18 @@ class GestureWorker(QObject):
     def _handle_left_hand_voice(self, prediction, now: float) -> None:
         stable_label = prediction.stable_label
         trigger_labels = {"one", "two"}
+
+        if stable_label == "fist":
+            if self._voice_latched_label == "fist":
+                return
+            if self._voice_listening or self._dictation_active or self._save_prompt_active or self._selection_prompt_active:
+                self._cancel_all_voice_stages()
+                self._voice_latched_label = "fist"
+                self._voice_cooldown_until = now + 0.8
+            return
+        if self._voice_latched_label == "fist":
+            self._voice_latched_label = None
+
         if stable_label == self._voice_latched_label:
             if stable_label not in trigger_labels:
                 self._voice_latched_label = None
@@ -3035,7 +3055,7 @@ class GestureWorker(QObject):
                     elif self._voice_mode == "save_prompt":
                         self._voice_control_text = "recognizing save location..."
                         self.voice_status_overlay.show_processing(
-                            self._save_prompt_text,
+                            "Processing command...",
                             command_text=self._voice_display_text if self._voice_display_text != "-" else "",
                         )
                     else:
@@ -3056,7 +3076,7 @@ class GestureWorker(QObject):
                         self.voice_status_overlay.hide_overlay()
                     elif self._voice_mode == "save_prompt":
                         self.voice_status_overlay.show_processing(
-                            self._save_prompt_text,
+                            "Executing command...",
                             command_text=command_text or (self._voice_display_text if self._voice_display_text != "-" else ""),
                         )
                     else:
@@ -3327,6 +3347,31 @@ class GestureWorker(QObject):
             cursor_offset=self._utility_wheel_cursor_offset,
         )
         self.utility_wheel_overlay.show_overlay()
+
+    def _cancel_all_voice_stages(self) -> None:
+        was_dictation = bool(self._dictation_active)
+        was_active = bool(
+            self._voice_listening
+            or self._dictation_active
+            or self._save_prompt_active
+            or self._selection_prompt_active
+        )
+        if was_dictation:
+            try:
+                self.text_input_controller.stop_windows_dictation()
+            except Exception:
+                pass
+        self._reset_voice_state()
+        if was_active:
+            self._voice_control_text = "voice canceled"
+            try:
+                self.command_detected.emit(self._voice_control_text)
+            except Exception:
+                pass
+            try:
+                self.voice_status_overlay.show_result("Canceled", command_text="", duration=1.0)
+            except Exception:
+                pass
 
     def _reset_voice_state(self) -> None:
         if self._voice_stop_event is not None:
