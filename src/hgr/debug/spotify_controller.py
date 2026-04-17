@@ -818,6 +818,17 @@ class SpotifyController:
         self._message = "spotify token not found"
         return False
 
+    def warm_up(self) -> bool:
+        if not self._available:
+            return False
+        if not self._client_id or not self._client_secret:
+            return False
+        if not self._refresh_token:
+            return bool(self._access_token)
+        if self._access_token and not self._token_expired():
+            return True
+        return self._refresh_access_token()
+
     def _token_expired(self) -> bool:
         if not self._token_issue_time:
             return True

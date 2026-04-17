@@ -1386,6 +1386,15 @@ class GestureWorker(QObject):
         self.running_state_changed.emit(True)
         self._timer.start()
 
+        def _warm_spotify() -> None:
+            try:
+                self.spotify_controller.warm_up()
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=_warm_spotify, daemon=True).start()
+
     def stop(self) -> None:
         if not self._running and self._cap is None and self.engine is None:
             return
