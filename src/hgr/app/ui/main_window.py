@@ -1621,15 +1621,36 @@ class PenOptionsDialog(_HandSelectorBase):
 
     def _open_color_wheel(self) -> None:
         picker = HandColorPickerDialog(self.config, self._selected_color, self)
+        self._active_color_picker = picker
         picker.color_chosen.connect(self._select_color)
         signal = getattr(self, "_parent_debug_signal", None)
+        connected_signal = None
         if signal is not None:
             try:
                 signal.connect(picker.handle_debug_frame)
+                connected_signal = signal
+            except Exception:
+                connected_signal = None
+
+        def _picker_closed() -> None:
+            if connected_signal is not None:
+                try:
+                    connected_signal.disconnect(picker.handle_debug_frame)
+                except Exception:
+                    pass
+            self._active_color_picker = None
+            try:
+                self.show()
+                self.raise_()
+                self.activateWindow()
             except Exception:
                 pass
+
+        picker.accepted.connect(_picker_closed)
+        picker.canceled.connect(_picker_closed)
         picker.show()
         picker.raise_()
+        picker.activateWindow()
 
     def _select_color(self, color: QColor) -> None:
         self._selected_color = QColor(color)
@@ -1747,8 +1768,13 @@ class HandColorPickerDialog(_HandSelectorBase):
         self._val_label.setText(f"{int(self._val * 100)}%")
 
     def _emit_chosen(self) -> None:
-        self._cancel()
-        self.color_chosen.emit(QColor(self._current_color))
+        if self._completed:
+            return
+        chosen = QColor(self._current_color)
+        self.color_chosen.emit(chosen)
+        self._completed = True
+        self.accepted.emit()
+        self.close()
 
 
 class EraserOptionsDialog(_HandSelectorBase):
@@ -2106,8 +2132,66 @@ class MainWindow(QMainWindow):
             lbl.setWordWrap(True)
             info_layout.addWidget(lbl)
         layout.addWidget(info_box, 0)
+
+        spotify_box = QFrame()
+        spotify_box.setObjectName("innerCard")
+        spotify_layout = QVBoxLayout(spotify_box)
+        spotify_layout.setContentsMargins(16, 16, 16, 16)
+        spotify_layout.setSpacing(10)
+        spotify_title = QLabel("Spotify Authorization")
+        spotify_title.setObjectName("settingsSubtitle")
+        spotify_layout.addWidget(spotify_title)
+        spotify_note = QLabel(
+            "If Spotify actions like Add to Liked Songs, Add to Playlist, or Create Playlist are failing, "
+            "click Re-authorize Spotify. Your browser will open to Spotify's login page — approve access, "
+            "then return here. This refreshes your token with the full permissions HGR needs."
+        )
+        spotify_note.setWordWrap(True)
+        spotify_layout.addWidget(spotify_note)
+        self.spotify_reauth_status = QLabel("")
+        self.spotify_reauth_status.setWordWrap(True)
+        spotify_layout.addWidget(self.spotify_reauth_status)
+        self.spotify_reauth_button = QPushButton("Re-authorize Spotify")
+        self.spotify_reauth_button.clicked.connect(self._on_spotify_reauth_clicked)
+        spotify_layout.addWidget(self.spotify_reauth_button)
+        layout.addWidget(spotify_box, 0)
+
         layout.addStretch(1)
         return panel
+
+    def _on_spotify_reauth_clicked(self) -> None:
+        import threading
+        if self._worker is None or not hasattr(self._worker, "spotify_controller"):
+            QMessageBox.information(
+                self,
+                "Spotify",
+                "Start the app (press Start on the home page) before re-authorizing Spotify.",
+            )
+            return
+        controller = self._worker.spotify_controller
+        self.spotify_reauth_button.setEnabled(False)
+        self.spotify_reauth_status.setText("Opening browser — complete the Spotify authorization, then return here.")
+
+        def _run() -> None:
+            success = False
+            message = ""
+            try:
+                success = bool(controller.authorize_full_scopes())
+                message = getattr(controller, "message", "") or ""
+            except Exception as exc:
+                success = False
+                message = f"error: {exc}"
+            QTimer.singleShot(0, lambda: self._on_spotify_reauth_finished(success, message))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_spotify_reauth_finished(self, success: bool, message: str) -> None:
+        self.spotify_reauth_button.setEnabled(True)
+        if success:
+            self.spotify_reauth_status.setText("Spotify authorized with full permissions. You can now use Add to Liked, Add to Playlist, and Create Playlist.")
+        else:
+            detail = message or "authorization failed"
+            self.spotify_reauth_status.setText(f"Re-authorization did not complete: {detail}")
 
     def _build_gesture_guide_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(

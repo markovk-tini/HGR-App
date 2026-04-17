@@ -21,8 +21,23 @@ import psutil
 
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_TTL_SECONDS = 3500.0
 SW_RESTORE = 9
+
+SPOTIFY_SCOPES = (
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-currently-playing",
+    "user-library-read",
+    "user-library-modify",
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "playlist-modify-private",
+    "playlist-modify-public",
+    "user-read-private",
+    "user-read-email",
+)
 
 
 @dataclass(frozen=True)
@@ -464,11 +479,11 @@ class SpotifyController:
         if not track_id:
             self._message = "spotify track unavailable"
             return False
-        status, _ = self._request_json("PUT", "/me/tracks", params={"ids": track_id})
+        status, payload = self._request_json("PUT", "/me/tracks", params={"ids": track_id})
         if status in {200, 201, 202, 204}:
             self._message = "spotify saved current track"
             return True
-        self._message = "spotify save track failed"
+        self._message = self._format_error_message("spotify save track failed", status, payload)
         return False
 
     def remove_current_track_from_liked(self) -> bool:
@@ -494,7 +509,7 @@ class SpotifyController:
         if playlist_id is None:
             self._message = "spotify playlist unavailable"
             return False
-        status, _ = self._request_json(
+        status, payload = self._request_json(
             "POST",
             f"/playlists/{playlist_id}/tracks",
             payload={"uris": [track_uri]},
@@ -502,7 +517,9 @@ class SpotifyController:
         if status in {200, 201}:
             self._message = f"spotify added to playlist: {target['name']}"
             return True
-        self._message = f"spotify add to playlist failed: {target['name']}"
+        self._message = self._format_error_message(
+            f"spotify add to playlist failed: {target['name']}", status, payload
+        )
         return False
 
     def remove_current_track_from_current_playlist(self) -> bool:
@@ -554,6 +571,167 @@ class SpotifyController:
             return True
         self._message = f"spotify remove from playlist failed: {target['name']}"
         return False
+
+    def create_playlist(self, name: str, *, public: bool = False) -> bool:
+        clean = (name or "").strip()
+        if not clean:
+            self._message = "spotify playlist name missing"
+            return False
+        user_id = self._get_current_user_id()
+        if not user_id:
+            return False
+        status, payload = self._request_json(
+            "POST",
+            f"/users/{user_id}/playlists",
+            payload={"name": clean, "public": bool(public)},
+        )
+        if status in {200, 201}:
+            self._message = f"spotify created playlist: {clean}"
+            return True
+        self._message = self._format_error_message(
+            f"spotify create playlist failed: {clean}", status, payload
+        )
+        return False
+
+    def _get_current_user_id(self) -> str | None:
+        status, payload = self._request_json("GET", "/me")
+        if status != 200 or not isinstance(payload, dict):
+            self._message = self._format_error_message("spotify profile unavailable", status, payload)
+            return None
+        user_id = payload.get("id")
+        if not isinstance(user_id, str) or not user_id:
+            self._message = "spotify profile unavailable"
+            return None
+        return user_id
+
+    def _format_error_message(self, prefix: str, status: int | None, payload: Any) -> str:
+        detail = ""
+        if isinstance(payload, dict):
+            inner = payload.get("error")
+            if isinstance(inner, dict):
+                msg = inner.get("message")
+                if isinstance(msg, str) and msg:
+                    detail = msg
+            elif isinstance(inner, str):
+                detail = inner
+        elif isinstance(payload, str):
+            detail = payload.strip()
+        if status == 403 and ("scope" in detail.lower() or not detail):
+            return f"{prefix} (403 missing scope — re-authorize Spotify in Settings)"
+        if status is None:
+            return f"{prefix} (network error)"
+        if detail:
+            return f"{prefix} ({status}: {detail})"
+        return f"{prefix} ({status})"
+
+    def authorize_full_scopes(self, *, port: int = 5000, timeout_seconds: float = 180.0) -> bool:
+        if not self._client_id or not self._client_secret:
+            self._message = "spotify credentials not found"
+            return False
+        import http.server
+        import secrets
+        import socketserver
+        import threading
+        import webbrowser
+
+        redirect_uri = self._redirect_uri or f"http://localhost:{port}/callback"
+        state = secrets.token_urlsafe(16)
+        auth_params = {
+            "client_id": self._client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(SPOTIFY_SCOPES),
+            "state": state,
+            "show_dialog": "true",
+        }
+        auth_url = f"{SPOTIFY_AUTH_URL}?{urllib_parse.urlencode(auth_params)}"
+
+        result: dict[str, str | None] = {"code": None, "error": None}
+        done = threading.Event()
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                return
+
+            def do_GET(self_inner):
+                parsed = urllib_parse.urlparse(self_inner.path)
+                params = dict(urllib_parse.parse_qsl(parsed.query))
+                if params.get("state") != state:
+                    result["error"] = "state mismatch"
+                else:
+                    result["code"] = params.get("code")
+                    result["error"] = params.get("error")
+                self_inner.send_response(200)
+                self_inner.send_header("Content-Type", "text/html; charset=utf-8")
+                self_inner.end_headers()
+                body = (
+                    "<html><body style='font-family:sans-serif;padding:32px;'>"
+                    "<h2>Spotify authorization complete.</h2>"
+                    "<p>You can close this tab and return to HGR App.</p>"
+                    "</body></html>"
+                )
+                self_inner.wfile.write(body.encode("utf-8"))
+                done.set()
+
+        try:
+            host = urllib_parse.urlparse(redirect_uri).hostname or "localhost"
+            httpd = socketserver.TCPServer((host, port), _Handler)
+        except OSError as exc:
+            self._message = f"spotify auth port busy: {exc}"
+            return False
+
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            webbrowser.open(auth_url)
+            done.wait(timeout=timeout_seconds)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+        if result.get("error") or not result.get("code"):
+            self._message = f"spotify auth failed: {result.get('error') or 'no code'}"
+            return False
+
+        token_pair = f"{self._client_id}:{self._client_secret}".encode("utf-8")
+        encoded = base64.b64encode(token_pair).decode("utf-8")
+        data = urllib_parse.urlencode(
+            {
+                "grant_type": "authorization_code",
+                "code": result["code"],
+                "redirect_uri": redirect_uri,
+            }
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            SPOTIFY_TOKEN_URL,
+            data=data,
+            headers={
+                "Authorization": f"Basic {encoded}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self._request_timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            self._message = f"spotify token exchange failed ({exc.code}): {body[:200]}"
+            return False
+        except Exception as exc:
+            self._message = f"spotify token exchange failed: {exc}"
+            return False
+
+        self._access_token = payload.get("access_token")
+        refresh = payload.get("refresh_token")
+        if refresh:
+            self._refresh_token = refresh
+        self._token_issue_time = time.time()
+        if self._token_path is None:
+            self._token_path = self._token_paths[0]
+        self._save_tokens()
+        self._message = "spotify authorized with full scopes"
+        return bool(self._access_token)
 
     def _default_token_paths(self) -> tuple[Path, ...]:
         home = Path.home()

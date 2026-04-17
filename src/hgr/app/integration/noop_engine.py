@@ -1598,14 +1598,23 @@ class GestureWorker(QObject):
                 self._volume_app_level = app_level
             self._volume_app_check_until = now + 3.0
 
+        bar_switched_this_frame = False
         if update.overlay_visible and self._volume_dual_active:
             palm_center = getattr(getattr(result.hand_reading, "palm", None), "center", None) if result.hand_reading is not None else None
             if palm_center is not None and self._volume_init_palm_x is not None:
                 dx = float(palm_center[0]) - self._volume_init_palm_x
+                previous_bar = self._volume_bar_selected
                 if dx < -0.06:
                     self._volume_bar_selected = "app"
                 elif dx > 0.06:
                     self._volume_bar_selected = "sys"
+                if self._volume_bar_selected != previous_bar:
+                    bar_switched_this_frame = True
+                    if self._volume_bar_selected == "app":
+                        rebase_level = self._volume_app_level if self._volume_app_level is not None else current_level
+                    else:
+                        rebase_level = current_level
+                    self.volume_tracker.rebase(rebase_level)
 
         controller_error_message: str | None = None
         controller_error_status: str | None = None
@@ -1618,7 +1627,7 @@ class GestureWorker(QObject):
                 controller_error_message = self.volume_controller.message or "mute failed"
                 controller_error_status = "error"
 
-        if update.active and update.level is not None:
+        if update.active and update.level is not None and not bar_switched_this_frame:
             if self._volume_dual_active and self._volume_bar_selected == "app":
                 new_app = max(0.0, min(1.0, float(update.level)))
                 if self._volume_app_process == "spotify":
@@ -2355,6 +2364,7 @@ class GestureWorker(QObject):
         labels = (
             ("add_playlist", "Add Playlist"),
             ("remove_playlist", "Remove Playlist"),
+            ("create_playlist", "Create Playlist"),
             ("add_queue", "Add Queue"),
             ("remove_queue", "Remove Queue"),
             ("like", "Add to Liked"),
@@ -2625,6 +2635,11 @@ class GestureWorker(QObject):
             self.command_detected.emit(self._spotify_control_text)
             self._start_playlist_prompt("add_playlist")
             return
+        if key == "create_playlist":
+            self._spotify_control_text = "what would you like to call the playlist?"
+            self.command_detected.emit(self._spotify_control_text)
+            self._start_playlist_prompt("create_playlist")
+            return
         if key == "remove_playlist":
             success = self.spotify_controller.remove_current_track_from_current_playlist()
             self._spotify_control_text = self.spotify_controller.message
@@ -2667,6 +2682,24 @@ class GestureWorker(QObject):
         )
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-")
         return cleaned
+
+    def _clean_create_playlist_reply(self, spoken_text: str) -> str:
+        cleaned = str(spoken_text or "").strip()
+        cleaned = re.sub(
+            r"^\s*(please\s+)?(can you\s+)?(create|make|new|build|set up)\s+(a\s+)?(new\s+)?(playlist\s+)?(called|named|titled)?\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(uh|um|please|thanks|thank you)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-")
+        words = [word.capitalize() if word.islower() else word for word in cleaned.split(" ") if word]
+        return " ".join(words)
 
     def _handle_left_hand_voice(self, prediction, now: float) -> None:
         stable_label = prediction.stable_label
@@ -2752,16 +2785,28 @@ class GestureWorker(QObject):
             self._voice_control_text = self.text_input_controller.message
             self.command_detected.emit(self._voice_control_text)
             return
-        if not self.text_input_controller.capture_target_window():
+        if not self.text_input_controller.start_windows_dictation():
             self._voice_control_text = self.text_input_controller.message
             self.command_detected.emit(self._voice_control_text)
-            self.voice_status_overlay.show_result("Click a text field first", command_text="", duration=1.8)
+            self.voice_status_overlay.show_result(
+                "Click a text field first",
+                command_text="",
+                duration=1.8,
+            )
             return
-        self.dictation_processor.reset()
+        self._dictation_active = True
         self._dictation_toggle_release_required = True
         self._dictation_release_candidate_since = 0.0
         self._dictation_stop_rearm_at = time.monotonic() + 2.5
-        self._start_voice_capture(mode="dictation")
+        self._dictation_backend = "windows"
+        self._voice_mode = "dictation"
+        self._voice_control_text = "dictation active — Windows voice typing"
+        self.command_detected.emit(self._voice_control_text)
+        self.voice_status_overlay.show_listening(
+            "Dictating…",
+            hint_text="Windows voice typing is live. Show left-hand two again to stop.",
+        )
+        self._emit_status("dictation active")
 
     def _stop_dictation_capture(self) -> None:
         if not self._dictation_active:
@@ -2770,9 +2815,7 @@ class GestureWorker(QObject):
         self._dictation_toggle_release_required = False
         self._dictation_release_candidate_since = 0.0
         self._dictation_stop_rearm_at = 0.0
-        stop_event = self._voice_stop_event
-        if stop_event is not None:
-            stop_event.set()
+        self.text_input_controller.stop_windows_dictation()
         self._voice_stop_event = None
         self._voice_request_id += 1
         self._voice_listening = False
@@ -2780,7 +2823,10 @@ class GestureWorker(QObject):
         self._voice_mode = "ready"
         self._voice_control_text = "dictation stopped"
         self.command_detected.emit(self._voice_control_text)
-        self.voice_status_overlay.show_result("Dictation stopped", command_text="", duration=1.4)
+        try:
+            self.voice_status_overlay.show_result("Dictation stopped", command_text="", duration=1.4)
+        except Exception:
+            pass
 
     def _start_voice_capture(self, *, mode: str, preferred_app: str | None = None) -> None:
         if self._voice_listening:
@@ -2874,6 +2920,21 @@ class GestureWorker(QObject):
             self._emit_status("save prompt active")
         elif mode == "selection" and self._selection_prompt_active:
             self.voice_status_overlay.update_selection_status("Listening...")
+        elif mode == "create_playlist":
+            self.voice_status_overlay.show_listening(
+                "Listening...",
+                hint_text="What would you like to call the playlist?",
+            )
+        elif mode == "add_playlist":
+            self.voice_status_overlay.show_listening(
+                "Listening...",
+                hint_text="Which playlist should I add to?",
+            )
+        elif mode == "remove_playlist":
+            self.voice_status_overlay.show_listening(
+                "Listening...",
+                hint_text="Which playlist should I remove from?",
+            )
         else:
             self.voice_status_overlay.show_listening()
         if mode != "save_prompt":
@@ -2890,7 +2951,7 @@ class GestureWorker(QObject):
                 transcript_mode = "save_prompt"
                 listen_seconds = 6.2
             else:
-                transcript_mode = "playlist" if mode in {"add_playlist", "remove_playlist"} else "command"
+                transcript_mode = "playlist" if mode in {"add_playlist", "remove_playlist", "create_playlist"} else "command"
                 listen_seconds = 4.2 if transcript_mode == "playlist" else 5.0
             result = self.voice_listener.listen(
                 max_seconds=listen_seconds,
@@ -3112,7 +3173,10 @@ class GestureWorker(QObject):
                 )
                 continue
 
-            playlist_name = self._clean_playlist_reply(heard_text)
+            if mode == "create_playlist":
+                playlist_name = self._clean_create_playlist_reply(heard_text)
+            else:
+                playlist_name = self._clean_playlist_reply(heard_text)
             if not playlist_name:
                 self._spotify_control_text = "playlist name not understood"
                 self.command_detected.emit(self._spotify_control_text)
@@ -3125,6 +3189,8 @@ class GestureWorker(QObject):
 
             if mode == "add_playlist":
                 success = self.spotify_controller.add_current_track_to_playlist(playlist_name)
+            elif mode == "create_playlist":
+                success = self.spotify_controller.create_playlist(playlist_name)
             else:
                 success = self.spotify_controller.remove_current_track_from_playlist(playlist_name)
             self._spotify_control_text = self.spotify_controller.message

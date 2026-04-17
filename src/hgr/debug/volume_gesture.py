@@ -37,6 +37,14 @@ class VolumeGestureTracker:
         self.no_hand_grace_seconds = float(no_hand_grace_seconds)
         self.reset()
 
+    def rebase(self, level: float | None) -> None:
+        if level is None:
+            return
+        clamped = max(0.0, min(1.0, float(level)))
+        self._anchor_level = clamped
+        self._level = clamped
+        self._rebase_pending = True
+
     def reset(self, level: float | None = None, muted: bool = False) -> None:
         self._active = False
         self._confirm_frames = 0
@@ -53,6 +61,7 @@ class VolumeGestureTracker:
         self._activation_ready_frames = 0
         self._last_pose_valid_time = 0.0
         self._last_seen_time = 0.0
+        self._rebase_pending = False
 
     def update(
         self,
@@ -89,6 +98,9 @@ class VolumeGestureTracker:
         if pose_valid:
             self._last_pose_valid_time = now
         control_y = float((landmarks[8][1] + landmarks[12][1]) * 0.5)
+        if self._rebase_pending:
+            self._rebase_pending = False
+            self._anchor_y = control_y
         pinky_hold = self._active and self._is_pinky_hold_pose(features)
 
         if pinky_hold and not self._pinky_hold_latched:
