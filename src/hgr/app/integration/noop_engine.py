@@ -2816,14 +2816,26 @@ class GestureWorker(QObject):
     def _start_dictation_capture(self) -> None:
         if self._voice_listening or self._dictation_active:
             return
-        # Always mark the state machine active and show the compact mic
-        # overlay immediately so the user sees their gesture was
-        # recognized. The actual ASR backend (sherpa-onnx or Windows
-        # System.Speech) boots on its own worker thread.
+        # Latch whichever external window was focused just before the user
+        # looked at the HGR App to make the gesture -- that's the window
+        # dictated text must land in. Must happen BEFORE the overlay shows,
+        # because showing the overlay may steal foreground.
+        try:
+            self.text_input_controller.capture_target_window()
+        except Exception:
+            pass
+
+        # Mark the state machine active and show the compact mic overlay
+        # immediately so the user sees their gesture was recognized. The
+        # ASR backend (sherpa-onnx or Windows System.Speech) boots on its
+        # own worker thread.
         self._dictation_active = True
         self._dictation_toggle_release_required = True
         self._dictation_release_candidate_since = 0.0
-        self._dictation_stop_rearm_at = time.monotonic() + 2.5
+        # Short rearm so a second "two" toggles dictation off without
+        # feeling laggy. The release-required gate + candidate hold still
+        # prevent accidental instant toggles off the first gesture.
+        self._dictation_stop_rearm_at = time.monotonic() + 0.9
         self._dictation_backend = "live"
         self._voice_mode = "dictation"
         self._voice_control_text = "dictation active"
@@ -2834,7 +2846,10 @@ class GestureWorker(QObject):
         self._emit_status("dictation active")
 
         if self._live_dictation is None:
-            self._live_dictation = DictationController(observer=self._build_dictation_observer())
+            self._live_dictation = DictationController(
+                observer=self._build_dictation_observer(),
+                text_sink=self.text_input_controller,
+            )
 
         def _boot_dictation() -> None:
             controller = self._live_dictation

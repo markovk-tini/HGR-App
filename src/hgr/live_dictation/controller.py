@@ -59,7 +59,15 @@ class DictationController:
         self,
         observer: DictationObserver | None = None,
         options: DictationOptions | None = None,
+        text_sink=None,
     ) -> None:
+        """``text_sink``: optional object with an
+        ``insert_text_streaming(text) -> bool`` method. When provided, every
+        committed delta goes through it instead of raw SendInput -- the sink
+        is expected to restore focus to the correct external window first.
+        This is how we route typing into whichever app the user had focused
+        before they looked at the camera to make the "two" gesture.
+        """
         self._observer: DictationObserver = observer or _NullObserver()
         self._options = options or DictationOptions()
         self._committer = StableCommitter()
@@ -68,6 +76,7 @@ class DictationController:
         self._worker = None
         self._backend_name = "idle"
         self._type_lock = threading.Lock()
+        self._text_sink = text_sink
 
     @property
     def state(self) -> DictationState:
@@ -203,10 +212,16 @@ class DictationController:
         # interleave mid-word.
         with self._type_lock:
             try:
-                typing_injector.type_text(result.to_type)
+                if self._text_sink is not None:
+                    ok = bool(self._text_sink.insert_text_streaming(result.to_type))
+                else:
+                    ok = typing_injector.type_text(result.to_type)
             except Exception:
-                log.exception("type_text failed")
+                log.exception("typing failed")
                 return
+        if not ok:
+            self._observer.on_debug("typing failed (focus lost?)")
+            return
         try:
             self._observer.on_typed(result.to_type)
         except Exception:
