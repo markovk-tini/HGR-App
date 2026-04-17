@@ -36,6 +36,5 @@ def main() -> int:
             w.setWindowIcon(QIcon(str(icon_path)))
         return w
 
-    window = TouchlessSplash.run_with(_build_window, config.accent_color, app)
-    window.show()
+    TouchlessSplash.run_with(_build_window, config.accent_color, app)
     return app.exec()

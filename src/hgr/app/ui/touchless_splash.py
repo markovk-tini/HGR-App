@@ -9,7 +9,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
@@ -20,9 +20,9 @@ from PySide6.QtWidgets import (
 
 class TouchlessSplash(QWidget):
     _WORD = "Touchless"
-    _LETTER_STAGGER_MS = 80
-    _LETTER_DURATION_MS = 360
-    _WAVE_OFFSET_PX = 18
+    _LETTER_STAGGER_MS = 130
+    _LETTER_DURATION_MS = 520
+    _WAVE_OFFSET_PX = 22
 
     def __init__(self, accent_color: str, parent: QWidget | None = None) -> None:
         super().__init__(
@@ -31,6 +31,8 @@ class TouchlessSplash(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        # Wipe any inherited frame/background so only the letters are visible.
+        self.setStyleSheet("QWidget { background: transparent; border: none; }")
 
         self._accent_color = accent_color
         self._labels: list[QLabel] = []
@@ -40,10 +42,7 @@ class TouchlessSplash(QWidget):
         self._animation_group: QSequentialAnimationGroup | None = None
         self._finished = False
 
-        font = QFont()
-        font.setPointSize(72)
-        font.setWeight(QFont.Black)
-        font.setLetterSpacing(QFont.AbsoluteSpacing, 2)
+        font = self._pick_display_font()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(60, 40, 60, 40)
@@ -54,7 +53,7 @@ class TouchlessSplash(QWidget):
             label.setFont(font)
             label.setAlignment(Qt.AlignCenter)
             label.setStyleSheet(
-                f"color: {accent_color}; background: transparent;"
+                f"color: {accent_color}; background: transparent; border: none;"
             )
             effect = QGraphicsOpacityEffect(label)
             effect.setOpacity(0.0)
@@ -65,6 +64,27 @@ class TouchlessSplash(QWidget):
 
         self.adjustSize()
         self._center_on_screen()
+
+    @staticmethod
+    def _pick_display_font() -> QFont:
+        # Walk a short list of nicer display faces and use the first one the
+        # system actually has. Segoe UI Variable Display ships with Windows 11
+        # and looks noticeably cleaner at large sizes than the default.
+        preferred = (
+            "Segoe UI Variable Display",
+            "Segoe UI Semibold",
+            "Segoe UI",
+            "Calibri",
+            "Arial",
+        )
+        available = set(QFontDatabase.families())
+        family = next((name for name in preferred if name in available), "Segoe UI")
+        font = QFont(family)
+        font.setPointSize(86)
+        font.setWeight(QFont.DemiBold)
+        font.setLetterSpacing(QFont.PercentageSpacing, 104)
+        font.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
+        return font
 
     def _center_on_screen(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -118,48 +138,38 @@ class TouchlessSplash(QWidget):
     def is_finished(self) -> bool:
         return self._finished
 
-    def fade_out_and_close(self, duration_ms: int = 220) -> None:
-        overall_effect = QGraphicsOpacityEffect(self)
-        overall_effect.setOpacity(1.0)
-        self.setGraphicsEffect(overall_effect)
-        fade = QPropertyAnimation(overall_effect, b"opacity", self)
-        fade.setStartValue(1.0)
-        fade.setEndValue(0.0)
-        fade.setDuration(duration_ms)
-        fade.setEasingCurve(QEasingCurve.InCubic)
-        fade.finished.connect(self.close)
-        fade.start(QPropertyAnimation.DeleteWhenStopped)
-
     def total_animation_ms(self) -> int:
         return (len(self._WORD) - 1) * self._LETTER_STAGGER_MS + self._LETTER_DURATION_MS
 
     @staticmethod
     def run_with(callback_build_window, accent_color: str, app) -> QWidget:
-        """Show splash, play the full "Touchless" reveal, THEN build and
-        return the main window. We keep the animation and the window build
-        strictly sequential because MainWindow construction blocks the event
-        loop for long enough to prevent the splash from ever painting if the
-        two overlap."""
+        """Show splash, play the full "Touchless" reveal, then build AND show
+        the main window before the splash disappears. That way the user sees
+        the completed word right up until the window appears, with no gap."""
         splash = TouchlessSplash(accent_color)
         splash.show()
         splash.raise_()
-        # Force the splash to actually paint before we start timing the
-        # animation. Without this, the window exists but is still blank when
-        # QPropertyAnimation starts advancing.
+        # Paint the splash before we start timing the animation. Without
+        # this, QPropertyAnimation starts advancing while the window is still
+        # blank.
         for _ in range(4):
             app.processEvents()
 
         splash.start_animation()
-        # Spin the event loop until the animation finishes. No window build
-        # happens during this phase, so the animation frames are never
-        # starved.
+        # Don't starve the animation frames -- do not build the window yet.
         while not splash.is_finished():
             app.processEvents()
 
-        # Full word is now on screen. Build the main window (this can block
-        # for a couple of seconds; the finished "Touchless" stays visible on
-        # top until we close it).
+        # Word is fully on screen. Build the main window behind the splash.
         window = callback_build_window()
+        # Show the window while the splash is still visibly on top, then pump
+        # the event loop until the main window has actually painted at least
+        # once. Only THEN remove the splash so the two don't leave a blank
+        # frame gap between them.
+        window.show()
+        window.raise_()
+        for _ in range(6):
+            app.processEvents()
 
         splash.close()
         return window
