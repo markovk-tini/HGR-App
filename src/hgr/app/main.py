@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication
 from ..config.app_config import APP_NAME, load_config, save_config
 from ..utils.runtime_paths import resource_path
 from .ui.main_window import MainWindow
+from .ui.touchless_splash import TouchlessSplash
 
 
 def _resolve_app_icon():
@@ -29,8 +30,12 @@ def main() -> int:
     config = load_config()
     save_config(config)
 
-    window = MainWindow(config)
-    if icon_path is not None:
-        window.setWindowIcon(QIcon(str(icon_path)))
+    def _build_window() -> MainWindow:
+        w = MainWindow(config)
+        if icon_path is not None:
+            w.setWindowIcon(QIcon(str(icon_path)))
+        return w
+
+    window = TouchlessSplash.run_with(_build_window, config.accent_color, app)
     window.show()
     return app.exec()

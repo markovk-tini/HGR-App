@@ -152,10 +152,14 @@ try {
     $grammar = New-Object System.Speech.Recognition.DictationGrammar
     $recognizer.LoadGrammar($grammar)
     $recognizer.SetInputToDefaultAudioDevice()
-    $recognizer.InitialSilenceTimeout = [TimeSpan]::FromSeconds(8.0)
-    $recognizer.BabbleTimeout = [TimeSpan]::FromSeconds(8.0)
+    # Disable auto-completion timeouts. TimeSpan.Zero means "no timeout",
+    # so the engine never ends its Multiple-mode session on silence/babble
+    # -- it only stops when we explicitly call RecognizeAsyncCancel.
+    $recognizer.InitialSilenceTimeout = [TimeSpan]::Zero
+    $recognizer.BabbleTimeout = [TimeSpan]::Zero
     $recognizer.EndSilenceTimeout = [TimeSpan]::FromSeconds(0.85)
     $recognizer.EndSilenceTimeoutAmbiguous = [TimeSpan]::FromSeconds(1.10)
+    $script:stopRequested = $false
     $recognizer.add_SpeechHypothesized({
         param($sender, $eventArgs)
         if ($null -ne $eventArgs.Result -and -not [string]::IsNullOrWhiteSpace($eventArgs.Result.Text)) {
@@ -174,13 +178,26 @@ try {
             Emit-Event 'rejected' $eventArgs.Result.Text $eventArgs.Result.Confidence
         }
     })
+    # Belt-and-suspenders: if the engine does end its session for any
+    # reason we didn't anticipate, restart Multiple-mode recognition so
+    # dictation stays alive until the user actually toggles it off.
+    $recognizer.add_RecognizeCompleted({
+        param($sender, $eventArgs)
+        if (-not $script:stopRequested) {
+            try {
+                $sender.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
+            } catch {
+                Emit-Event 'error' '' 0.0 ("restart failed: " + $_.Exception.Message)
+            }
+        }
+    })
     Emit-Event 'ready'
     $recognizer.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple)
     while (-not (Test-Path -LiteralPath $stopFile)) {
         Start-Sleep -Milliseconds 75
     }
+    $script:stopRequested = $true
     $recognizer.RecognizeAsyncCancel()
-    $recognizer.RecognizeAsyncStop()
     Start-Sleep -Milliseconds 150
     Emit-Event 'stopped'
 } catch {
