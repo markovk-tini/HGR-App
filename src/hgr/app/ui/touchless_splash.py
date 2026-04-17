@@ -27,12 +27,15 @@ class TouchlessSplash(QWidget):
     _VERTICAL_PADDING = 90
 
     def __init__(self, accent_color: str, parent: QWidget | None = None) -> None:
+        # Qt.SplashScreen adds a subtle DWM frame/shadow on Windows. Drop it
+        # and use a plain frameless tool window so only our painted letters
+        # show up on screen.
         super().__init__(
             parent,
             Qt.FramelessWindowHint
-            | Qt.SplashScreen
+            | Qt.Tool
             | Qt.WindowStaysOnTopHint
-            | Qt.Tool,
+            | Qt.NoDropShadowWindowHint,
         )
         # Render the letters straight to a translucent window -- no child
         # widgets, no layouts, no QGraphicsEffects. That way nothing can draw
@@ -41,6 +44,7 @@ class TouchlessSplash(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
 
         self._accent_color = QColor(accent_color)
         self._font = self._pick_display_font()
@@ -68,22 +72,23 @@ class TouchlessSplash(QWidget):
 
     @staticmethod
     def _pick_display_font() -> QFont:
-        # Favor geometric / slick display faces that ship with Windows. We
-        # walk the list and use the first one the user actually has installed.
+        # Humanist / softly-curved faces that ship with Windows. Corbel and
+        # Candara have rounded terminals (no sharp corners), and we tilt them
+        # with italic for the slight slant the user asked for.
         preferred = (
-            "Century Gothic",
-            "Candara",
             "Corbel",
+            "Candara",
+            "Calibri",
             "Segoe UI Variable Display",
-            "Segoe UI Semibold",
             "Segoe UI",
         )
         available = set(QFontDatabase.families())
         family = next((name for name in preferred if name in available), "Segoe UI")
         font = QFont(family)
         font.setPointSize(96)
-        font.setWeight(QFont.Bold)
-        font.setLetterSpacing(QFont.PercentageSpacing, 112)
+        font.setWeight(QFont.DemiBold)
+        font.setItalic(True)
+        font.setLetterSpacing(QFont.PercentageSpacing, 108)
         font.setStyleStrategy(QFont.PreferAntialias | QFont.PreferQuality)
         return font
 
@@ -144,6 +149,12 @@ class TouchlessSplash(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
+        # Force the window's backing store to fully transparent pixels before
+        # we draw the letters. Without this, some Windows compositor paths
+        # leave a faint rectangular fill behind that reads as a border.
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
