@@ -492,10 +492,27 @@ class DesktopController:
         if resolved_lower.endswith("hgr app.exe") or resolved_lower.endswith("hgr_app.exe"):
             self._message = "cannot reopen the running HGR App"
             return False
-        if self._launch_target(str(resolved)):
+        if resolved_lower.endswith("hgr app.lnk") or resolved_lower.endswith("hgr_app.lnk"):
+            self._message = "cannot reopen the running HGR App"
+            return False
+        resolved_str = str(resolved)
+        if not resolved.exists():
+            label = "folder" if resolved_str.endswith(("/", "\\")) else "file"
+            self._message = f"could not open {label}: {resolved.name} (not found)"
+            return False
+        if self._launch_target(resolved_str):
             label = "folder" if resolved.is_dir() else "file"
             self._message = f"opened {label}: {resolved.name}"
             return True
+        # Fallback: explorer.exe can open files/folders reliably when os.startfile
+        # silently fails (e.g., file association quirks, network paths).
+        try:
+            subprocess.Popen(["explorer.exe", resolved_str], shell=False)
+            label = "folder" if resolved.is_dir() else "file"
+            self._message = f"opened {label}: {resolved.name}"
+            return True
+        except Exception:
+            pass
         label = "folder" if resolved.is_dir() else "file"
         self._message = f"could not open {label}: {resolved.name}"
         return False
@@ -1623,10 +1640,31 @@ try {
         self._quick_app_catalog = sorted(entries.values(), key=lambda item: (item.normalized_name, item.display_name.lower()))
         return self._quick_app_catalog
 
+    @staticmethod
+    def _entry_is_running_hgr(entry: DesktopAppEntry) -> bool:
+        target = str(getattr(entry, "target", "") or "").strip().lower()
+        display = str(getattr(entry, "display_name", "") or "").strip().lower()
+        normalized = str(getattr(entry, "normalized_name", "") or "").strip().lower()
+        if target:
+            base = target.replace("\\", "/").rsplit("/", 1)[-1]
+            if base in {"hgr app.exe", "hgr_app.exe", "hgr app.lnk", "hgr_app.lnk"}:
+                return True
+            if target.endswith("hgr app.exe") or target.endswith("hgr_app.exe"):
+                return True
+            if target.endswith("hgr app.lnk") or target.endswith("hgr_app.lnk"):
+                return True
+        if display in {"hgr app", "hgr", "hgr application"}:
+            return True
+        if normalized in {"hgr app", "hgr", "hgr application"}:
+            return True
+        return False
+
     def _store_entry(self, entries: dict[str, DesktopAppEntry], entry: DesktopAppEntry) -> None:
         if not entry.normalized_name or not entry.target:
             return
         if entry.normalized_name.startswith("uninstall "):
+            return
+        if self._entry_is_running_hgr(entry):
             return
         existing = entries.get(entry.normalized_name)
         if existing is None:

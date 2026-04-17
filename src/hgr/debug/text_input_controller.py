@@ -243,13 +243,30 @@ class TextInputController:
         if not self._available or self._user32 is None:
             self._message = "windows dictation unavailable on this platform"
             return False
-        if not self.capture_target_window() and int(self._target_hwnd or self._last_external_hwnd or 0) <= 0:
-            self._message = "click into a text field before starting dictation"
-            return False
-        if not self._restore_target_window():
-            self._message = "could not focus dictation target"
-            return False
-        time.sleep(0.20)
+        # Give the user a short grace period so a click into a text field
+        # just before/after the gesture can register, and so transient own-window
+        # overlays are not mistaken for "no target clicked".
+        captured = self.capture_target_window()
+        if not captured:
+            deadline = time.monotonic() + 0.75
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+                if self.capture_target_window():
+                    captured = True
+                    break
+        target_hwnd = int(self._target_hwnd or self._last_external_hwnd or 0)
+        # Best-effort focus restore — if we have any remembered external window,
+        # bring it forward. If not, fall back to sending Win+H regardless so
+        # Windows dictation attaches to whatever the user currently has focused.
+        if target_hwnd > 0:
+            self._restore_target_window()
+            time.sleep(0.15)
+        else:
+            foreground = self._foreground_window()
+            if foreground > 0 and self._is_own_window(foreground):
+                # Our app is foreground and we have no remembered text field.
+                self._message = "click into a text field before starting dictation"
+                return False
         if not self.toggle_windows_dictation():
             return False
         self._message = "dictation active at the current cursor"

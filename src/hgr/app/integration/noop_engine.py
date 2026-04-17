@@ -152,6 +152,7 @@ class GestureWorker(QObject):
         self._voice_candidate_since = 0.0
         self._voice_cooldown_until = 0.0
         self._voice_latched_label: str | None = None
+        self._voice_one_two_triggered_at: float = 0.0
         self._voice_queue: queue.Queue[tuple[int, object]] = queue.Queue()
         self._voice_thread: threading.Thread | None = None
         self._voice_request_id = 0
@@ -2725,6 +2726,8 @@ class GestureWorker(QObject):
         if stable_label == "fist":
             if self._voice_latched_label == "fist":
                 return
+            if now - float(getattr(self, "_voice_one_two_triggered_at", 0.0) or 0.0) < 1.0:
+                return
             if self._voice_listening or self._dictation_active or self._save_prompt_active or self._selection_prompt_active:
                 self._cancel_all_voice_stages()
                 self._voice_latched_label = "fist"
@@ -2769,6 +2772,7 @@ class GestureWorker(QObject):
 
         self._voice_latched_label = stable_label
         self._voice_cooldown_until = now + 1.25
+        self._voice_one_two_triggered_at = now
         if stable_label == "two":
             if self._dictation_active:
                 self._stop_dictation_capture()
