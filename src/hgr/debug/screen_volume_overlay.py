@@ -105,8 +105,8 @@ class ScreenVolumeOverlay(QWidget):
         self._bar_selected = str(selected_bar)
         self._app_fraction = max(0.0, min(1.0, float(app_level))) if app_level is not None else 0.0
         self._set_fraction_from_level(sys_level)
-        if self.width() != 300:
-            self.setFixedSize(300, 350)
+        if self.width() != 220:
+            self.setFixedSize(220, 350)
         self.update()
 
     def sync_visual_state(self) -> None:

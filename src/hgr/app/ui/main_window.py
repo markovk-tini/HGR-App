@@ -1401,6 +1401,12 @@ class _HandSelectorBase(QWidget):
     def handle_debug_frame(self, frame, info) -> None:
         if not self.isVisible() or self._completed or not isinstance(info, dict):
             return
+        if getattr(self, "_suspended_for_child", False):
+            self._hand_clicks_armed = False
+            self._raw_clicks_armed = False
+            self._last_left_down = False
+            self._last_right_down = False
+            return
 
         union_geo = self.geometry()
         global_point = None
@@ -1622,6 +1628,11 @@ class PenOptionsDialog(_HandSelectorBase):
     def _open_color_wheel(self) -> None:
         picker = HandColorPickerDialog(self.config, self._selected_color, self)
         self._active_color_picker = picker
+        self._suspended_for_child = True
+        self._hand_clicks_armed = False
+        self._raw_clicks_armed = False
+        self._last_left_down = False
+        self._last_right_down = False
         picker.color_chosen.connect(self._select_color)
         signal = getattr(self, "_parent_debug_signal", None)
         connected_signal = None
@@ -1639,6 +1650,11 @@ class PenOptionsDialog(_HandSelectorBase):
                 except Exception:
                     pass
             self._active_color_picker = None
+            self._suspended_for_child = False
+            self._hand_clicks_armed = False
+            self._raw_clicks_armed = False
+            self._last_left_down = False
+            self._last_right_down = False
             try:
                 self.show()
                 self.raise_()
