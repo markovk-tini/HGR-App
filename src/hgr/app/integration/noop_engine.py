@@ -2029,10 +2029,19 @@ class GestureWorker(QObject):
             return False
         fingers = hand_reading.fingers
         palm_scale = max(float(hand_reading.palm.scale), 1e-6)
-        thumb_index_ratio = float(np.linalg.norm((hand_reading.landmarks[4] - hand_reading.landmarks[8])[:2])) / palm_scale
+        landmarks = hand_reading.landmarks
+        thumb_index_ratio = float(np.linalg.norm((landmarks[4] - landmarks[8])[:2])) / palm_scale
         thumb_out = (fingers["thumb"].state == "fully_open" and fingers["thumb"].openness >= 0.70 and fingers["thumb"].palm_distance >= 0.72)
         folded_core = all(fingers[name].state in {"mostly_curled", "closed"} for name in ("index", "middle", "ring", "pinky"))
-        return thumb_out and folded_core and thumb_index_ratio >= 0.62
+        # Reject thumbs-up: the thumb tip (landmark 4) must NOT be higher on
+        # screen than the middle finger's MCP base joint (landmark 9). Screen
+        # Y grows downward, so "higher" means smaller Y. The close-window
+        # gesture is meant to be a horizontal / sideways thumb, not a vertical
+        # thumbs-up signal the user often makes in unrelated contexts.
+        thumb_tip_y = float(landmarks[4][1])
+        middle_mcp_y = float(landmarks[9][1])
+        thumb_not_above_middle_base = thumb_tip_y >= middle_mcp_y
+        return thumb_out and folded_core and thumb_index_ratio >= 0.62 and thumb_not_above_middle_base
 
     def _handle_window_control_gestures(self, hand_reading, hand_handedness: str | None, now: float) -> bool:
         if hand_handedness != "Right" or hand_reading is None:
