@@ -2891,6 +2891,27 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(phone_note)
 
         self.phone_camera_checkbox = QCheckBox("Use phone camera instead")
+        self.phone_camera_checkbox.setObjectName("phoneCameraCheckbox")
+        self.phone_camera_checkbox.setStyleSheet(
+            f"""
+            QCheckBox#phoneCameraCheckbox {{
+                color: {self.config.text_color};
+                spacing: 10px;
+                font-size: 14px;
+            }}
+            QCheckBox#phoneCameraCheckbox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid rgba(255,255,255,0.35);
+                background: rgba(255,255,255,0.05);
+            }}
+            QCheckBox#phoneCameraCheckbox::indicator:checked {{
+                background: {self.config.accent_color};
+                border: 1px solid {self.config.accent_color};
+            }}
+            """
+        )
         self.phone_camera_checkbox.setChecked(bool(getattr(self.config, "phone_camera_enabled", False)))
         self.phone_camera_checkbox.toggled.connect(self._on_phone_camera_toggled)
         box_layout.addWidget(self.phone_camera_checkbox)
