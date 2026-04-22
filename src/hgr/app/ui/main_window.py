@@ -13,7 +13,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, QEvent, QUrl, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QThread, QTimer, QEvent, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPainterPath, QPen, QCursor, QPixmap, QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -2378,6 +2378,54 @@ class EraserOptionsDialog(_HandSelectorBase):
         self._thickness_value.setText(str(self._selected_thickness))
 
 
+class _PhoneCameraTestThread(QThread):
+    """Background probe for the "Use phone camera" Test button.
+
+    Runs `try_open_camera_url` on a worker thread so the Settings UI stays
+    responsive while OpenCV negotiates the stream (first-frame latency on a
+    live MJPEG URL can be 2-5 seconds). Emits one signal with the outcome.
+    """
+
+    finished_with_result = Signal(bool, str)
+
+    def __init__(self, url: str, parent=None) -> None:
+        super().__init__(parent)
+        self._url = str(url or "").strip()
+
+    def run(self) -> None:
+        from ..camera.camera_utils import try_open_camera_url
+        url = self._url
+        if not url:
+            self.finished_with_result.emit(False, "No URL provided.")
+            return
+        try:
+            cap = try_open_camera_url(url)
+        except Exception as exc:
+            self.finished_with_result.emit(False, f"{type(exc).__name__}: {exc}")
+            return
+        if cap is None:
+            self.finished_with_result.emit(
+                False,
+                "Could not connect. Check that the phone app is streaming, the URL is correct, and your phone and PC are on the same WiFi network.",
+            )
+            return
+        try:
+            ok, frame = cap.read()
+        except Exception as exc:
+            ok, frame = False, None
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        if not ok or frame is None:
+            self.finished_with_result.emit(False, "Opened the stream but received no frames.")
+            return
+        height = int(getattr(frame, "shape", (0, 0, 0))[0]) if hasattr(frame, "shape") else 0
+        width = int(getattr(frame, "shape", (0, 0, 0))[1]) if hasattr(frame, "shape") else 0
+        self.finished_with_result.emit(True, f"connected — frame {width}x{height}.")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__()
@@ -2832,9 +2880,139 @@ class MainWindow(QMainWindow):
         box_layout.addLayout(low_fps_row)
         self._refresh_low_fps_button_label()
 
+        phone_note = QLabel(
+            "If you don't have a webcam or yours is low quality, Touchless can use your phone's camera over WiFi. "
+            "Install a free IP-camera app on your phone (for example IP Webcam on Android, or Iriun / EpocCam on iOS), "
+            "start the stream, and paste the URL the app shows (like http://192.168.1.50:8080/video). "
+            "Your phone and PC must be on the same WiFi network."
+        )
+        phone_note.setObjectName("cameraNote")
+        phone_note.setWordWrap(True)
+        box_layout.addWidget(phone_note)
+
+        self.phone_camera_checkbox = QCheckBox("Use phone camera instead")
+        self.phone_camera_checkbox.setChecked(bool(getattr(self.config, "phone_camera_enabled", False)))
+        self.phone_camera_checkbox.toggled.connect(self._on_phone_camera_toggled)
+        box_layout.addWidget(self.phone_camera_checkbox)
+
+        phone_row = QHBoxLayout()
+        self.phone_camera_url_input = QLineEdit()
+        self.phone_camera_url_input.setPlaceholderText("http://192.168.1.50:8080/video")
+        self.phone_camera_url_input.setText(str(getattr(self.config, "phone_camera_url", "") or ""))
+        self.phone_camera_url_input.editingFinished.connect(self._on_phone_camera_url_changed)
+        phone_row.addWidget(self.phone_camera_url_input, 1)
+
+        self.phone_camera_test_button = QPushButton("Test")
+        self.phone_camera_test_button.clicked.connect(self._on_phone_camera_test_clicked)
+        phone_row.addWidget(self.phone_camera_test_button, 0)
+        box_layout.addLayout(phone_row)
+
+        self.phone_camera_status_label = QLabel("")
+        self.phone_camera_status_label.setObjectName("cameraNote")
+        self.phone_camera_status_label.setWordWrap(True)
+        box_layout.addWidget(self.phone_camera_status_label)
+
+        self._refresh_phone_camera_controls()
+
         layout.addWidget(box)
         layout.addStretch(1)
         return panel
+
+    def _refresh_phone_camera_controls(self) -> None:
+        if not hasattr(self, "phone_camera_checkbox"):
+            return
+        enabled = bool(self.phone_camera_checkbox.isChecked())
+        # Enable the URL field whether or not the checkbox is ticked so the
+        # user can paste a URL and hit Test before flipping the switch.
+        self.phone_camera_url_input.setEnabled(True)
+        self.phone_camera_test_button.setEnabled(True)
+        # Grey out the local-camera picker when the phone source is active so
+        # it's clear which setting is winning.
+        if hasattr(self, "camera_combo"):
+            self.camera_combo.setEnabled(not enabled)
+        for attr in ("refresh_cameras_button", "save_camera_button", "clear_camera_button"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(not enabled)
+
+    def _on_phone_camera_toggled(self, checked: bool) -> None:
+        self.config.phone_camera_enabled = bool(checked)
+        save_config(self.config)
+        self._refresh_phone_camera_controls()
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText(
+                "Last action: phone camera ON" if checked else "Last action: phone camera OFF"
+            )
+        # If the checkbox is on but no URL has been saved yet, warn the user
+        # instead of silently falling back to the local webcam.
+        if checked and not str(getattr(self.config, "phone_camera_url", "") or "").strip():
+            self.phone_camera_status_label.setText(
+                "Enter a stream URL and click Test. Until then, the local camera will be used."
+            )
+            return
+        # A live camera switch needs the engine to re-open, because the URL
+        # / local-device selection is evaluated inside _open_camera().
+        self._restart_camera_for_phone_toggle()
+
+    def _on_phone_camera_url_changed(self) -> None:
+        if not hasattr(self, "phone_camera_url_input"):
+            return
+        url = self.phone_camera_url_input.text().strip()
+        if str(getattr(self.config, "phone_camera_url", "") or "") == url:
+            return
+        self.config.phone_camera_url = url
+        save_config(self.config)
+        if bool(getattr(self.config, "phone_camera_enabled", False)):
+            # URL changed while phone-source is active: restart the capture
+            # so the new URL takes effect immediately.
+            self._restart_camera_for_phone_toggle()
+
+    def _on_phone_camera_test_clicked(self) -> None:
+        if not hasattr(self, "phone_camera_url_input"):
+            return
+        url = self.phone_camera_url_input.text().strip()
+        if not url:
+            self.phone_camera_status_label.setText("Enter a URL first.")
+            return
+        # Persist whatever the user typed before testing, so a successful
+        # test is immediately usable by the engine when they flip the toggle.
+        if str(getattr(self.config, "phone_camera_url", "") or "") != url:
+            self.config.phone_camera_url = url
+            save_config(self.config)
+        self.phone_camera_test_button.setEnabled(False)
+        self.phone_camera_status_label.setText("Testing connection...")
+        self._phone_camera_test_thread = _PhoneCameraTestThread(url, self)
+        self._phone_camera_test_thread.finished_with_result.connect(self._on_phone_camera_test_result)
+        self._phone_camera_test_thread.finished.connect(self._phone_camera_test_thread.deleteLater)
+        self._phone_camera_test_thread.start()
+
+    def _on_phone_camera_test_result(self, ok: bool, message: str) -> None:
+        self.phone_camera_test_button.setEnabled(True)
+        prefix = "OK — " if ok else "Failed — "
+        self.phone_camera_status_label.setText(prefix + message)
+
+    def _restart_camera_for_phone_toggle(self) -> None:
+        """Stop and re-start the engine so the new camera source is picked up.
+
+        The engine evaluates phone_camera_enabled / phone_camera_url inside
+        `_open_camera()`, which only runs during `start()`. Calling start()
+        while already running is a no-op, so we must stop first.
+        """
+        worker = getattr(self, "_worker", None)
+        if worker is None:
+            return
+        stop_fn = getattr(worker, "stop", None)
+        start_fn = getattr(worker, "start", None)
+        if callable(stop_fn):
+            try:
+                stop_fn()
+            except Exception:
+                pass
+        if callable(start_fn):
+            try:
+                start_fn()
+            except Exception:
+                pass
 
     def _refresh_low_fps_button_label(self) -> None:
         if not hasattr(self, "low_fps_button"):

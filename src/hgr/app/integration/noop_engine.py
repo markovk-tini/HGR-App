@@ -44,7 +44,7 @@ from ...voice.dictation import DictationProcessor
 from ...voice.grammar_corrector import CorrectionResult, GrammarCorrector
 from ...voice.llama_server import LlamaServer
 from ...voice.whisper_refiner import RefinementResult, WhisperRefiner
-from ..camera.camera_utils import open_camera_by_index, open_preferred_or_first_available
+from ..camera.camera_utils import open_camera_by_index, open_phone_camera_url, open_preferred_or_first_available
 
 
 _DICTATION_HALLUCINATION_STOPWORDS = {
@@ -2576,8 +2576,22 @@ class GestureWorker(QObject):
             self.running_state_changed.emit(False)
 
     def _open_camera(self):
+        # Phone-camera-URL path overrides the local-device path only when the
+        # checkbox is on AND a URL has actually been saved. An explicit
+        # camera_index_override (passed in at construction, e.g. from the
+        # Settings "Test" flow) always beats the phone URL so the user can
+        # still probe a local device while phone camera is enabled.
+        phone_url = str(getattr(self.config, "phone_camera_url", "") or "").strip()
+        use_phone = bool(getattr(self.config, "phone_camera_enabled", False)) and phone_url
         if self.camera_index_override is not None:
             result = open_camera_by_index(self.camera_index_override, max_index=self.config.camera_scan_limit)
+        elif use_phone:
+            result = open_phone_camera_url(phone_url)
+            if result[1] is None:
+                # Phone camera unreachable at startup — fall back to the last
+                # preferred local camera so the app can still run. The UI will
+                # reflect this via the live-status path (status_changed signal).
+                result = open_preferred_or_first_available(self.config.preferred_camera_index, max_index=self.config.camera_scan_limit)
         else:
             result = open_preferred_or_first_available(self.config.preferred_camera_index, max_index=self.config.camera_scan_limit)
         self._apply_low_fps_capture_tuning(result)

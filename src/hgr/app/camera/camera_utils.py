@@ -183,6 +183,47 @@ def open_camera_by_index(index: int, max_index: int = 8) -> Tuple[Optional[Camer
     return None, None
 
 
+def try_open_camera_url(url: str, read_attempts: int = 12) -> Optional[cv2.VideoCapture]:
+    """Open an IP-webcam-style stream URL (MJPEG / RTSP / HTTP) and verify a frame arrives.
+
+    Returns a `cv2.VideoCapture` on success, or None. Blocks for up to a few
+    seconds while waiting for the first frame — callers that need
+    responsiveness (e.g. a Test button in Settings) should run this on a
+    worker thread.
+    """
+    clean = str(url or "").strip()
+    if not clean:
+        return None
+    with _quiet_opencv_probe():
+        try:
+            cap = cv2.VideoCapture(clean)
+        except Exception:
+            return None
+        if not cap.isOpened():
+            cap.release()
+            return None
+        for _ in range(read_attempts):
+            ok, _ = cap.read()
+            if ok:
+                return cap
+            time.sleep(0.08)
+        cap.release()
+        return None
+
+
+def open_phone_camera_url(url: str) -> Tuple[Optional[CameraInfo], Optional[cv2.VideoCapture]]:
+    cap = try_open_camera_url(url)
+    if cap is None:
+        return None, None
+    info = CameraInfo(
+        index=-1,
+        backend=0,
+        backend_name="Phone",
+        display_name=f"Phone Camera ({url})",
+    )
+    return info, cap
+
+
 def open_preferred_or_first_available(preferred_index: Optional[int], max_index: int = 8) -> Tuple[Optional[CameraInfo], Optional[cv2.VideoCapture]]:
     if preferred_index is not None:
         info, cap = open_camera_by_index(preferred_index, max_index=max_index)

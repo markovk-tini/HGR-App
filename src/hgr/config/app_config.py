@@ -157,6 +157,8 @@ class AppConfig:
     low_fps_auto: bool = False
     force_ten_fps_test_mode: bool = False
     mic_input_gain: float = 1.0
+    phone_camera_enabled: bool = False
+    phone_camera_url: str = ""
 
 
 DEFAULT_CONFIG = AppConfig()
