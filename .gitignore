@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Build / packaging artifacts
+build/
+dist/
+release/
+installers/
+*.spec.bak
+
+# PyInstaller distribution staging
+*.manifest
+*.exe
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Model weights (downloaded / cached locally; user has a model dir)
+models/
+
+# Third-party source + built artifacts (fetched/rebuilt via scripts in builder/)
+whisper.cpp/
+whisper_bundle/
+llama.cpp/
+
+# Agent / tooling state
+.agents/
+.claude/
+
+# Large vendored pipelines
+mp_modules/
+
+# Test output
+tests/output/

@@ -1,0 +1,498 @@
+from __future__ import annotations
+
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable, List, Optional, Tuple
+
+import numpy as np
+import sounddevice as sd
+
+from ..utils.runtime_paths import app_base_path
+
+
+@dataclass(frozen=True)
+class DictationEvent:
+    event: str  # ready | hypothesis | final | error | stopped
+    text: str = ""
+    confidence: float = 0.0
+
+
+_SAMPLE_RATE = 16000
+_BLOCK_MS = 100
+_BLOCK_SAMPLES = _SAMPLE_RATE * _BLOCK_MS // 1000
+_MIN_DECODE_MS = 500
+_DECODE_INTERVAL_MS = 300
+_SILENCE_COMMIT_MS = 1500
+_MAX_UTTERANCE_MS = 30000
+_RMS_SILENCE_THRESHOLD = 0.003
+_MODEL_ID = "deepdml/faster-whisper-large-v3-turbo-ct2"
+
+
+def _resolve_model_dir() -> Path:
+    env_dir = os.getenv("HGR_WHISPER_MODEL_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / "Documents" / "HGRVoiceModels"
+
+
+def _match_sd_input_device(preferred_name: str) -> Optional[int]:
+    if not preferred_name:
+        return None
+    target = preferred_name.lower().strip()
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:
+        print(f"[whisper-stream] sd.query_devices failed: {exc}")
+        return None
+    inputs: List[Tuple[int, str]] = [
+        (i, d["name"]) for i, d in enumerate(devices) if d.get("max_input_channels", 0) > 0
+    ]
+    for idx, name in inputs:
+        if name.lower().strip() == target:
+            return idx
+    for idx, name in inputs:
+        lowered = name.lower()
+        if target in lowered or lowered in target:
+            return idx
+    tokens = [t for t in re.split(r"[^a-z0-9]+", target) if len(t) > 2]
+    if tokens:
+        for idx, name in inputs:
+            lowered = name.lower()
+            if all(tok in lowered for tok in tokens):
+                return idx
+    return None
+
+
+_TOKEN_TRAIL_PUNCT = re.compile(r"[\s.,!?;:\"')\]]+$")
+_TOKEN_LEAD_PUNCT = re.compile(r"^[\s.,!?;:\"'(\[]+")
+
+
+def _norm_token(tok: str) -> str:
+    return _TOKEN_LEAD_PUNCT.sub("", _TOKEN_TRAIL_PUNCT.sub("", tok)).lower()
+
+
+class _LocalAgreement:
+    """LocalAgreement-2 committer: a token is committed once it appears
+    identically in two consecutive hypotheses. The unstable tail stays as
+    a "pending" suffix that can still change between decodes.
+    """
+
+    def __init__(self) -> None:
+        self._prev: List[str] = []
+        self._committed: List[str] = []
+
+    def update(self, new_tokens: List[str]) -> Tuple[List[str], List[str]]:
+        committed_n = len(self._committed)
+        new_tail = new_tokens[committed_n:] if len(new_tokens) >= committed_n else []
+        prev_tail = self._prev[committed_n:] if len(self._prev) >= committed_n else []
+
+        agree = 0
+        for a, b in zip(new_tail, prev_tail):
+            if _norm_token(a) == _norm_token(b) and _norm_token(a):
+                agree += 1
+            else:
+                break
+        if agree > 0:
+            self._committed.extend(new_tail[:agree])
+
+        self._prev = list(new_tokens)
+        pending = new_tokens[len(self._committed):] if len(new_tokens) > len(self._committed) else []
+        return (list(self._committed), list(pending))
+
+    def reset(self) -> None:
+        self._prev = []
+        self._committed = []
+
+
+class WhisperStreamer:
+    """Local streaming dictation using faster-whisper + Silero VAD +
+    LocalAgreement-2.
+
+    API-compatible with the prior whisper-stream subprocess streamer. The
+    subprocess, the SDL mic-index probe, and the stderr parser have been
+    removed. Audio capture is now in-process via sounddevice and decoding
+    is in-process via faster-whisper (CTranslate2).
+    """
+
+    def __init__(
+        self,
+        *,
+        preferred_microphone_name: Optional[str] = None,
+        **_ignored,
+    ) -> None:
+        self._preferred_mic_name = (preferred_microphone_name or "").strip() or None
+        self._available = False
+        self._message = "faster-whisper not available"
+        self._backend: Optional[str] = None
+        self._model = None
+        self._mic_index: Optional[int] = None
+        self._model_lock = threading.Lock()
+
+        try:
+            import ctranslate2
+            cuda_ok = ctranslate2.get_cuda_device_count() > 0
+        except Exception as exc:
+            self._message = f"ctranslate2 import failed: {exc}"
+            return
+
+        self._device = "cuda" if cuda_ok else "cpu"
+        self._compute_type = "int8_float16" if cuda_ok else "int8"
+        self._backend = "cuda" if cuda_ok else "cpu"
+
+        if self._preferred_mic_name:
+            try:
+                self._mic_index = _match_sd_input_device(self._preferred_mic_name)
+                if self._mic_index is not None:
+                    print(f"[whisper-stream] mic routed to sounddevice idx {self._mic_index} for '{self._preferred_mic_name}'")
+                else:
+                    print(f"[whisper-stream] no mic match for '{self._preferred_mic_name}' — using default input")
+            except Exception as exc:
+                print(f"[whisper-stream] mic resolve failed: {exc}")
+
+        self._available = True
+        self._message = f"faster-whisper ready ({self._backend})"
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    @property
+    def message(self) -> str:
+        return self._message
+
+    @property
+    def backend(self) -> Optional[str]:
+        return self._backend
+
+    def _ensure_model(self) -> None:
+        if self._model is not None:
+            return
+        from faster_whisper import WhisperModel
+
+        model_root = _resolve_model_dir()
+        model_root.mkdir(parents=True, exist_ok=True)
+        print(f"[whisper-stream] loading {_MODEL_ID} on {self._device}/{self._compute_type} (dir={model_root})")
+        t0 = time.monotonic()
+        self._model = WhisperModel(
+            _MODEL_ID,
+            device=self._device,
+            compute_type=self._compute_type,
+            download_root=str(model_root),
+        )
+        print(f"[whisper-stream] model loaded in {time.monotonic() - t0:.1f}s")
+
+    def _transcribe(self, audio: np.ndarray) -> List[str]:
+        assert self._model is not None
+        with self._model_lock:
+            segments, _info = self._model.transcribe(
+                audio,
+                language="en",
+                beam_size=1,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                vad_filter=False,
+                without_timestamps=True,
+                no_speech_threshold=0.6,
+            )
+            tokens: List[str] = []
+            for seg in segments:
+                text = (seg.text or "").strip()
+                if not text:
+                    continue
+                tokens.extend(text.split())
+            return tokens
+
+    def stream(
+        self,
+        *,
+        stop_event,
+        event_callback: Callable[[DictationEvent], None],
+    ) -> bool:
+        if not self._available:
+            event_callback(DictationEvent(event="error", text=self._message))
+            return False
+
+        try:
+            self._ensure_model()
+        except Exception as exc:
+            msg = f"model load failed: {exc}"
+            self._message = msg
+            print(f"[whisper-stream] {msg}")
+            event_callback(DictationEvent(event="error", text=msg))
+            return False
+
+        audio_q: "queue.Queue[np.ndarray]" = queue.Queue()
+
+        def _audio_cb(indata, frames, time_info, status):
+            if status:
+                print(f"[whisper-stream] capture status: {status}")
+            audio_q.put(indata.reshape(-1).astype(np.float32, copy=True))
+
+        stream_kwargs = dict(
+            samplerate=_SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            blocksize=_BLOCK_SAMPLES,
+            callback=_audio_cb,
+        )
+        if self._mic_index is not None:
+            stream_kwargs["device"] = self._mic_index
+
+        try:
+            input_stream = sd.InputStream(**stream_kwargs)
+            input_stream.start()
+        except Exception as exc:
+            msg = f"mic open failed: {exc}"
+            print(f"[whisper-stream] {msg}")
+            event_callback(DictationEvent(event="error", text=msg))
+            return False
+
+        event_callback(DictationEvent(event="ready"))
+        mic_label = f"idx {self._mic_index}" if self._mic_index is not None else "default"
+        print(f"[whisper-stream] listening (mic={mic_label}, backend={self._backend})")
+
+        la = _LocalAgreement()
+        utterance = np.zeros(0, dtype=np.float32)
+        samples_at_last_decode = 0
+        silence_run_ms = 0.0
+        last_hyp_text = ""
+
+        try:
+            while not stop_event.is_set():
+                try:
+                    first_block = audio_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                # drain any backlog so we never fall behind
+                blocks = [first_block]
+                while True:
+                    try:
+                        blocks.append(audio_q.get_nowait())
+                    except queue.Empty:
+                        break
+                block = np.concatenate(blocks) if len(blocks) > 1 else blocks[0]
+
+                rms = float(np.sqrt(np.mean(block * block))) if block.size else 0.0
+                is_silent_block = rms < _RMS_SILENCE_THRESHOLD
+                block_ms = (block.size * 1000.0) / _SAMPLE_RATE
+
+                # skip leading silence (don't start an utterance on room tone)
+                if utterance.size == 0 and is_silent_block:
+                    continue
+
+                if utterance.size == 0:
+                    samples_at_last_decode = 0
+                    silence_run_ms = 0.0
+                    la.reset()
+                    last_hyp_text = ""
+
+                utterance = np.concatenate([utterance, block])
+                if is_silent_block:
+                    silence_run_ms += block_ms
+                else:
+                    silence_run_ms = 0.0
+
+                utt_ms = (utterance.size * 1000.0) / _SAMPLE_RATE
+
+                should_commit = silence_run_ms >= _SILENCE_COMMIT_MS or utt_ms >= _MAX_UTTERANCE_MS
+                if not should_commit:
+                    continue
+
+                t0 = time.monotonic()
+                try:
+                    tokens = self._transcribe(utterance)
+                except Exception as exc:
+                    print(f"[whisper-stream] transcribe error: {exc}")
+                    tokens = []
+                decode_ms = (time.monotonic() - t0) * 1000.0
+                print(f"[whisper-stream] decode audio={utt_ms:.0f}ms took={decode_ms:.0f}ms tokens={len(tokens)}")
+
+                final_text = " ".join(tokens).strip()
+                if final_text:
+                    event_callback(DictationEvent(event="final", text=final_text, confidence=1.0))
+                    print(f"[whisper-stream] final (decode={decode_ms:.0f}ms, audio={utt_ms:.0f}ms): {final_text!r}")
+                utterance = np.zeros(0, dtype=np.float32)
+                samples_at_last_decode = 0
+                silence_run_ms = 0.0
+                la.reset()
+                last_hyp_text = ""
+        except Exception as exc:
+            msg = f"stream loop error: {exc}"
+            print(f"[whisper-stream] {msg}")
+            event_callback(DictationEvent(event="error", text=msg))
+            return False
+        finally:
+            try:
+                input_stream.stop()
+                input_stream.close()
+            except Exception:
+                pass
+            event_callback(DictationEvent(event="stopped"))
+            self._message = "faster-whisper stopped"
+            print(f"[whisper-stream] stopped")
+
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Legacy helpers retained for whisper.cpp batch paths (whisper_refiner,
+# whisper-cli subprocess users). The streaming dictation path above no longer
+# uses any of these, but WhisperRefiner still shells out to whisper-cli.exe
+# against the ggml builds under whisper_bundle/.
+# ---------------------------------------------------------------------------
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+_META_LINE_PATTERNS = (
+    re.compile(r"^whisper_", re.IGNORECASE),
+    re.compile(r"^main:", re.IGNORECASE),
+    re.compile(r"^init:", re.IGNORECASE),
+    re.compile(r"^system_info", re.IGNORECASE),
+    re.compile(r"^processing", re.IGNORECASE),
+    re.compile(r"^\[start\]", re.IGNORECASE),
+    re.compile(r"^\[end\]", re.IGNORECASE),
+    re.compile(r"^\[blank_audio\]\s*$", re.IGNORECASE),
+    re.compile(r"^### Transcription", re.IGNORECASE),
+    re.compile(r"^---"),
+    re.compile(r"^ggml_", re.IGNORECASE),
+    re.compile(r"^build:", re.IGNORECASE),
+    re.compile(r"^log\s*_?", re.IGNORECASE),
+    re.compile(r"^SDL_", re.IGNORECASE),
+)
+
+
+def _is_meta_line(line: str) -> bool:
+    if not line:
+        return True
+    for pattern in _META_LINE_PATTERNS:
+        if pattern.search(line):
+            return True
+    return False
+
+
+def _candidate_whisper_roots() -> list[Path]:
+    roots: list[Path] = []
+    base = app_base_path()
+    roots.append(base)
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if parent not in roots:
+            roots.append(parent)
+    env = os.getenv("HGR_WHISPER_CPP_ROOT", "").strip()
+    if env:
+        roots.insert(0, Path(env))
+    home_candidate = Path.home() / "Documents" / "whisper.cpp"
+    if home_candidate not in roots:
+        roots.append(home_candidate)
+    return roots
+
+
+def _candidate_model_roots() -> list[Path]:
+    roots: list[Path] = []
+    env = os.getenv("HGR_WHISPER_MODEL_DIR", "").strip()
+    if env:
+        roots.append(Path(env))
+    roots.append(Path.home() / "Documents" / "TouchlessVoiceModels")
+    roots.append(Path.home() / "Documents" / "HGRVoiceModels")
+    for root in _candidate_whisper_roots():
+        roots.append(root / "models")
+        roots.append(root / "whisper.cpp" / "models")
+    return roots
+
+
+def _first_existing_model(names: Iterable[str]) -> Optional[Path]:
+    names_list = list(names)
+    for root in _candidate_model_roots():
+        if not root.exists():
+            continue
+        for name in names_list:
+            path = root / name
+            if path.exists():
+                return path
+    for root in _candidate_model_roots():
+        if not root.exists():
+            continue
+        extras = sorted(p for p in root.glob("ggml-*.bin"))
+        if extras:
+            return extras[0]
+    return None
+
+
+def _detect_nvidia_gpu() -> bool:
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return False
+    try:
+        proc = subprocess.run(
+            [exe, "-L"],
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return proc.returncode == 0 and "GPU" in (proc.stdout or "")
+
+
+def _detect_vulkan() -> bool:
+    exe = shutil.which("vulkaninfo")
+    if not exe:
+        return False
+    try:
+        proc = subprocess.run(
+            [exe, "--summary"],
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return "deviceName" in (proc.stdout or "") or "GPU" in (proc.stdout or "")
+
+
+def _resolve_backend_executable(
+    exe_name: str = "whisper-stream.exe",
+) -> Optional[tuple[str, Path]]:
+    override = os.getenv("HGR_WHISPER_BACKEND", "").strip().lower()
+    backend_order: list[str]
+    if override in {"cuda", "vulkan", "cpu"}:
+        backend_order = [override]
+    else:
+        backend_order = []
+        if _detect_nvidia_gpu():
+            backend_order.append("cuda")
+        if _detect_vulkan():
+            backend_order.append("vulkan")
+        backend_order.append("cpu")
+
+    build_dirs = {
+        "cuda": ("build_cuda",),
+        "vulkan": ("build_vulkan",),
+        "cpu": ("build_stream", "build_cpu"),
+    }
+
+    for backend in backend_order:
+        for build in build_dirs[backend]:
+            for root in _candidate_whisper_roots():
+                for bundle in ("whisper_bundle", "whisper.cpp"):
+                    for sub in ("bin/Release", "bin"):
+                        candidate = root / bundle / build / sub / exe_name
+                        if candidate.exists():
+                            return backend, candidate
+    return None

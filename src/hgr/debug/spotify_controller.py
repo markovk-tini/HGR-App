@@ -1,0 +1,1227 @@
+from __future__ import annotations
+
+import base64
+import ctypes
+import json
+import os
+import platform
+import re
+import subprocess
+import time
+from ctypes import wintypes
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
+
+import psutil
+
+
+SPOTIFY_API_BASE = "https://api.spotify.com/v1"
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
+TOKEN_TTL_SECONDS = 3500.0
+SW_RESTORE = 9
+
+SPOTIFY_SCOPES = (
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-currently-playing",
+    "user-library-read",
+    "user-library-modify",
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "playlist-modify-private",
+    "playlist-modify-public",
+    "user-read-private",
+    "user-read-email",
+)
+
+
+@dataclass(frozen=True)
+class SpotifyTrackDetails:
+    song_name: str
+    artist_names: str
+    album_name: str | None
+    playlist_name: str | None
+    device_name: str | None
+    device_type: str | None
+    is_playing: bool
+    shuffle_enabled: bool
+    repeat_mode: str | None
+    progress_ms: int | None
+    duration_ms: int | None
+    context_type: str | None
+
+    def summary(self) -> str:
+        playlist_text = self.playlist_name if self.playlist_name else "not in playlist"
+        playback_text = "playing" if self.is_playing else "paused"
+        album_text = self.album_name or "unknown album"
+        device_text = self.device_name or "unknown device"
+        repeat_text = self.repeat_mode or "off"
+        return (
+            f"Song: {self.song_name} | Artist: {self.artist_names} | Album: {album_text} | "
+            f"Playlist: {playlist_text} | Device: {device_text} | State: {playback_text} | "
+            f"Shuffle: {'on' if self.shuffle_enabled else 'off'} | Repeat: {repeat_text}"
+        )
+
+
+@dataclass(frozen=True)
+class SpotifyVoiceRequest:
+    raw_text: str
+    query: str
+    preferred_types: tuple[str, ...]
+
+
+class SpotifyController:
+    def __init__(
+        self,
+        *,
+        token_paths: tuple[Path, ...] | None = None,
+        env_paths: tuple[Path, ...] | None = None,
+        executable_paths: tuple[Path, ...] | None = None,
+        request_timeout_seconds: float = 5.0,
+    ) -> None:
+        self._request_timeout_seconds = float(request_timeout_seconds)
+        self._available = platform.system() == "Windows"
+        self._message = "spotify idle"
+        self._client_id: str | None = None
+        self._client_secret: str | None = None
+        self._redirect_uri: str | None = None
+        self._access_token: str | None = None
+        self._refresh_token: str | None = None
+        self._token_issue_time: float | None = None
+        self._token_path: Path | None = None
+        self._env_path: Path | None = None
+        self._device_id: str | None = None
+        self._device_name: str | None = None
+        self._repo_root = Path(__file__).resolve().parents[3]
+        self._token_paths = token_paths or self._default_token_paths()
+        self._env_paths = env_paths or self._default_env_paths()
+        self._executable_paths = executable_paths or self._default_executable_paths()
+        self._handles_cache: list[int] = []
+        self._handles_cache_until = 0.0
+        self._load_credentials()
+        self._load_tokens()
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    @property
+    def message(self) -> str:
+        return self._message
+
+    def ensure_ready(self, *, open_if_needed: bool = False) -> bool:
+        if not self._available:
+            self._message = "spotify unavailable on this platform"
+            return False
+        if not self._ensure_authenticated():
+            return False
+
+        devices = self._get_devices()
+        if not devices and open_if_needed:
+            launched = self.launch_spotify(hidden=True)
+            if launched:
+                devices = self._wait_for_devices()
+        if not devices:
+            self._message = "spotify device not available"
+            return False
+
+        active_device = next((device for device in devices if device.get("is_active")), None)
+        if active_device is None:
+            active_device = self._pick_device(devices)
+            if active_device is None:
+                self._message = "spotify device not available"
+                return False
+            if not self._transfer_playback(active_device.get("id"), play=False):
+                self._message = "spotify device activation failed"
+                return False
+
+        self._device_id = active_device.get("id")
+        self._device_name = active_device.get("name")
+        self._message = f"spotify ready: {self._device_name or 'device ready'}"
+        return True
+
+    def launch_spotify(self, *, hidden: bool) -> bool:
+        for candidate in self._executable_paths:
+            if not candidate.exists():
+                continue
+            try:
+                startupinfo = None
+                if hidden and hasattr(subprocess, "STARTUPINFO"):
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = 0
+                subprocess.Popen([str(candidate)], startupinfo=startupinfo)
+                self._message = "launching spotify"
+                return True
+            except Exception:
+                continue
+        for target in ("spotify:", "spotify"):
+            try:
+                subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
+                self._message = "launching spotify"
+                return True
+            except Exception:
+                continue
+        self._message = "spotify launch path not found"
+        return False
+
+    def is_running(self) -> bool:
+        try:
+            for proc in psutil.process_iter(["name"]):
+                name = (proc.info.get("name") or "").lower()
+                if "spotify" in name:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def get_playback_state(self) -> bool | None:
+        player = self.get_player_state()
+        if not player:
+            return None
+        return bool(player.get("is_playing"))
+
+    def get_player_state(self) -> dict[str, Any] | None:
+        if not self._ensure_authenticated():
+            return None
+        status, payload = self._request_json("GET", "/me/player")
+        if status == 204:
+            self._message = "spotify inactive on device"
+            return None
+        if status != 200 or not isinstance(payload, dict):
+            return None
+        device = payload.get("device") or {}
+        self._device_id = device.get("id") or self._device_id
+        self._device_name = device.get("name") or self._device_name
+        return payload
+
+    def toggle_playback(self) -> bool:
+        playback_state = self.get_playback_state()
+        if playback_state is True:
+            return self.pause()
+        return self.play()
+
+    def play(self) -> bool:
+        if not self.ensure_ready(open_if_needed=True):
+            return False
+        status, _ = self._request_json("PUT", "/me/player/play")
+        if status in {202, 204}:
+            self._message = "spotify play"
+            return True
+        self._message = "spotify play failed"
+        return False
+
+    def pause(self) -> bool:
+        if not self.ensure_ready(open_if_needed=False):
+            return False
+        status, _ = self._request_json("PUT", "/me/player/pause")
+        if status in {202, 204}:
+            self._message = "spotify pause"
+            return True
+        self._message = "spotify pause failed"
+        return False
+
+    def next_track(self) -> bool:
+        if not self.ensure_ready(open_if_needed=True):
+            return False
+        status, _ = self._request_json("POST", "/me/player/next")
+        if status in {202, 204}:
+            self._message = "spotify next track"
+            return True
+        self._message = "spotify next failed"
+        return False
+
+    def previous_track(self) -> bool:
+        if not self.ensure_ready(open_if_needed=True):
+            return False
+        status, _ = self._request_json("POST", "/me/player/previous")
+        if status in {202, 204}:
+            self._message = "spotify previous track"
+            return True
+        self._message = "spotify previous failed"
+        return False
+
+    def toggle_repeat_track(self) -> bool:
+        player = self.get_player_state()
+        current_mode = (player or {}).get("repeat_state")
+        target_mode = "off" if current_mode == "track" else "track"
+        status, _ = self._request_json("PUT", "/me/player/repeat", params={"state": target_mode})
+        if status == 204:
+            self._message = f"spotify repeat {target_mode}"
+            return True
+        self._message = "spotify repeat failed"
+        return False
+
+    def toggle_shuffle(self) -> bool:
+        player = self.get_player_state()
+        if player is None and not self.ensure_ready(open_if_needed=True):
+            return False
+        current_state = bool((player or {}).get("shuffle_state"))
+        target_state = not current_state
+        status, _ = self._request_json(
+            "PUT",
+            "/me/player/shuffle",
+            params={"state": "true" if target_state else "false"},
+        )
+        if status == 204:
+            self._message = f"spotify shuffle {'on' if target_state else 'off'}"
+            return True
+        self._message = "spotify shuffle failed"
+        return False
+
+    def get_volume(self) -> int | None:
+        player = self.get_player_state()
+        if player is None:
+            return None
+        device = player.get("device") or {}
+        vol = device.get("volume_percent")
+        return int(vol) if vol is not None else None
+
+    def set_volume(self, volume_percent: int) -> bool:
+        volume_percent = max(0, min(100, int(volume_percent)))
+        if not self._ensure_authenticated():
+            return False
+        status, _ = self._request_json(
+            "PUT",
+            "/me/player/volume",
+            params={"volume_percent": volume_percent},
+        )
+        if status in {200, 202, 204}:
+            self._message = f"spotify volume {volume_percent}%"
+            return True
+        self._message = "spotify volume set failed"
+        return False
+
+    def is_window_active(self) -> bool:
+        handles = self._spotify_window_handles()
+        if not handles:
+            return False
+        return self._foreground_window_handle() in handles
+
+    def focus_or_open_window(self) -> bool:
+        if not self._available:
+            self._message = "spotify unavailable on this platform"
+            return False
+        if self.is_window_active():
+            self._message = "spotify already focused"
+            return True
+
+        handles = self._spotify_window_handles()
+        if not handles:
+            if not self.is_running():
+                self.ensure_ready(open_if_needed=True)
+                self.launch_spotify(hidden=False)
+            else:
+                self.ensure_ready(open_if_needed=False)
+            handles = self._wait_for_window_handles()
+        if not handles:
+            self._message = "spotify window not found"
+            return False
+
+        if self._activate_window_handle(handles[0]):
+            self._message = "spotify focused"
+            return True
+        self._message = "spotify focus failed"
+        return False
+
+    def is_active_device_available(self) -> bool:
+        return self.get_player_state() is not None
+
+    def get_current_track_details(self) -> SpotifyTrackDetails | None:
+        player = self.get_player_state()
+        if not player:
+            self._message = "spotify inactive on device"
+            return None
+
+        item = player.get("item") or {}
+        if not item:
+            self._message = "spotify track unavailable"
+            return None
+        artists = ", ".join(artist.get("name", "") for artist in item.get("artists") or [] if artist.get("name"))
+        album = item.get("album") or {}
+        playlist_name = None
+        context = player.get("context") or {}
+        context_type = context.get("type")
+        context_uri = context.get("uri")
+        if context_type == "playlist" and isinstance(context_uri, str):
+            playlist_name = self._get_playlist_name(context_uri)
+
+        details = SpotifyTrackDetails(
+            song_name=item.get("name") or "unknown song",
+            artist_names=artists or "unknown artist",
+            album_name=album.get("name"),
+            playlist_name=playlist_name,
+            device_name=(player.get("device") or {}).get("name"),
+            device_type=(player.get("device") or {}).get("type"),
+            is_playing=bool(player.get("is_playing")),
+            shuffle_enabled=bool(player.get("shuffle_state")),
+            repeat_mode=player.get("repeat_state"),
+            progress_ms=player.get("progress_ms"),
+            duration_ms=item.get("duration_ms"),
+            context_type=context_type,
+        )
+        self._message = "spotify track info"
+        return details
+
+    def parse_voice_play_request(self, spoken_text: str) -> SpotifyVoiceRequest | None:
+        raw_text = " ".join((spoken_text or "").strip().split())
+        if not raw_text:
+            return None
+
+        lowered = raw_text.lower()
+        normalized = f" {lowered} "
+        replacements = (
+            "on spotify",
+            "in spotify",
+            "from spotify",
+            "through spotify",
+            "using spotify",
+            "spotify",
+            "please",
+            "for me",
+        )
+        for token in replacements:
+            normalized = normalized.replace(f" {token} ", " ")
+
+        normalized = re.sub(r"\b(can you|could you|would you|will you)\b", " ", normalized)
+        normalized = re.sub(r"\b(play|put on|start|listen to|queue up|queue)\b", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .!?")
+        normalized = re.sub(r"^(and|then|uh|um)\s+", "", normalized).strip(" .!?")
+        if not normalized:
+            return None
+
+        preferred_types: tuple[str, ...]
+        if "playlist" in lowered:
+            normalized = re.sub(r"\bplaylist\b", " ", normalized).strip()
+            preferred_types = ("playlist", "track", "album", "artist")
+        elif "album" in lowered:
+            normalized = re.sub(r"\balbum\b", " ", normalized).strip()
+            preferred_types = ("album", "track", "playlist", "artist")
+        elif "artist" in lowered or "songs by " in lowered:
+            normalized = re.sub(r"\bartist\b", " ", normalized).strip()
+            normalized = re.sub(r"\bsongs by\b", " ", normalized).strip()
+            preferred_types = ("artist", "track", "playlist", "album")
+        else:
+            preferred_types = ("track", "playlist", "album", "artist")
+
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .!?")
+        if len(normalized) < 2:
+            return None
+        return SpotifyVoiceRequest(
+            raw_text=raw_text,
+            query=normalized,
+            preferred_types=preferred_types,
+        )
+
+    def play_voice_request(self, spoken_text: str) -> bool:
+        request = self.parse_voice_play_request(spoken_text)
+        if request is None:
+            self._message = "spotify voice request not understood"
+            return False
+        return self.play_search_request(request.query, preferred_types=request.preferred_types)
+
+    def play_search_request(self, query: str, *, preferred_types: tuple[str, ...] | None = None) -> bool:
+        normalized = re.sub(r"\s+", " ", str(query or "")).strip(" .!?")
+        if len(normalized) < 2:
+            self._message = "spotify play query missing"
+            return False
+        if not self.ensure_ready(open_if_needed=True):
+            return False
+
+        search_types = preferred_types or ("track", "playlist", "album", "artist")
+        selection = self._search_best_playable(normalized, search_types)
+        if selection is None:
+            self._message = f"spotify could not find '{normalized}'"
+            return False
+
+        payload = selection["payload"]
+        status, _ = self._request_json("PUT", "/me/player/play", payload=payload)
+        if status not in {202, 204}:
+            self._message = "spotify play request failed"
+            return False
+
+        self._message = f"spotify play {selection['kind']}: {selection['name']}"
+        return True
+
+    def is_active_for_wheel(self) -> bool:
+        player = self.get_player_state()
+        if player is not None:
+            return True
+        if self.is_window_active() or self.is_running():
+            self._message = "spotify running"
+            return True
+        self._message = "spotify inactive on device"
+        return False
+
+    def add_current_track_to_queue(self) -> bool:
+        uri = self._current_track_uri()
+        if not uri:
+            self._message = "spotify track unavailable"
+            return False
+        if not self.ensure_ready(open_if_needed=False):
+            return False
+        status, _ = self._request_json("POST", "/me/player/queue", params={"uri": uri})
+        if status in {202, 204}:
+            self._message = "spotify add to queue"
+            return True
+        self._message = "spotify add to queue failed"
+        return False
+
+    def remove_current_track_from_queue(self) -> bool:
+        self._message = "spotify queue removal is not supported by the Spotify API"
+        return False
+
+    def save_current_track(self) -> bool:
+        track_id = self._current_track_id()
+        if not track_id:
+            self._message = "spotify track unavailable"
+            return False
+        status, payload = self._request_json("PUT", "/me/tracks", params={"ids": track_id})
+        if status in {200, 201, 202, 204}:
+            self._message = "spotify saved current track"
+            return True
+        self._message = self._format_error_message("spotify save track failed", status, payload)
+        return False
+
+    def remove_current_track_from_liked(self) -> bool:
+        track_id = self._current_track_id()
+        if not track_id:
+            self._message = "spotify track unavailable"
+            return False
+        status, _ = self._request_json("DELETE", "/me/tracks", params={"ids": track_id})
+        if status in {200, 201, 202, 204}:
+            self._message = "spotify removed current track from liked songs"
+            return True
+        self._message = "spotify remove liked track failed"
+        return False
+
+    def add_current_track_to_playlist(self, playlist_name: str) -> bool:
+        target = self._resolve_playlist_target(playlist_name)
+        track_uri = self._current_track_uri()
+        if target is None or not track_uri:
+            if track_uri is None:
+                self._message = "spotify track unavailable"
+            return False
+        playlist_id = self._playlist_id_from_uri(target["uri"])
+        if playlist_id is None:
+            self._message = "spotify playlist unavailable"
+            return False
+        status, payload = self._request_json(
+            "POST",
+            f"/playlists/{playlist_id}/tracks",
+            payload={"uris": [track_uri]},
+        )
+        if status in {200, 201}:
+            self._message = f"spotify added to playlist: {target['name']}"
+            return True
+        self._message = self._format_error_message(
+            f"spotify add to playlist failed: {target['name']}", status, payload
+        )
+        return False
+
+    def remove_current_track_from_current_playlist(self) -> bool:
+        player = self.get_player_state()
+        track_uri = self._current_track_uri()
+        if not player or not track_uri:
+            if track_uri is None:
+                self._message = "spotify track unavailable"
+            return False
+        context = player.get("context") or {}
+        if str(context.get("type") or "") != "playlist":
+            self._message = "spotify current track is not playing from a playlist"
+            return False
+        playlist_uri = str(context.get("uri") or "").strip()
+        playlist_id = self._playlist_id_from_uri(playlist_uri)
+        if playlist_id is None:
+            self._message = "spotify current playlist unavailable"
+            return False
+        playlist_name = self._get_playlist_name(playlist_uri) or "current playlist"
+        status, _ = self._request_json(
+            "DELETE",
+            f"/playlists/{playlist_id}/tracks",
+            payload={"tracks": [{"uri": track_uri}]},
+        )
+        if status in {200, 201}:
+            self._message = f"spotify removed from {playlist_name}"
+            return True
+        self._message = f"spotify remove from playlist failed: {playlist_name}"
+        return False
+
+    def remove_current_track_from_playlist(self, playlist_name: str) -> bool:
+        target = self._resolve_playlist_target(playlist_name)
+        track_uri = self._current_track_uri()
+        if target is None or not track_uri:
+            if track_uri is None:
+                self._message = "spotify track unavailable"
+            return False
+        playlist_id = self._playlist_id_from_uri(target["uri"])
+        if playlist_id is None:
+            self._message = "spotify playlist unavailable"
+            return False
+        status, _ = self._request_json(
+            "DELETE",
+            f"/playlists/{playlist_id}/tracks",
+            payload={"tracks": [{"uri": track_uri}]},
+        )
+        if status in {200, 201}:
+            self._message = f"spotify removed from playlist: {target['name']}"
+            return True
+        self._message = f"spotify remove from playlist failed: {target['name']}"
+        return False
+
+    def create_playlist(self, name: str, *, public: bool = False) -> bool:
+        clean = (name or "").strip()
+        if not clean:
+            self._message = "spotify playlist name missing"
+            return False
+        user_id = self._get_current_user_id()
+        if not user_id:
+            return False
+        status, payload = self._request_json(
+            "POST",
+            f"/users/{user_id}/playlists",
+            payload={"name": clean, "public": bool(public)},
+        )
+        if status in {200, 201}:
+            self._message = f"spotify created playlist: {clean}"
+            return True
+        self._message = self._format_error_message(
+            f"spotify create playlist failed: {clean}", status, payload
+        )
+        return False
+
+    def _get_current_user_id(self) -> str | None:
+        status, payload = self._request_json("GET", "/me")
+        if status != 200 or not isinstance(payload, dict):
+            self._message = self._format_error_message("spotify profile unavailable", status, payload)
+            return None
+        user_id = payload.get("id")
+        if not isinstance(user_id, str) or not user_id:
+            self._message = "spotify profile unavailable"
+            return None
+        return user_id
+
+    def _format_error_message(self, prefix: str, status: int | None, payload: Any) -> str:
+        detail = ""
+        if isinstance(payload, dict):
+            inner = payload.get("error")
+            if isinstance(inner, dict):
+                msg = inner.get("message")
+                if isinstance(msg, str) and msg:
+                    detail = msg
+            elif isinstance(inner, str):
+                detail = inner
+        elif isinstance(payload, str):
+            detail = payload.strip()
+        if status == 403 and ("scope" in detail.lower() or not detail):
+            return f"{prefix} (403 missing scope — re-authorize Spotify in Settings)"
+        if status is None:
+            return f"{prefix} (network error)"
+        if detail:
+            return f"{prefix} ({status}: {detail})"
+        return f"{prefix} ({status})"
+
+    def authorize_full_scopes(self, *, port: int = 5000, timeout_seconds: float = 180.0) -> bool:
+        if not self._client_id or not self._client_secret:
+            self._message = "spotify credentials not found"
+            return False
+        import http.server
+        import secrets
+        import socketserver
+        import threading
+        import webbrowser
+
+        redirect_uri = self._redirect_uri or f"http://localhost:{port}/callback"
+        state = secrets.token_urlsafe(16)
+        auth_params = {
+            "client_id": self._client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(SPOTIFY_SCOPES),
+            "state": state,
+            "show_dialog": "true",
+        }
+        auth_url = f"{SPOTIFY_AUTH_URL}?{urllib_parse.urlencode(auth_params)}"
+
+        result: dict[str, str | None] = {"code": None, "error": None}
+        done = threading.Event()
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                return
+
+            def do_GET(self_inner):
+                parsed = urllib_parse.urlparse(self_inner.path)
+                params = dict(urllib_parse.parse_qsl(parsed.query))
+                if params.get("state") != state:
+                    result["error"] = "state mismatch"
+                else:
+                    result["code"] = params.get("code")
+                    result["error"] = params.get("error")
+                self_inner.send_response(200)
+                self_inner.send_header("Content-Type", "text/html; charset=utf-8")
+                self_inner.end_headers()
+                body = (
+                    "<html><body style='font-family:sans-serif;padding:32px;'>"
+                    "<h2>Spotify authorization complete.</h2>"
+                    "<p>You can close this tab and return to Touchless.</p>"
+                    "</body></html>"
+                )
+                self_inner.wfile.write(body.encode("utf-8"))
+                done.set()
+
+        try:
+            host = urllib_parse.urlparse(redirect_uri).hostname or "localhost"
+            httpd = socketserver.TCPServer((host, port), _Handler)
+        except OSError as exc:
+            self._message = f"spotify auth port busy: {exc}"
+            return False
+
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            webbrowser.open(auth_url)
+            done.wait(timeout=timeout_seconds)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+        if result.get("error") or not result.get("code"):
+            self._message = f"spotify auth failed: {result.get('error') or 'no code'}"
+            return False
+
+        token_pair = f"{self._client_id}:{self._client_secret}".encode("utf-8")
+        encoded = base64.b64encode(token_pair).decode("utf-8")
+        data = urllib_parse.urlencode(
+            {
+                "grant_type": "authorization_code",
+                "code": result["code"],
+                "redirect_uri": redirect_uri,
+            }
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            SPOTIFY_TOKEN_URL,
+            data=data,
+            headers={
+                "Authorization": f"Basic {encoded}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self._request_timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            self._message = f"spotify token exchange failed ({exc.code}): {body[:200]}"
+            return False
+        except Exception as exc:
+            self._message = f"spotify token exchange failed: {exc}"
+            return False
+
+        self._access_token = payload.get("access_token")
+        refresh = payload.get("refresh_token")
+        if refresh:
+            self._refresh_token = refresh
+        self._token_issue_time = time.time()
+        if self._token_path is None:
+            self._token_path = self._token_paths[0]
+        self._save_tokens()
+        self._message = "spotify authorized with full scopes"
+        return bool(self._access_token)
+
+    def _default_token_paths(self) -> tuple[Path, ...]:
+        home = Path.home()
+        return (
+            self._repo_root / "auth_token.json",
+            home / "Documents" / "Touchless" / "auth_token.json",
+            home / "Documents" / "HandGestureControl" / "HGRApp" / "auth_token.json",
+            home / "Documents" / "HandAI" / "HandMeshLive" / "src" / "auth_token.json",
+        )
+
+    def _default_env_paths(self) -> tuple[Path, ...]:
+        home = Path.home()
+        return (
+            self._repo_root / ".env",
+            home / "Documents" / "Touchless" / ".env",
+            home / "Documents" / "HandGestureControl" / "HGRApp" / ".env",
+            home / "Documents" / "HandAI" / "HandMeshLive" / "src" / ".env",
+        )
+
+    def _default_executable_paths(self) -> tuple[Path, ...]:
+        home = Path.home()
+        return (
+            home / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "SpotifyAB.SpotifyMusic_zpdnekdrzrea0" / "Spotify.exe",
+            home / "AppData" / "Roaming" / "Spotify" / "Spotify.exe",
+        )
+
+    def _load_credentials(self) -> None:
+        env_client_id = os.getenv("CLIENT_ID") or os.getenv("SPOTIFY_CLIENT_ID")
+        env_client_secret = os.getenv("CLIENT_SECRET") or os.getenv("SPOTIFY_CLIENT_SECRET")
+        env_redirect_uri = os.getenv("REDIRECT_URI") or os.getenv("SPOTIFY_REDIRECT_URI")
+        if env_client_id and env_client_secret:
+            self._client_id = env_client_id
+            self._client_secret = env_client_secret
+            self._redirect_uri = env_redirect_uri or "http://localhost:5000/callback"
+            return
+
+        for path in self._env_paths:
+            values = self._parse_env_file(path)
+            if values.get("CLIENT_ID") and values.get("CLIENT_SECRET"):
+                self._env_path = path
+                self._client_id = values["CLIENT_ID"]
+                self._client_secret = values["CLIENT_SECRET"]
+                self._redirect_uri = values.get("REDIRECT_URI", "http://localhost:5000/callback")
+                return
+
+    def _load_tokens(self) -> None:
+        for path in self._token_paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            access_token = data.get("access_token")
+            refresh_token = data.get("refresh_token")
+            if not access_token and not refresh_token:
+                continue
+            self._token_path = path
+            self._access_token = access_token
+            self._refresh_token = refresh_token
+            issue_time = data.get("issue_time")
+            self._token_issue_time = float(issue_time) if isinstance(issue_time, (int, float)) else None
+            return
+
+    def _save_tokens(self) -> None:
+        if self._token_path is None:
+            return
+        payload = {
+            "access_token": self._access_token,
+            "refresh_token": self._refresh_token,
+            "issue_time": self._token_issue_time or time.time(),
+        }
+        try:
+            self._token_path.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _ensure_authenticated(self) -> bool:
+        if not self._client_id or not self._client_secret:
+            self._message = "spotify credentials not found"
+            return False
+        if self._access_token and not self._token_expired():
+            return True
+        if self._refresh_token:
+            return self._refresh_access_token()
+        if self._access_token:
+            return True
+        self._message = "spotify token not found"
+        return False
+
+    def warm_up(self) -> bool:
+        if not self._available:
+            return False
+        if not self._client_id or not self._client_secret:
+            return False
+        if not self._refresh_token:
+            return bool(self._access_token)
+        if self._access_token and not self._token_expired():
+            return True
+        return self._refresh_access_token()
+
+    def _token_expired(self) -> bool:
+        if not self._token_issue_time:
+            return True
+        return (time.time() - self._token_issue_time) >= TOKEN_TTL_SECONDS
+
+    def _refresh_access_token(self) -> bool:
+        if not self._refresh_token or not self._client_id or not self._client_secret:
+            self._message = "spotify refresh unavailable"
+            return False
+        token_pair = f"{self._client_id}:{self._client_secret}".encode("utf-8")
+        encoded = base64.b64encode(token_pair).decode("utf-8")
+        data = urllib_parse.urlencode(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+            }
+        ).encode("utf-8")
+        request = urllib_request.Request(
+            SPOTIFY_TOKEN_URL,
+            data=data,
+            headers={
+                "Authorization": f"Basic {encoded}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self._request_timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            self._message = f"spotify auth refresh failed ({exc.code})"
+            return False
+        except Exception:
+            self._message = "spotify auth refresh failed"
+            return False
+
+        self._access_token = payload.get("access_token")
+        self._refresh_token = payload.get("refresh_token", self._refresh_token)
+        self._token_issue_time = time.time()
+        self._save_tokens()
+        self._message = "spotify token refreshed"
+        return bool(self._access_token)
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+        allow_refresh: bool = True,
+    ) -> tuple[int | None, Any]:
+        if not self._ensure_authenticated():
+            return None, None
+        url = f"{SPOTIFY_API_BASE}{path}"
+        if params:
+            query = urllib_parse.urlencode(params)
+            url = f"{url}?{query}"
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        request = urllib_request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib_request.urlopen(request, timeout=self._request_timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+                if not raw:
+                    return response.status, None
+                return response.status, json.loads(raw)
+        except urllib_error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="ignore")
+            payload_value = None
+            if raw:
+                try:
+                    payload_value = json.loads(raw)
+                except json.JSONDecodeError:
+                    payload_value = raw
+            if exc.code == 401 and allow_refresh and self._refresh_access_token():
+                return self._request_json(method, path, params=params, payload=payload, allow_refresh=False)
+            return exc.code, payload_value
+        except Exception:
+            self._message = "spotify request failed"
+            return None, None
+
+    def _get_devices(self) -> list[dict[str, Any]]:
+        status, payload = self._request_json("GET", "/me/player/devices")
+        if status != 200 or not isinstance(payload, dict):
+            return []
+        devices = payload.get("devices") or []
+        return [device for device in devices if not device.get("is_restricted")]
+
+    def _wait_for_devices(self) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + 7.0
+        devices: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            devices = self._get_devices()
+            if devices:
+                return devices
+            time.sleep(0.6)
+        return devices
+
+    def _pick_device(self, devices: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not devices:
+            return None
+        active = next((device for device in devices if device.get("is_active")), None)
+        if active is not None:
+            return active
+        for preferred_type in ("Computer", "Smartphone", "Speaker"):
+            for device in devices:
+                if device.get("type") == preferred_type:
+                    return device
+        return devices[0]
+
+    def _transfer_playback(self, device_id: str | None, *, play: bool) -> bool:
+        if not device_id:
+            return False
+        status, _ = self._request_json(
+            "PUT",
+            "/me/player",
+            payload={
+                "device_ids": [device_id],
+                "play": bool(play),
+            },
+        )
+        return status == 204
+
+    def _search_best_playable(self, query: str, preferred_types: tuple[str, ...]) -> dict[str, Any] | None:
+        if preferred_types and preferred_types[0] == "playlist":
+            library_playlist = self._find_library_playlist(query)
+            if library_playlist is not None:
+                return library_playlist
+        search_types = tuple(dict.fromkeys(preferred_types))
+        status, payload = self._request_json(
+            "GET",
+            "/search",
+            params={
+                "q": query,
+                "type": ",".join(search_types),
+                "limit": 5,
+            },
+        )
+        if status != 200 or not isinstance(payload, dict):
+            return None
+
+        for item_type in search_types:
+            items = self._search_items_for_type(payload, item_type)
+            if not items:
+                continue
+            top = items[0]
+            uri = top.get("uri")
+            if not isinstance(uri, str) or not uri:
+                continue
+            name = top.get("name") or query
+            if item_type == "track":
+                return {
+                    "kind": "track",
+                    "name": name,
+                    "payload": {"uris": [uri]},
+                }
+            return {
+                "kind": item_type,
+                "name": name,
+                "payload": {"context_uri": uri},
+            }
+        return None
+
+    def _resolve_playlist_target(self, playlist_name: str) -> dict[str, str] | None:
+        normalized = self._normalize_search_text(playlist_name)
+        if not normalized:
+            self._message = "spotify playlist name missing"
+            return None
+        library_match = self._find_library_playlist(normalized)
+        if library_match is not None:
+            return {
+                "name": str(library_match["name"]),
+                "uri": str(library_match["payload"]["context_uri"]),
+            }
+        status, payload = self._request_json(
+            "GET",
+            "/search",
+            params={
+                "q": playlist_name,
+                "type": "playlist",
+                "limit": 5,
+            },
+        )
+        if status != 200 or not isinstance(payload, dict):
+            self._message = f"spotify playlist not found: {playlist_name}"
+            return None
+        items = self._search_items_for_type(payload, "playlist")
+        if not items:
+            self._message = f"spotify playlist not found: {playlist_name}"
+            return None
+        best = items[0]
+        uri = best.get("uri")
+        if not isinstance(uri, str):
+            self._message = f"spotify playlist not found: {playlist_name}"
+            return None
+        return {
+            "name": str(best.get("name") or playlist_name),
+            "uri": uri,
+        }
+
+    def _current_track_uri(self) -> str | None:
+        player = self.get_player_state()
+        if not player:
+            return None
+        item = player.get("item") or {}
+        uri = item.get("uri")
+        return uri if isinstance(uri, str) and uri else None
+
+    def _current_track_id(self) -> str | None:
+        uri = self._current_track_uri()
+        if not uri:
+            return None
+        if uri.startswith("spotify:track:"):
+            return uri.rsplit(":", 1)[-1]
+        return None
+
+    def _find_library_playlist(self, query: str) -> dict[str, Any] | None:
+        normalized_query = self._normalize_search_text(query)
+        if not normalized_query:
+            return None
+
+        offset = 0
+        best_match: dict[str, Any] | None = None
+        best_score = -1
+        while offset < 200:
+            status, payload = self._request_json(
+                "GET",
+                "/me/playlists",
+                params={"limit": 50, "offset": offset},
+            )
+            if status != 200 or not isinstance(payload, dict):
+                break
+            items = payload.get("items") or []
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                uri = item.get("uri")
+                if not name or not isinstance(uri, str):
+                    continue
+                score = self._playlist_match_score(normalized_query, self._normalize_search_text(name))
+                if score > best_score:
+                    best_score = score
+                    best_match = {
+                        "kind": "playlist",
+                        "name": name,
+                        "payload": {"context_uri": uri},
+                    }
+            total = int(payload.get("total") or 0)
+            offset += len(items)
+            if not payload.get("next") or offset >= total:
+                break
+        return best_match if best_score >= 2 else None
+
+    def _search_items_for_type(self, payload: dict[str, Any], item_type: str) -> list[dict[str, Any]]:
+        key = f"{item_type}s"
+        bucket = payload.get(key)
+        if not isinstance(bucket, dict):
+            return []
+        items = bucket.get("items")
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def _normalize_search_text(self, text: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+        return re.sub(r"\s+", " ", normalized)
+
+    def _playlist_match_score(self, query: str, candidate: str) -> int:
+        if not candidate:
+            return -1
+        if candidate == query:
+            return 5
+        if query in candidate:
+            return 4
+        query_words = query.split()
+        candidate_words = candidate.split()
+        overlap = len(set(query_words) & set(candidate_words))
+        if overlap >= max(1, len(query_words) - 1):
+            return 3
+        if overlap >= max(1, len(query_words) // 2):
+            return 2
+        return overlap
+
+    def _get_playlist_name(self, context_uri: str) -> str | None:
+        playlist_id = self._playlist_id_from_uri(context_uri)
+        if playlist_id is None:
+            return None
+        status, payload = self._request_json("GET", f"/playlists/{playlist_id}")
+        if status != 200 or not isinstance(payload, dict):
+            return None
+        return payload.get("name")
+
+    def _playlist_id_from_uri(self, context_uri: str) -> str | None:
+        if context_uri.startswith("spotify:playlist:"):
+            return context_uri.rsplit(":", 1)[-1]
+        if "playlist/" in context_uri:
+            return context_uri.rsplit("playlist/", 1)[-1].split("?", 1)[0]
+        return None
+
+    def _foreground_window_handle(self) -> int | None:
+        if not self._available:
+            return None
+        try:
+            foreground = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            return None
+        return int(foreground) if foreground else None
+
+    def _spotify_window_handles(self) -> list[int]:
+        if not self._available:
+            return []
+        now = time.monotonic()
+        if now < self._handles_cache_until:
+            return list(self._handles_cache)
+        try:
+            spotify_pids = {
+                int(proc.info["pid"])
+                for proc in psutil.process_iter(["pid", "name"])
+                if "spotify" in (proc.info.get("name") or "").lower()
+            }
+        except Exception:
+            spotify_pids = set()
+        if not spotify_pids:
+            self._handles_cache = []
+            self._handles_cache_until = now + 1.0
+            return []
+
+        user32 = ctypes.windll.user32
+        handles: list[int] = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _enum_windows(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in spotify_pids:
+                return True
+            title_length = user32.GetWindowTextLengthW(hwnd)
+            if title_length <= 0:
+                return True
+            handles.append(int(hwnd))
+            return True
+
+        try:
+            user32.EnumWindows(_enum_windows, 0)
+        except Exception:
+            handles = []
+        self._handles_cache = list(handles)
+        self._handles_cache_until = now + 1.0
+        return handles
+
+    def _wait_for_window_handles(self, timeout_seconds: float = 4.0) -> list[int]:
+        deadline = time.monotonic() + timeout_seconds
+        handles = self._spotify_window_handles()
+        while not handles and time.monotonic() < deadline:
+            time.sleep(0.2)
+            handles = self._spotify_window_handles()
+        return handles
+
+    def _activate_window_handle(self, hwnd: int) -> bool:
+        if not self._available:
+            return False
+        user32 = ctypes.windll.user32
+        try:
+            user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+            user32.BringWindowToTop(wintypes.HWND(hwnd))
+            success = bool(user32.SetForegroundWindow(wintypes.HWND(hwnd)))
+            return success or self._foreground_window_handle() == hwnd
+        except Exception:
+            return False
+
+    def _parse_env_file(self, path: Path) -> dict[str, str]:
+        if not path.exists():
+            return {}
+        values: dict[str, str] = {}
+        try:
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+        except Exception:
+            return {}
+        return values

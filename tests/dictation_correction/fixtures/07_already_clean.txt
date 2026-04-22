@@ -1,0 +1,1 @@
+The build dropped from 1,247 milliseconds to 312, about a 75 percent improvement.

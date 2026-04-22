@@ -1,0 +1,1 @@
+last quarter we shipped we shipped a new dictation pipeline on Windows and the latency dropped from aa new dictation pipeline on Windows and the latency dropped from about 900 milliseconds to under 300. the next step is wiring the grammar corrector into the same loop so that the transcript reads cleanly.
