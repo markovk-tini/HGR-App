@@ -4008,20 +4008,14 @@ class MainWindow(QMainWindow):
         self._show_mini_live_viewer()
 
     def _initial_camera_setup(self) -> None:
+        # Just populate the inventory silently on startup. Previously we
+        # popped a modal chooser when 2+ cameras were detected and no
+        # preference was saved, but that interrupts the launch any time the
+        # user has a virtual webcam installed (Iriun, OBS Virtual Camera,
+        # DroidCam, etc.). Users can pick a specific camera anytime from
+        # Settings -> Camera; the engine falls back to the first available
+        # camera when no preference is saved, which is the expected default.
         self.refresh_camera_inventory(update_status=True, notify=False)
-        if len(self._discovered_cameras) > 1 and self.config.preferred_camera_index is None:
-            result = self._prompt_for_camera_choice(
-                self._discovered_cameras,
-                "Multiple cameras were detected. Choose which webcam you want Touchless to use, or cancel and decide later in Settings.",
-            )
-            if result is not None:
-                selected_index, remember = result
-                if remember:
-                    self.config.preferred_camera_index = selected_index
-                    save_config(self.config)
-                self._refresh_camera_combo_selection(selected_index)
-                self._refresh_camera_labels()
-                self.last_action_label.setText(f"Last action: selected camera {selected_index}")
 
     def refresh_camera_inventory(self, update_status: bool = True, notify: bool = False) -> list[CameraInfo]:
         access_ok, access_message = request_camera_access_main_thread(self.config.camera_scan_limit)
