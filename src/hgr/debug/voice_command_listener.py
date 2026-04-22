@@ -15,6 +15,9 @@ from typing import Callable, Iterable, Optional
 
 import numpy as np
 
+from ..utils.runtime_paths import app_base_path
+from ..utils.subprocess_utils import hidden_subprocess_kwargs
+
 
 @dataclass(frozen=True)
 class VoiceCommandResult:
@@ -84,6 +87,10 @@ class VoiceCommandListener:
         touchless_models = Path.home() / "Documents" / "TouchlessVoiceModels"
         legacy_models = Path.home() / "Documents" / "HGRVoiceModels"
         self._model_root = touchless_models if touchless_models.exists() else legacy_models
+        # Kept for backwards compatibility with any callers; the real lookup
+        # goes through `_candidate_whisper_roots()` so that the PyInstaller
+        # bundle finds whisper-cli.exe inside the install folder instead of
+        # ~/Documents/whisper.cpp (which only exists on dev machines).
         self._whisper_cpp_root = Path.home() / "Documents" / "whisper.cpp"
         self._model = None
         self._whisper_cpp_command = tuple(whisper_cpp_command or ())
@@ -505,6 +512,26 @@ class VoiceCommandListener:
     def _whisper_cpp_ready(self) -> bool:
         return self._resolve_whisper_cpp_command() is not None and self._resolve_whisper_cpp_model_path() is not None
 
+    def _candidate_whisper_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        # PyInstaller bundle location — the installed app puts whisper.cpp
+        # under the _internal folder (see builder/windows/hgr_app.spec).
+        base = app_base_path()
+        roots.append(base)
+        roots.append(base / "whisper.cpp")
+        # Source-checkout fallback: walk up from this file to let `python
+        # run_app.py` keep finding `<repo>/whisper.cpp/`.
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            if parent not in roots:
+                roots.append(parent)
+                roots.append(parent / "whisper.cpp")
+        # Last, the legacy dev-machine path used before bundle-awareness.
+        home_candidate = Path.home() / "Documents" / "whisper.cpp"
+        if home_candidate not in roots:
+            roots.append(home_candidate)
+        return roots
+
     def _resolve_whisper_cpp_command(self) -> tuple[str, ...] | None:
         if self._whisper_cpp_command:
             return self._whisper_cpp_command
@@ -520,12 +547,12 @@ class VoiceCommandListener:
             resolved = shutil.which(command_name)
             if resolved:
                 return (resolved,)
-        for candidate in (
-            self._whisper_cpp_root / "build" / "bin" / "Release" / "whisper-cli.exe",
-            self._whisper_cpp_root / "build" / "bin" / "whisper-cli.exe",
-        ):
-            if candidate.exists():
-                return (str(candidate),)
+        for root in self._candidate_whisper_roots():
+            for build_dir in ("build", "build_cuda", "build_vulkan", "build_stream"):
+                bin_dir = root / build_dir / "bin"
+                for candidate in (bin_dir / "Release" / "whisper-cli.exe", bin_dir / "whisper-cli.exe"):
+                    if candidate.exists():
+                        return (str(candidate),)
         return None
 
     def _resolve_whisper_cpp_model_path(self) -> Path | None:
@@ -537,10 +564,9 @@ class VoiceCommandListener:
             if path.exists():
                 self._whisper_cpp_model_path = path
                 return path
-        candidate_roots = (
-            self._model_root,
-            self._whisper_cpp_root / "models",
-        )
+        candidate_roots: list[Path] = [self._model_root]
+        for root in self._candidate_whisper_roots():
+            candidate_roots.append(root / "models")
         for root in candidate_roots:
             for candidate_name in (
                 "ggml-medium.en.bin",
@@ -617,6 +643,7 @@ class VoiceCommandListener:
             text=True,
             timeout=45.0,
             check=False,
+            **hidden_subprocess_kwargs(),
         )
         if completed.returncode != 0 and not completed.stdout.strip():
             raise RuntimeError("whisper.cpp transcription failed")
@@ -816,6 +843,7 @@ class VoiceCommandListener:
                 text=True,
                 timeout=max_seconds + 4.0,
                 check=False,
+                **hidden_subprocess_kwargs(),
             )
         except Exception:
             return VoiceCommandResult(heard_text="", success=False, message="voice command not heard")

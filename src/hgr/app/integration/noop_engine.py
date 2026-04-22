@@ -51,6 +51,35 @@ _DICTATION_HALLUCINATION_STOPWORDS = {
     "thanks", "thank", "bye", "okay", "ok",
 }
 
+
+# Voice commands recognized only when the committed utterance is EXACTLY one
+# of these phrases (after punctuation strip + whitespace collapse + lowercase).
+# The whole-utterance match is the safety — saying "I need a new line of code"
+# in a sentence won't trigger because the commit contains more than just the
+# command phrase. The user has to pause, say just the command, then pause.
+_DICTATION_NEWLINE_COMMANDS = frozenset({
+    "new line", "newline", "next line", "line break",
+    "press enter", "press return", "hit enter", "enter key",
+})
+_DICTATION_PARAGRAPH_COMMANDS = frozenset({
+    "new paragraph", "paragraph break",
+})
+_DICTATION_COMMAND_NORMALIZE_RE = re.compile(r"[^\w\s]+")
+
+
+def _parse_dictation_command(text: str) -> Optional[str]:
+    if not text:
+        return None
+    stripped = _DICTATION_COMMAND_NORMALIZE_RE.sub("", text)
+    normalized = re.sub(r"\s+", " ", stripped).strip().lower()
+    if not normalized:
+        return None
+    if normalized in _DICTATION_NEWLINE_COMMANDS:
+        return "newline"
+    if normalized in _DICTATION_PARAGRAPH_COMMANDS:
+        return "paragraph"
+    return None
+
 _DICTATION_TRAILING_HALLUCINATIONS = {"the", "you", "and", "a"}
 
 _WHISPER_STOCK_HALLUCINATIONS = (
@@ -4592,6 +4621,22 @@ class GestureWorker(QObject):
                             if not text:
                                 state["committed"] = ""
                                 state["last_words"] = []
+                                return
+                            command = _parse_dictation_command(text)
+                            if command is not None:
+                                _flush_pending()
+                                newline_text = "\n\n" if command == "paragraph" else "\n"
+                                with self._corrector_lock:
+                                    inserted = self.text_input_controller.insert_text(
+                                        newline_text, prefer_paste=False
+                                    )
+                                    if inserted:
+                                        self.grammar_corrector.append(newline_text)
+                                print(f"[dictation] command: {command} inserted={inserted} text={text!r}")
+                                state["committed"] = ""
+                                state["last_words"] = []
+                                state["last_final_text"] = ""
+                                state["stream_hyp_chars"] = 0
                                 return
                             _buffer_final(text)
                     except Exception:

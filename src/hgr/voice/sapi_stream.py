@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
+from ..utils.subprocess_utils import hidden_subprocess_kwargs
 from .whisper_stream import DictationEvent
 
 
@@ -62,6 +63,7 @@ class SapiStreamer:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **hidden_subprocess_kwargs(),
         )
 
         def _watch_stop() -> None:

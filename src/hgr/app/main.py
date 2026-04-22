@@ -5,7 +5,6 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from ..config.app_config import APP_NAME, load_config, save_config
-from ..debug.volume_controller import disable_cross_app_audio_ducking
 from ..utils.runtime_paths import resource_path
 from .ui.main_window import MainWindow
 from .ui.touchless_splash import TouchlessSplash
@@ -32,9 +31,6 @@ def main() -> int:
 
     config = load_config()
     save_config(config)
-
-    if getattr(config, "disable_audio_ducking", True):
-        disable_cross_app_audio_ducking()
 
     def _build_window() -> MainWindow:
         w = MainWindow(config)

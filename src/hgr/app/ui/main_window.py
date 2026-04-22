@@ -42,11 +42,10 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimedia import QMediaPlayer
     from PySide6.QtMultimediaWidgets import QVideoWidget
     _HAS_QT_MEDIA = True
 except Exception:
-    QAudioOutput = None
     QMediaPlayer = None
     QVideoWidget = None
     _HAS_QT_MEDIA = False
@@ -752,15 +751,17 @@ class GestureMediaWidget(QFrame):
             self._video_widget = video_widget
 
             self._player = QMediaPlayer(self)
-            self._audio = QAudioOutput(self)
-            try:
-                self._audio.setMuted(True)
-            except Exception:
-                try:
-                    self._audio.setVolume(0.0)
-                except Exception:
-                    pass
-            self._player.setAudioOutput(self._audio)
+            # Deliberately do NOT attach a QAudioOutput. Each QAudioOutput
+            # registers a Windows audio session with the endpoint (even when
+            # muted), and the GestureMediaWidget is instantiated ~20 times
+            # across the tutorial UI. That many ghost sessions changes how the
+            # Razer / Windows shared-mode mixer negotiates format and applies
+            # DSP, which caused a loud-spike regression when a second real
+            # audio source (e.g. YouTube) joined on top of a game. With no
+            # audio output attached, QMediaPlayer skips audio decoding entirely
+            # — no session is ever registered. Video-only was the intent here
+            # anyway (the previous code just set the QAudioOutput to muted).
+            self._audio = None
             self._player.setVideoOutput(video_widget)
             self._player.setSource(QUrl.fromLocalFile(str(media_path)))
             self._player.mediaStatusChanged.connect(self._handle_media_status)

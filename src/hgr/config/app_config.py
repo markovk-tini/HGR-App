@@ -156,7 +156,6 @@ class AppConfig:
     low_fps_mode: bool = False
     low_fps_auto: bool = False
     force_ten_fps_test_mode: bool = False
-    disable_audio_ducking: bool = True
     mic_input_gain: float = 1.0
 
 

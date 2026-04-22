@@ -72,12 +72,8 @@ class YouTubeController:
         self._volume_controller = volume_controller
         self._is_windows = platform.system() == "Windows"
         self._message = "YouTube idle"
-        self._peak_cache_until = 0.0
-        self._peak_cache_value: float | None = None
         self._tab_cache_until = 0.0
         self._tab_cache_value = False
-        self._playing_cache_until = 0.0
-        self._playing_cache_value = False
         self._skip_click_cooldown_until = 0.0
         self._last_youtube_hwnd = 0
         self._last_youtube_seen_until = 0.0
@@ -99,31 +95,6 @@ class YouTubeController:
             value = self._has_recent_youtube_window()
         self._tab_cache_value = value
         self._tab_cache_until = now + 1.0
-        return value
-
-    def is_playing(self) -> bool:
-        """Title-and-audio check: YouTube tab exists AND chrome is making sound."""
-        now = time.time()
-        if now < self._playing_cache_until:
-            return self._playing_cache_value
-        if not self.has_youtube_tab():
-            value = False
-        elif self._volume_controller is None:
-            value = True
-        else:
-            peak = self._cached_chrome_peak()
-            value = True if peak is None else peak > 0.005
-        self._playing_cache_value = value
-        self._playing_cache_until = now + 0.5
-        return value
-
-    def _cached_chrome_peak(self) -> float | None:
-        now = time.time()
-        if now < self._peak_cache_until and self._peak_cache_value is not None:
-            return self._peak_cache_value
-        value = self._volume_controller.get_process_audio_peak(["chrome"])
-        self._peak_cache_value = value
-        self._peak_cache_until = now + 0.25
         return value
 
     def _send_virtual_key(self, vk: int) -> bool:

@@ -19,10 +19,12 @@ class YouTubeGestureSnapshot:
 class YouTubeGestureRouter:
     """Routes swipes / fist to YouTube media keys.
 
-    Two activation paths:
-    - Auto: when a YouTube tab exists AND chrome is emitting audio (is_playing).
-    - Forced: user toggled on via the 'four' static gesture. Forced mode
-      consumes swipes/fist unconditionally and beats both Chrome and Spotify.
+    Activation is explicit only: user toggles the mode on via the 'four' static
+    gesture (held). There is no auto-activation based on audio/tab state —
+    auto-activation used to probe Chrome's audio session via pycaw on the hot
+    loop, which triggered a Razer BlackShark + Genshin driver stall (see
+    project_audio_ducking memory). Forced mode consumes swipes/fist
+    unconditionally and beats both Chrome and Spotify.
     """
 
     _CONSUMABLE_DYNAMIC = {"swipe_left", "swipe_right"}
@@ -100,20 +102,8 @@ class YouTubeGestureRouter:
             self._control_text = "youtube mode off (tab closed)"
             self._set_action("youtube_mode_off")
         self._update_forced_toggle(stable_label, now, controller)
-        auto_playing = False
-        if not self._forced_mode and tab_present:
-            try:
-                auto_playing = bool(controller.is_playing())
-            except Exception:
-                auto_playing = False
-        self._mode_active = self._forced_mode or auto_playing
-
-        if self._forced_mode:
-            self._info_text = "forced"
-        elif auto_playing:
-            self._info_text = "auto"
-        else:
-            self._info_text = "off"
+        self._mode_active = self._forced_mode
+        self._info_text = "forced" if self._forced_mode else "off"
 
         consumes_static = stable_label in self._CONSUMABLE_STATIC
         consumes_dynamic = dynamic_label in self._CONSUMABLE_DYNAMIC

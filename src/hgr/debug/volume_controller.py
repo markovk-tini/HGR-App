@@ -12,30 +12,6 @@ class VolumeStatus:
     level_scalar: float | None = None
 
 
-def disable_cross_app_audio_ducking() -> bool:
-    # UserDuckingPreference: 0=Mute, 1=Reduce 80% (default), 2=Reduce 50%, 3=Do nothing.
-    # Must be 3. Any non-zero ducking value can trip Razer Synapse / Genshin-style
-    # exclusive-mode drivers into a stalled-audio state (symptom: total silence even
-    # though master volume and mute look normal; closing the game releases it).
-    if platform.system() != "Windows":
-        return False
-    try:
-        import winreg
-
-        key_path = r"Software\Microsoft\Multimedia\Audio"
-        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as key:
-            try:
-                existing, kind = winreg.QueryValueEx(key, "UserDuckingPreference")
-                if kind == winreg.REG_DWORD and int(existing) == 3:
-                    return True
-            except FileNotFoundError:
-                pass
-            winreg.SetValueEx(key, "UserDuckingPreference", 0, winreg.REG_DWORD, 3)
-        return True
-    except Exception:
-        return False
-
-
 class VolumeController:
     def __init__(self) -> None:
         self._available = False
