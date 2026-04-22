@@ -22,6 +22,8 @@ from ...debug.mouse_controller import MouseController
 from ...debug.mouse_gesture import MouseGestureTracker
 from ...debug.mouse_overlay import draw_mouse_control_box_overlay, draw_mouse_monitor_overlay
 from ...voice.live_dictation import LiveDictationEvent, LiveDictationStreamer
+from ...config.app_config import save_config
+from ...debug.low_fps_suggestion_overlay import LowFpsSuggestionOverlay
 from ...debug.screen_volume_overlay import ScreenVolumeOverlay
 from ...debug.spotify_controller import SpotifyController
 from ...debug.spotify_gesture_router import SpotifyGestureRouter
@@ -294,6 +296,12 @@ class GestureWorker(QObject):
     _NORMAL_PROCESS_WIDTH = 960
     _LOW_FPS_PROCESS_WIDTH = 384
     _FULLSCREEN_POLL_INTERVAL = 1.0
+    # Suggestion overlay: triggered when measured FPS stays below 15 for
+    # longer than 10 seconds. After the user dismisses (X, left-fist, or
+    # auto-dismiss), we wait this many seconds before re-offering.
+    _LOW_FPS_SUGGEST_THRESHOLD = 15.0
+    _LOW_FPS_SUGGEST_ENTER_SECONDS = 10.0
+    _LOW_FPS_SUGGEST_COOLDOWN_SECONDS = 300.0
 
     def __init__(self, config, camera_index_override: Optional[int] = None, parent=None):
         super().__init__(parent)
@@ -315,9 +323,17 @@ class GestureWorker(QObject):
         self._low_fps_above_since: float | None = None
         self._low_fps_auto_engaged = False
         self._low_fps_last_process = 0.0
+        # Suggestion overlay bookkeeping (separate from auto-engage timing).
+        self._low_fps_suggest_below_since: float | None = None
+        self._low_fps_suggest_cooldown_until = 0.0
+        self._low_fps_suggest_visible = False
         self._fullscreen_foreground_active = False
         self._fullscreen_foreground_process = ""
         self._fullscreen_check_last = 0.0
+
+        self.low_fps_suggestion_overlay = LowFpsSuggestionOverlay()
+        self.low_fps_suggestion_overlay.activateRequested.connect(self._handle_low_fps_suggestion_activate)
+        self.low_fps_suggestion_overlay.dismissed.connect(self._handle_low_fps_suggestion_dismissed)
 
         self.volume_controller = VolumeController()
         self.volume_overlay = ScreenVolumeOverlay(config)
@@ -2263,6 +2279,68 @@ class GestureWorker(QObject):
                 elif (now - self._low_fps_above_since) >= self._LOW_FPS_AUTO_EXIT_SECONDS and fps >= self._LOW_FPS_AUTO_THRESHOLD:
                     self._disengage_auto_low_fps()
 
+    def _maybe_offer_low_fps_suggestion(self, now: float) -> None:
+        """Track sustained low FPS and show the suggestion overlay when warranted.
+
+        Independent of the fullscreen-gated auto-engage: the suggestion is a
+        user-visible offer, not a silent switch, so it should fire on any
+        prolonged FPS drop regardless of whether a game is foregrounded.
+        Suppressed when low-fps is already on, when we're inside the post-
+        dismiss cooldown, or when the toast is already visible.
+        """
+        if getattr(self.config, "low_fps_mode", False) or self._low_fps_auto_engaged:
+            # Already on (user or auto); no reason to suggest.
+            self._low_fps_suggest_below_since = None
+            return
+        if self._low_fps_suggest_visible:
+            return
+        if now < self._low_fps_suggest_cooldown_until:
+            self._low_fps_suggest_below_since = None
+            return
+        fps = self._fps
+        if fps <= 0.0:
+            return
+        if fps < self._LOW_FPS_SUGGEST_THRESHOLD:
+            if self._low_fps_suggest_below_since is None:
+                self._low_fps_suggest_below_since = now
+            elif (now - self._low_fps_suggest_below_since) >= self._LOW_FPS_SUGGEST_ENTER_SECONDS:
+                self._show_low_fps_suggestion()
+        else:
+            self._low_fps_suggest_below_since = None
+
+    def _show_low_fps_suggestion(self) -> None:
+        try:
+            self.low_fps_suggestion_overlay.show_suggestion()
+            self._low_fps_suggest_visible = True
+        except Exception:
+            pass
+
+    def _handle_low_fps_suggestion_activate(self) -> None:
+        # User clicked "Low FPS Mode" on the toast — flip the persistent
+        # setting and apply it live. Mirror the path the Settings button uses.
+        try:
+            self.set_low_fps_mode(True)
+        except Exception:
+            pass
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+        self._low_fps_suggest_below_since = None
+        self._low_fps_suggest_cooldown_until = time.time() + self._LOW_FPS_SUGGEST_COOLDOWN_SECONDS
+
+    def _handle_low_fps_suggestion_dismissed(self) -> None:
+        self._low_fps_suggest_visible = False
+        self._low_fps_suggest_below_since = None
+        self._low_fps_suggest_cooldown_until = time.time() + self._LOW_FPS_SUGGEST_COOLDOWN_SECONDS
+
+    def _dismiss_low_fps_suggestion_via_gesture(self) -> None:
+        if self._low_fps_suggest_visible:
+            try:
+                self.low_fps_suggestion_overlay.dismiss()
+            except Exception:
+                pass
+
     def _build_engine_for_fps_mode(self) -> GestureRecognitionEngine:
         self._low_fps_active = bool(getattr(self.config, "low_fps_mode", False)) or self._low_fps_auto_engaged
         if self._low_fps_active:
@@ -2444,6 +2522,12 @@ class GestureWorker(QObject):
         self._volume_overlay_visible = False
         self.volume_overlay.hide_overlay()
         self.voice_status_overlay.hide_overlay()
+        try:
+            self.low_fps_suggestion_overlay.hide()
+        except Exception:
+            pass
+        self._low_fps_suggest_visible = False
+        self._low_fps_suggest_below_since = None
         self.mouse_controller.release_all()
         self.mouse_tracker.reset()
         self._last_mouse_update = self._blank_mouse_update()
@@ -2601,6 +2685,7 @@ class GestureWorker(QObject):
         self._last_time = now
         self._refresh_fullscreen_foreground(now)
         self._maybe_auto_toggle_low_fps(now)
+        self._maybe_offer_low_fps_suggestion(now)
         self._drain_voice_results()
         if not self._dictation_active:
             try:
@@ -4187,6 +4272,10 @@ class GestureWorker(QObject):
         trigger_labels = {"one", "two"}
 
         if stable_label == "fist":
+            # Left-fist also dismisses the low-FPS suggestion toast when it's up.
+            # Cheap no-op when the overlay is already hidden, so this is safe
+            # to call ahead of the existing voice-cancel logic.
+            self._dismiss_low_fps_suggestion_via_gesture()
             if self._voice_latched_label == "fist":
                 return
             if now - float(getattr(self, "_voice_one_two_triggered_at", 0.0) or 0.0) < 1.0:

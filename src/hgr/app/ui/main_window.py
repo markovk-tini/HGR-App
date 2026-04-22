@@ -2816,7 +2816,7 @@ class MainWindow(QMainWindow):
 
         low_fps_note = QLabel(
             "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). "
-            "Touchless turns it on automatically if your measured FPS drops below 18, and the 10 FPS test button below can simulate a rough laptop camera path."
+            "Touchless also offers to turn this on automatically if your measured FPS stays low for too long."
         )
         low_fps_note.setObjectName("cameraNote")
         low_fps_note.setWordWrap(True)
@@ -2828,11 +2828,6 @@ class MainWindow(QMainWindow):
         self.low_fps_button.setChecked(bool(self.config.low_fps_mode))
         self.low_fps_button.clicked.connect(self._on_low_fps_button_toggled)
         low_fps_row.addWidget(self.low_fps_button)
-        self.force_ten_fps_button = QPushButton()
-        self.force_ten_fps_button.setCheckable(True)
-        self.force_ten_fps_button.setChecked(bool(getattr(self.config, "force_ten_fps_test_mode", False)))
-        self.force_ten_fps_button.clicked.connect(self._on_force_ten_fps_button_toggled)
-        low_fps_row.addWidget(self.force_ten_fps_button)
         low_fps_row.addStretch(1)
         box_layout.addLayout(low_fps_row)
         self._refresh_low_fps_button_label()
@@ -2845,12 +2840,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "low_fps_button"):
             return
         on = bool(self.config.low_fps_mode)
-        self.low_fps_button.setText("Low FPS Mode: ON" if on else "Force Low FPS Mode")
+        self.low_fps_button.setText("Low FPS Mode: ON" if on else "Low FPS Mode")
         self.low_fps_button.setChecked(on)
-        if hasattr(self, "force_ten_fps_button"):
-            forced = bool(getattr(self.config, "force_ten_fps_test_mode", False))
-            self.force_ten_fps_button.setText("10 FPS Test: ON" if forced else "Force 10 FPS Test")
-            self.force_ten_fps_button.setChecked(forced)
 
     def _on_low_fps_button_toggled(self, checked: bool) -> None:
         self.config.low_fps_mode = bool(checked)
@@ -2861,24 +2852,10 @@ class MainWindow(QMainWindow):
             worker.set_low_fps_mode(self.config.low_fps_mode)
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
-                "Last action: Low FPS Mode forced on" if self.config.low_fps_mode else "Last action: Low FPS Mode off"
+                "Last action: Low FPS Mode on" if self.config.low_fps_mode else "Last action: Low FPS Mode off"
             )
 
-    def _on_force_ten_fps_button_toggled(self, checked: bool) -> None:
-        self.config.force_ten_fps_test_mode = bool(checked)
-        save_config(self.config)
-        self._refresh_low_fps_button_label()
-        worker = getattr(self, "_worker", None)
-        if worker is not None and hasattr(worker, "set_force_ten_fps_test_mode"):
-            worker.set_force_ten_fps_test_mode(self.config.force_ten_fps_test_mode)
-        if hasattr(self, "last_action_label"):
-            self.last_action_label.setText(
-                "Last action: 10 FPS test forced on"
-                if self.config.force_ten_fps_test_mode
-                else "Last action: 10 FPS test off"
-            )
 
-    
     def _build_microphone_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Microphone",
