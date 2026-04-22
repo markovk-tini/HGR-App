@@ -244,6 +244,7 @@ class GestureWorker(QObject):
     debug_frame_ready = Signal(object, object)
     save_prompt_completed = Signal(object)
     action_history_changed = Signal(object)
+    dictation_stream_ready = Signal(str)
 
     _LOW_FPS_AUTO_THRESHOLD = 18.0
     _LOW_FPS_AUTO_ENTER_SECONDS = 4.0
@@ -285,6 +286,7 @@ class GestureWorker(QObject):
             self.voice_status_overlay.selectionChosen.connect(self._handle_voice_overlay_selection)
         except Exception:
             pass
+        self.dictation_stream_ready.connect(self._on_dictation_stream_ready)
         self.volume_tracker = VolumeGestureTracker()
         self._volume_message = self.volume_controller.message
         self._volume_mode_active = False
@@ -4541,8 +4543,8 @@ class GestureWorker(QObject):
                             print(f"[dictation] stream event: {name} text={text!r}")
                             if name == "ready":
                                 try:
-                                    self.voice_status_overlay.show_listening(
-                                        backend_label=self._dictation_backend_label()
+                                    self.dictation_stream_ready.emit(
+                                        self._dictation_backend_label()
                                     )
                                 except Exception:
                                     pass
@@ -4997,6 +4999,12 @@ class GestureWorker(QObject):
             elif line.lower().startswith("which "):
                 instruction = line
         return title, items, instruction
+
+    def _on_dictation_stream_ready(self, backend_label: str) -> None:
+        try:
+            self.voice_status_overlay.show_listening(backend_label=backend_label)
+        except Exception:
+            pass
 
     def _handle_voice_overlay_selection(self, number: int) -> None:
         try:
