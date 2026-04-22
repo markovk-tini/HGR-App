@@ -30,10 +30,24 @@ _BLOCK_MS = 100
 _BLOCK_SAMPLES = _SAMPLE_RATE * _BLOCK_MS // 1000
 _MIN_DECODE_MS = 500
 _DECODE_INTERVAL_MS = 300
-_SILENCE_COMMIT_MS = 1500
+_SILENCE_COMMIT_MS = 2000
 _MAX_UTTERANCE_MS = 30000
+_MIN_SPEECH_MS = 500
 _RMS_SILENCE_THRESHOLD = 0.003
 _MODEL_ID = "deepdml/faster-whisper-large-v3-turbo-ct2"
+
+_DEFAULT_HOTWORDS = (
+    "Docker Kubernetes Python JavaScript TypeScript GitHub AWS Azure "
+    "Anthropic OpenAI PyTorch TensorFlow MediaPipe PySide macOS Linux"
+)
+
+
+def _resolve_hotwords() -> Optional[str]:
+    raw = os.getenv("HGR_WHISPER_HOTWORDS")
+    if raw is None:
+        return _DEFAULT_HOTWORDS
+    raw = raw.strip()
+    return raw or None
 
 
 def _resolve_model_dir() -> Path:
@@ -134,6 +148,7 @@ class WhisperStreamer:
         self._backend: Optional[str] = None
         self._model = None
         self._mic_index: Optional[int] = None
+        self._hotwords = _resolve_hotwords()
         self._model_lock = threading.Lock()
 
         try:
@@ -201,6 +216,8 @@ class WhisperStreamer:
                 vad_filter=False,
                 without_timestamps=True,
                 no_speech_threshold=0.6,
+                hotwords=self._hotwords,
+                repetition_penalty=1.1,
             )
             tokens: List[str] = []
             for seg in segments:
@@ -263,6 +280,7 @@ class WhisperStreamer:
         utterance = np.zeros(0, dtype=np.float32)
         samples_at_last_decode = 0
         silence_run_ms = 0.0
+        speech_ms = 0.0
         last_hyp_text = ""
 
         try:
@@ -291,6 +309,7 @@ class WhisperStreamer:
                 if utterance.size == 0:
                     samples_at_last_decode = 0
                     silence_run_ms = 0.0
+                    speech_ms = 0.0
                     la.reset()
                     last_hyp_text = ""
 
@@ -299,11 +318,25 @@ class WhisperStreamer:
                     silence_run_ms += block_ms
                 else:
                     silence_run_ms = 0.0
+                    speech_ms += block_ms
 
                 utt_ms = (utterance.size * 1000.0) / _SAMPLE_RATE
 
                 should_commit = silence_run_ms >= _SILENCE_COMMIT_MS or utt_ms >= _MAX_UTTERANCE_MS
                 if not should_commit:
+                    continue
+
+                # Skip decode if the utterance is mostly silence. Without this,
+                # whisper hallucinates on low-signal audio — with hotwords
+                # enabled it can spiral into a 200+ token repetition loop.
+                if speech_ms < _MIN_SPEECH_MS:
+                    print(f"[whisper-stream] skip decode (speech={speech_ms:.0f}ms < {_MIN_SPEECH_MS}ms, audio={utt_ms:.0f}ms)")
+                    utterance = np.zeros(0, dtype=np.float32)
+                    samples_at_last_decode = 0
+                    silence_run_ms = 0.0
+                    speech_ms = 0.0
+                    la.reset()
+                    last_hyp_text = ""
                     continue
 
                 t0 = time.monotonic()
@@ -313,7 +346,7 @@ class WhisperStreamer:
                     print(f"[whisper-stream] transcribe error: {exc}")
                     tokens = []
                 decode_ms = (time.monotonic() - t0) * 1000.0
-                print(f"[whisper-stream] decode audio={utt_ms:.0f}ms took={decode_ms:.0f}ms tokens={len(tokens)}")
+                print(f"[whisper-stream] decode audio={utt_ms:.0f}ms speech={speech_ms:.0f}ms took={decode_ms:.0f}ms tokens={len(tokens)}")
 
                 final_text = " ".join(tokens).strip()
                 if final_text:
@@ -322,6 +355,7 @@ class WhisperStreamer:
                 utterance = np.zeros(0, dtype=np.float32)
                 samples_at_last_decode = 0
                 silence_run_ms = 0.0
+                speech_ms = 0.0
                 la.reset()
                 last_hyp_text = ""
         except Exception as exc:

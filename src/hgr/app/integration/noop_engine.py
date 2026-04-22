@@ -74,6 +74,18 @@ _WHISPER_STOCK_HALLUCINATIONS = (
 _WHISPER_STOCK_PATTERNS = tuple(
     re.compile(r"\b" + re.escape(phrase) + r"\.?", re.IGNORECASE)
     for phrase in _WHISPER_STOCK_HALLUCINATIONS
+) + (
+    # Windows / MS Office ProgID hallucinations whisper pulls from training
+    # data on low-signal trailing audio (e.g., mic bumps, keyboard noise).
+    # The ProgID-like suffix ("MSWordDoc Word.Document.8" or similar) is the
+    # distinguishing signal — legitimate phrases like "I opened a word
+    # document" never include it, so the suffix is required.
+    re.compile(
+        r"\b(?:microsoft\s+)?(?:word|excel|powerpoint)\s+document"
+        r"\s+ms(?:word|excel|powerpoint)doc[.\s]*"
+        r"(?:word|excel|powerpoint)\.?document\.?\d*\.?",
+        re.IGNORECASE,
+    ),
 )
 
 

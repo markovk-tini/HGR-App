@@ -222,14 +222,23 @@ class GrammarCorrector:
 def _find_last_sentence_boundary(text: str) -> int:
     if not text:
         return 0
+    n = len(text)
     last = -1
     for idx, char in enumerate(text):
-        if char in _SENTENCE_ENDINGS:
-            last = idx
+        if char not in _SENTENCE_ENDINGS:
+            continue
+        # Only count a period/!/? as a sentence boundary when it's not
+        # embedded in a token. A "." followed directly by a letter or digit
+        # (e.g., "v2.1.3", "example.com", "e.g.") stays inside the token.
+        if idx + 1 < n:
+            nxt = text[idx + 1]
+            if nxt.isalnum():
+                continue
+        last = idx
     if last < 0:
         return 0
     end = last + 1
-    while end < len(text) and text[end] in {' ', '\n', '\t', '"', "'", ')', ']'}:
+    while end < n and text[end] in {' ', '\n', '\t', '"', "'", ')', ']'}:
         end += 1
     return end
 
