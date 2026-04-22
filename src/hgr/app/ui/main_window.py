@@ -2862,6 +2862,32 @@ class MainWindow(QMainWindow):
         actions_row.addWidget(self.clear_camera_button)
         box_layout.addLayout(actions_row)
 
+        self.camera_already_mirrored_checkbox = QCheckBox("This camera source is already mirrored (skip Touchless's flip)")
+        self.camera_already_mirrored_checkbox.setObjectName("cameraMirroredCheckbox")
+        self.camera_already_mirrored_checkbox.setStyleSheet(
+            f"""
+            QCheckBox#cameraMirroredCheckbox {{
+                color: {self.config.text_color};
+                spacing: 10px;
+                font-size: 13px;
+            }}
+            QCheckBox#cameraMirroredCheckbox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid rgba(255,255,255,0.35);
+                background: rgba(255,255,255,0.05);
+            }}
+            QCheckBox#cameraMirroredCheckbox::indicator:checked {{
+                background: {self.config.accent_color};
+                border: 1px solid {self.config.accent_color};
+            }}
+            """
+        )
+        self.camera_already_mirrored_checkbox.setChecked(bool(getattr(self.config, "camera_source_is_mirrored", False)))
+        self.camera_already_mirrored_checkbox.toggled.connect(self._on_camera_already_mirrored_toggled)
+        box_layout.addWidget(self.camera_already_mirrored_checkbox)
+
         low_fps_note = QLabel(
             "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). "
             "Touchless also offers to turn this on automatically if your measured FPS stays low for too long."
@@ -2955,6 +2981,16 @@ class MainWindow(QMainWindow):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not enabled)
+
+    def _on_camera_already_mirrored_toggled(self, checked: bool) -> None:
+        self.config.camera_source_is_mirrored = bool(checked)
+        save_config(self.config)
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText(
+                "Last action: source-already-mirrored ON" if checked else "Last action: source-already-mirrored OFF"
+            )
+        # Takes effect on the very next frame the engine reads — no camera
+        # restart needed, since the flip decision is re-evaluated every tick.
 
     def _on_phone_camera_toggled(self, checked: bool) -> None:
         self.config.phone_camera_enabled = bool(checked)

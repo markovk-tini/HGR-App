@@ -2698,7 +2698,14 @@ class GestureWorker(QObject):
         ok, frame = self._cap.read()
         if not ok:
             return
-        frame = cv2.flip(frame, 1)
+        # Touchless normally mirrors the camera feed so the user sees the
+        # "selfie" view a webcam gives by convention. If the source already
+        # outputs a mirrored image (some phone-camera apps like Iriun do
+        # this when their own mirror toggle is on), a second flip here
+        # produces an un-mirrored view, which is what the user was hitting.
+        # The config toggle lets them skip our flip.
+        if not bool(getattr(self.config, "camera_source_is_mirrored", False)):
+            frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
         result = self.engine.process_frame(frame)
         self._drawing_secondary_hand_reading = getattr(result, "secondary_hand_reading", None)

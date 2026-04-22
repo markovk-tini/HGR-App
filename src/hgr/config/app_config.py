@@ -159,6 +159,7 @@ class AppConfig:
     mic_input_gain: float = 1.0
     phone_camera_enabled: bool = False
     phone_camera_url: str = ""
+    camera_source_is_mirrored: bool = False
 
 
 DEFAULT_CONFIG = AppConfig()
