@@ -30,6 +30,26 @@ def backend_name(backend: int) -> str:
     return _BACKEND_NAMES.get(backend, f"Backend {backend}")
 
 
+def _qt_video_device_names() -> List[str]:
+    """Return the friendly names Qt reports for video capture devices.
+
+    PySide6's QMediaDevices exposes the real device labels (e.g. "Iriun
+    Webcam", "Integrated Camera", "USB Video Device") that OpenCV's
+    VideoCapture does not. On Windows + DirectShow these typically
+    enumerate in the same order as OpenCV's integer indices, so we can
+    zip them together when the counts match. Falls back silently to an
+    empty list if Qt's multimedia module is unavailable.
+    """
+    try:
+        from PySide6.QtMultimedia import QMediaDevices
+    except Exception:
+        return []
+    try:
+        return [str(dev.description() or "").strip() for dev in QMediaDevices.videoInputs()]
+    except Exception:
+        return []
+
+
 def _backend_candidates() -> List[int]:
     system = platform.system()
 
@@ -124,6 +144,7 @@ def list_available_cameras(max_index: int = 8) -> List[CameraInfo]:
     discovered: List[CameraInfo] = []
     consecutive_misses = 0
     stop_after_misses = 2 if platform.system() == "Windows" else max_index
+    qt_names = _qt_video_device_names()
 
     for index in _candidate_indices(max_index):
         found_for_index = False
@@ -132,12 +153,20 @@ def list_available_cameras(max_index: int = 8) -> List[CameraInfo]:
             if cap is None:
                 continue
             cap.release()
+            # Prefer Qt's friendly device name at the matching index (e.g.
+            # "Iriun Webcam"), and only fall back to "Camera N (Backend)"
+            # when Qt either couldn't enumerate or returned fewer entries.
+            friendly = qt_names[index] if index < len(qt_names) else ""
+            if friendly:
+                display = f"{friendly} (Camera {index})"
+            else:
+                display = f"Camera {index} ({backend_name(backend)})"
             discovered.append(
                 CameraInfo(
                     index=index,
                     backend=backend,
                     backend_name=backend_name(backend),
-                    display_name=f"Camera {index} ({backend_name(backend)})",
+                    display_name=display,
                 )
             )
             found_for_index = True
