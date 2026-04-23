@@ -228,8 +228,17 @@ class PhoneCameraConnectDialog(QDialog):
         # Status callbacks arrive on the server thread. Marshal onto the
         # GUI thread via a queued connection pattern: QTimer.singleShot(0).
         def _apply():
-            if event == "client_connected":
-                self.status_label.setText("Phone browser connected. Waiting for frames...")
+            if event == "phone_page_loaded":
+                # HTML page loaded — phone reaches the PC over HTTPS.
+                # If WSS then fails to connect, the cause is almost
+                # certainly cert-trust on iOS (Safari doesn't carry over
+                # the "Visit Website" exception to WSS).
+                if not self._streaming_seen:
+                    self.status_label.setText(
+                        f"Phone loaded the Touchless page. Waiting for camera connection..."
+                    )
+            elif event == "client_connected":
+                self.status_label.setText("Phone browser opened the video stream. Waiting for frames...")
             elif event == "streaming":
                 self._streaming_seen = True
                 self.status_label.setText("Streaming — phone camera is live.")

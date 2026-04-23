@@ -2851,21 +2851,29 @@ class MainWindow(QMainWindow):
                 border: none;
             }}
             QScrollArea#cameraScroll QScrollBar:vertical {{
-                background: transparent;
+                background: rgba(255,255,255,0.04);
                 width: 10px;
-                margin: 4px 2px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
             }}
             QScrollArea#cameraScroll QScrollBar::handle:vertical {{
-                background: rgba(255,255,255,0.22);
-                border-radius: 4px;
-                min-height: 24px;
+                background: {self.config.accent_color};
+                border-radius: 5px;
+                min-height: 32px;
             }}
             QScrollArea#cameraScroll QScrollBar::handle:vertical:hover {{
-                background: rgba(255,255,255,0.36);
+                background: {self.config.accent_color};
+                /* slight brighten on hover via a subtle outer ring */
+                border: 1px solid rgba(255,255,255,0.25);
             }}
             QScrollArea#cameraScroll QScrollBar::add-line:vertical,
             QScrollArea#cameraScroll QScrollBar::sub-line:vertical {{
                 height: 0px;
+                background: transparent;
+            }}
+            QScrollArea#cameraScroll QScrollBar::add-page:vertical,
+            QScrollArea#cameraScroll QScrollBar::sub-page:vertical {{
+                background: transparent;
             }}
             """
         )
