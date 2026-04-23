@@ -154,7 +154,6 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   const facingSelect = document.getElementById("facingSelect");
 
   let stream = null;
-  let ws = null;
   let canvas = null;
   let ctx = null;
   let sending = false;
@@ -163,6 +162,8 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   let lastStatsAt = 0;
   let lastSentBytes = 0;
   let lastSentAt = 0;
+  let inflightPost = false;  // prevent overlapping POSTs — drop frames rather than pile up
+  let consecutivePostErrors = 0;
 
   function setStatus(text, kind) {
     statusEl.textContent = text;
@@ -180,30 +181,6 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   }
   function currentFps() { return parseInt(fpsSelect.value, 10) || 30; }
   function currentQuality() { return parseFloat(qualSelect.value) || 0.78; }
-
-  async function openWebSocket() {
-    return new Promise((resolve, reject) => {
-      const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const url = proto + "//" + location.host + "/ws";
-      const sock = new WebSocket(url);
-      sock.binaryType = "arraybuffer";
-      // Safari on iOS can park WSS connections in CONNECTING state
-      // indefinitely when the self-signed cert isn't explicitly trusted.
-      const timeout = setTimeout(() => {
-        try { sock.close(); } catch (_) {}
-        reject(new Error("timeout"));
-      }, 10000);
-      sock.onopen = () => { clearTimeout(timeout); resolve(sock); };
-      sock.onerror = (e) => { clearTimeout(timeout); reject(e); };
-      sock.onclose = () => {
-        clearTimeout(timeout);
-        setStatus("Disconnected from PC. Tap Start to reconnect.", "err");
-        sending = false;
-        startBtn.disabled = false;
-        startBtn.textContent = "Start";
-      };
-    });
-  }
 
   async function probeHttp() {
     try {
@@ -257,23 +234,17 @@ CLIENT_HTML = r"""<!DOCTYPE html>
       startBtn.textContent = "Start";
       return;
     }
-    try {
-      ws = await openWebSocket();
-    } catch (err) {
-      const reachable = await probeHttp();
-      let msg;
-      if (!reachable) {
-        msg = "Could not reach the PC. Make sure Touchless is still open and your phone is on the same WiFi as the PC.";
-      } else if (err && err.message === "timeout") {
-        msg = "Connected over HTTPS but the secure WebSocket stalled. On iPhone this is almost always the self-signed certificate — see the steps below, then close this Safari tab and re-scan the QR.";
-      } else {
-        msg = "Could not open the video stream. " + (err && err.name ? err.name : "") + " — tap Start to retry.";
-      }
-      setStatus(msg, "err");
+    // Verify the PC is reachable before we start pumping frames. If this
+    // probe fails the user has a network/firewall problem, not a cert
+    // one — surface that clearly instead of silently dropping frames.
+    const reachable = await probeHttp();
+    if (!reachable) {
+      setStatus("Could not reach the PC. Make sure Touchless is still open on your PC and your phone is on the same WiFi network.", "err");
       startBtn.disabled = false;
       startBtn.textContent = "Start";
       return;
     }
+    consecutivePostErrors = 0;
     setStatus("Streaming. Keep this tab open.", "ok");
     startBtn.textContent = "Stop";
     startBtn.disabled = false;
@@ -302,7 +273,10 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   }
 
   async function sendOneFrame() {
-    if (!stream || !ws || ws.readyState !== 1) return;
+    if (!stream) return;
+    // Skip the encode entirely if we're still waiting on the previous
+    // POST — lets the network be the bottleneck instead of memory.
+    if (inflightPost) return;
     const track = stream.getVideoTracks()[0];
     if (!track) return;
     const s = track.getSettings ? track.getSettings() : {};
@@ -315,10 +289,37 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     ctx.drawImage(previewEl, 0, 0, w, h);
     const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", currentQuality()));
     if (!blob) return;
-    const buf = await blob.arrayBuffer();
-    try { ws.send(buf); } catch (_) { return; }
-    frameCount += 1;
-    lastSentBytes += buf.byteLength;
+    inflightPost = true;
+    let ok = false;
+    try {
+      // fetch() over HTTPS honors the user's trusted root CA (as opposed
+      // to WSS, which iOS WebKit rejects even with a trusted local root).
+      // This is the transport that Just Works on iOS self-signed setups.
+      const resp = await fetch("/frame", {
+        method: "POST",
+        headers: { "Content-Type": "image/jpeg" },
+        body: blob,
+        cache: "no-store",
+        keepalive: false,
+      });
+      ok = resp.ok || resp.status === 204;
+    } catch (_) {
+      ok = false;
+    } finally {
+      inflightPost = false;
+    }
+    if (ok) {
+      consecutivePostErrors = 0;
+      frameCount += 1;
+      lastSentBytes += blob.size;
+    } else {
+      consecutivePostErrors += 1;
+      if (consecutivePostErrors >= 10) {
+        setStatus("Lost connection to the PC. Tap Start to reconnect.", "err");
+        stopLoop();
+        return;
+      }
+    }
     const now = performance.now();
     if (now - lastStatsAt >= 1000) {
       const fps = frameCount * 1000 / (now - lastStatsAt);
@@ -332,12 +333,12 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   function stopLoop() {
     sending = false;
-    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     if (wakeLock) { try { wakeLock.release(); } catch (_) {} wakeLock = null; }
     statsEl.textContent = "";
     setStatus("Stopped.", "");
     startBtn.textContent = "Start";
+    startBtn.disabled = false;
   }
 
   function enterFullscreen() {

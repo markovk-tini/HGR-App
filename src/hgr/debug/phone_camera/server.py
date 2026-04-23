@@ -1,15 +1,16 @@
-"""HTTPS + WebSocket server for the phone-camera feature.
+"""HTTPS server for the phone-camera feature.
 
-Runs a single `websockets` server on its own asyncio event loop, itself
-hosted on a daemon thread so the Qt event loop stays untouched. HTTP GETs
-(including the root-page request for our HTML client) are handled inside
-the websockets `process_request` hook — that means one port, one listener,
-one library, one TLS context.
+Runs on an aiohttp event loop hosted on a daemon thread so the Qt GUI
+event loop stays untouched. Serves the phone HTML client, the root-CA
+download endpoint, and accepts inbound frames via HTTP POST (which iOS
+Safari honors under the user's trusted root) rather than WSS (which
+iOS WebKit rejects even with a properly-trusted local root CA — the
+single most-debugged quirk in this whole feature).
 
-The caller gets a `PhoneCameraServer` it can `start()`, stream status
-notifications out of (via `on_status`), and `stop()` cleanly. Frames
-received over `/ws` are pushed into a `PhoneCameraCapture` that the
-engine's existing camera-open path consumes as a drop-in VideoCapture.
+The POST-per-frame transport adds ~1ms of HTTP overhead per frame
+compared to a long-lived WebSocket; in practice that's dwarfed by the
+phone's JPEG encode time and fully acceptable on a LAN. TLS session
+reuse keeps each subsequent POST cheap after the first one.
 """
 from __future__ import annotations
 
@@ -19,12 +20,9 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from http import HTTPStatus
 from typing import Callable, Optional
 
-from websockets.asyncio.server import serve as ws_serve
-from websockets.datastructures import Headers
-from websockets.http11 import Response as WsResponse
+from aiohttp import web
 
 from .capture import PhoneCameraCapture
 from .cert import PhoneCameraCertPaths, ensure_self_signed_cert
@@ -32,8 +30,6 @@ from .client_page import CLIENT_HTML
 
 
 def _log(msg: str) -> None:
-    """Stderr trace for the phone-camera server so live-server events are
-    visible in the run_app.py terminal without interfering with the Qt GUI."""
     try:
         sys.stderr.write(f"[phone-camera {time.strftime('%H:%M:%S')}] {msg}\n")
         sys.stderr.flush()
@@ -58,7 +54,7 @@ class PhoneCameraServer:
         self._on_status = on_status
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._ws_server = None
+        self._runner: Optional[web.AppRunner] = None
         self._stop_future: Optional[asyncio.Future] = None
         self._capture = PhoneCameraCapture()
         self._active_clients = 0
@@ -79,11 +75,6 @@ class PhoneCameraServer:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def set_status_callback(self, on_status: Optional[StatusCallback]) -> None:
-        """Swap the status callback — used when a dialog re-opens on an
-        already-running server and wants fresh updates on its own slots."""
-        self._on_status = on_status
-
     @property
     def connected_clients(self) -> int:
         return self._active_clients
@@ -93,6 +84,9 @@ class PhoneCameraServer:
         if self._last_frame_at <= 0.0:
             return float("inf")
         return time.monotonic() - self._last_frame_at
+
+    def set_status_callback(self, on_status: Optional[StatusCallback]) -> None:
+        self._on_status = on_status
 
     def start(self) -> PhoneCameraServerInfo:
         if self.is_running:
@@ -131,7 +125,6 @@ class PhoneCameraServer:
 
         self._thread = threading.Thread(target=_runner, daemon=True, name="PhoneCameraServer")
         self._thread.start()
-        # Wait briefly for the server to bind (or surface a bind error).
         ready_event.wait(timeout=6.0)
         if start_exc:
             raise start_exc[0]
@@ -148,7 +141,7 @@ class PhoneCameraServer:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._thread = None
-        self._ws_server = None
+        self._runner = None
         self._stop_future = None
         self._capture.release()
         self._emit_status("stopped", {})
@@ -156,11 +149,6 @@ class PhoneCameraServer:
     def _request_shutdown(self) -> None:
         if self._stop_future is not None and not self._stop_future.done():
             self._stop_future.set_result(None)
-        if self._ws_server is not None:
-            try:
-                self._ws_server.close()
-            except Exception:
-                pass
 
     async def _serve(self, ready_event: threading.Event, start_exc: list) -> None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -172,18 +160,23 @@ class PhoneCameraServer:
             ready_event.set()
             return
 
+        app = web.Application(client_max_size=8 * 1024 * 1024)  # 8 MiB per frame is plenty
+        app.router.add_get("/", self._handle_index)
+        app.router.add_get("/index.html", self._handle_index)
+        app.router.add_get("/healthz", self._handle_healthz)
+        app.router.add_get("/cert", self._handle_cert)
+        app.router.add_get("/cert.cer", self._handle_cert)
+        app.router.add_get("/touchless.cer", self._handle_cert)
+        app.router.add_get("/touchless-cert.cer", self._handle_cert)
+        app.router.add_get("/ca.cer", self._handle_cert)
+        app.router.add_get("/touchless-ca.cer", self._handle_cert)
+        app.router.add_post("/frame", self._handle_frame)
+
+        self._runner = web.AppRunner(app, handle_signals=False)
         try:
-            self._ws_server = await ws_serve(
-                self._handler,
-                host="0.0.0.0",
-                port=self._port,
-                ssl=ctx,
-                process_request=self._http_route,
-                max_size=2 * 1024 * 1024,
-                max_queue=4,
-                ping_interval=20,
-                ping_timeout=20,
-            )
+            await self._runner.setup()
+            site = web.TCPSite(self._runner, host="0.0.0.0", port=self._port, ssl_context=ctx)
+            await site.start()
         except Exception as exc:
             start_exc.append(exc)
             ready_event.set()
@@ -197,113 +190,70 @@ class PhoneCameraServer:
             pass
         finally:
             try:
-                self._ws_server.close()
-                await self._ws_server.wait_closed()
+                await self._runner.cleanup()
             except Exception:
                 pass
 
-    def _peer_addr(self, connection) -> str:
+    def _peer(self, request: web.Request) -> str:
         try:
-            sock = getattr(connection, "socket", None)
-            if sock is not None:
-                peer = sock.getpeername()
-                if isinstance(peer, tuple) and peer:
-                    return f"{peer[0]}:{peer[1]}"
-            transport = getattr(connection, "transport", None)
-            if transport is not None:
-                peer = transport.get_extra_info("peername")
-                if isinstance(peer, tuple) and peer:
-                    return f"{peer[0]}:{peer[1]}"
+            peer = request.transport.get_extra_info("peername") if request.transport else None
+            if isinstance(peer, tuple) and peer:
+                return f"{peer[0]}:{peer[1]}"
         except Exception:
             pass
         return "?"
 
-    def _http_route(self, connection, request):
-        """Intercept plain HTTP GETs; return None to let WebSocket upgrade proceed.
+    async def _handle_index(self, request: web.Request) -> web.Response:
+        _log(f"GET {request.path} from {self._peer(request)}")
+        self._emit_status("phone_page_loaded", {"peer": self._peer(request)})
+        return web.Response(
+            body=CLIENT_HTML.encode("utf-8"),
+            content_type="text/html",
+            charset="utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
 
-        websockets v16 passes (ServerConnection, Request) here. Returning a
-        `Response` short-circuits the handshake with that payload. Returning
-        None lets the caller continue to the WebSocket handshake.
-        """
+    async def _handle_healthz(self, request: web.Request) -> web.Response:
+        _log(f"GET /healthz from {self._peer(request)}")
+        return web.Response(text="ok", content_type="text/plain")
+
+    async def _handle_cert(self, request: web.Request) -> web.Response:
+        _log(f"GET {request.path} from {self._peer(request)}")
         try:
-            path = str(getattr(request, "path", "") or "/")
+            body = self._cert.ca_cert_path.read_bytes() if self._cert is not None else b""
         except Exception:
-            path = "/"
-        peer = self._peer_addr(connection)
-        if path.startswith("/ws"):
-            _log(f"WS  upgrade request from {peer} path={path}")
-            return None
-        _log(f"GET {path} from {peer}")
-        if path in ("/", "/index.html"):
-            # Phone's browser loaded the landing page — good signal that
-            # network reachability is fine even if WSS later stalls.
-            self._emit_status("phone_page_loaded", {"peer": peer})
-            body = CLIENT_HTML.encode("utf-8")
-            headers = Headers([
-                ("Content-Type", "text/html; charset=utf-8"),
-                ("Content-Length", str(len(body))),
-                ("Cache-Control", "no-store"),
-            ])
-            return WsResponse(HTTPStatus.OK.value, "OK", headers, body)
-        if path == "/healthz":
-            body = b"ok"
-            headers = Headers([
-                ("Content-Type", "text/plain; charset=utf-8"),
-                ("Content-Length", str(len(body))),
-            ])
-            return WsResponse(HTTPStatus.OK.value, "OK", headers, body)
-        if path in ("/cert", "/cert.cer", "/touchless.cer", "/touchless-cert.cer", "/ca.cer", "/touchless-ca.cer"):
-            # Serve the *root CA* cert (not the server leaf). iOS installs
-            # the CA as a profile, user enables full trust in Settings,
-            # and all server leaf certs signed by this root are then
-            # accepted automatically — including future leafs when the
-            # LAN IP changes. The server leaf itself is never downloaded
-            # to the phone.
-            try:
-                body = self._cert.ca_cert_path.read_bytes() if self._cert is not None else b""
-            except Exception:
-                body = b""
-            if not body:
-                headers = Headers([("Content-Type", "text/plain; charset=utf-8")])
-                return WsResponse(HTTPStatus.INTERNAL_SERVER_ERROR.value, "No cert", headers, b"cert unavailable")
-            headers = Headers([
-                ("Content-Type", "application/x-x509-ca-cert"),
-                ("Content-Length", str(len(body))),
-                ("Content-Disposition", "attachment; filename=\"touchless-root-ca.cer\""),
-                ("Cache-Control", "no-store"),
-            ])
-            return WsResponse(HTTPStatus.OK.value, "OK", headers, body)
-        body = b"Not found"
-        headers = Headers([
-            ("Content-Type", "text/plain; charset=utf-8"),
-            ("Content-Length", str(len(body))),
-        ])
-        return WsResponse(HTTPStatus.NOT_FOUND.value, "Not Found", headers, body)
+            body = b""
+        if not body:
+            return web.Response(status=500, text="cert unavailable")
+        return web.Response(
+            body=body,
+            headers={
+                "Content-Type": "application/x-x509-ca-cert",
+                "Content-Disposition": "attachment; filename=\"touchless-root-ca.cer\"",
+                "Cache-Control": "no-store",
+            },
+        )
 
-    async def _handler(self, websocket):
-        peer = self._peer_addr(websocket)
-        _log(f"WS  connected {peer}")
-        self._active_clients += 1
-        self._emit_status("client_connected", {"total": self._active_clients})
-        self._announced_stream = False
-        frame_count = 0
+    async def _handle_frame(self, request: web.Request) -> web.Response:
+        """Accept a single JPEG frame in the POST body."""
+        peer = self._peer(request)
+        first = not self._announced_stream
         try:
-            async for message in websocket:
-                if isinstance(message, (bytes, bytearray, memoryview)):
-                    payload = bytes(message)
-                    self._capture.push_jpeg(payload)
-                    self._last_frame_at = time.monotonic()
-                    frame_count += 1
-                    if not self._announced_stream:
-                        self._announced_stream = True
-                        _log(f"WS  first frame {peer} size={len(payload)} bytes")
-                        self._emit_status("streaming", {"bytes": len(payload)})
+            payload = await request.read()
         except Exception as exc:
-            _log(f"WS  handler exception {peer}: {type(exc).__name__}: {exc}")
-        finally:
-            self._active_clients = max(0, self._active_clients - 1)
-            _log(f"WS  disconnected {peer} frames={frame_count}")
-            self._emit_status("client_disconnected", {"total": self._active_clients})
+            _log(f"POST /frame from {peer} read error: {type(exc).__name__}")
+            return web.Response(status=400, text="read failed")
+        if not payload:
+            return web.Response(status=204, text="")
+        self._capture.push_jpeg(payload)
+        self._last_frame_at = time.monotonic()
+        if first:
+            self._announced_stream = True
+            self._active_clients = max(self._active_clients, 1)
+            _log(f"POST /frame first frame from {peer} size={len(payload)} bytes")
+            self._emit_status("client_connected", {"total": self._active_clients})
+            self._emit_status("streaming", {"bytes": len(payload)})
+        return web.Response(status=204, text="")
 
     def _emit_status(self, event: str, data: dict) -> None:
         if self._on_status is None:
