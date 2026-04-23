@@ -99,6 +99,21 @@ def _existing_cert_covers_ip(cert_bytes: bytes, lan_ip: str) -> bool:
         return False
     except Exception:
         return False
+    # iOS only shows a cert in Settings -> General -> About -> Certificate
+    # Trust Settings (where the user enables full trust) if the cert is
+    # marked as a CA in BasicConstraints. A leaf cert (CA=False) installs
+    # fine but can't be explicitly trusted through that panel, and iOS
+    # won't accept it for TLS on a fresh iPhone. Older Touchless builds
+    # shipped a CA=False cert — those users hit exactly that dead end.
+    # Detect and regenerate.
+    try:
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+        if not bc.ca:
+            return False
+    except x509.ExtensionNotFound:
+        return False
+    except Exception:
+        return False
     try:
         san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         for entry in san_ext:
@@ -147,7 +162,16 @@ def ensure_self_signed_cert(force_regenerate: bool = False) -> PhoneCameraCertPa
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=_VALIDITY_DAYS))
         .add_extension(x509.SubjectAlternativeName(_san_entries(lan_ip)), critical=False)
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        # Mark as a CA so iOS surfaces the cert in
+        # Settings -> General -> About -> Certificate Trust Settings,
+        # where the user flips the explicit-trust toggle. iOS treats
+        # non-CA leaf certs installed via profile as non-enableable, and
+        # they fail TLS on fresh iPhones. Setting CA=True makes the
+        # single cert serve dual duty as both root-of-trust and the
+        # server cert presented at TLS handshake — unusual but valid per
+        # RFC 5280, and the standard pattern for dev-tool self-signed
+        # setups (mkcert, local-ssl-proxy, etc.).
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         # iOS 13+ requires these three extensions or it will silently
         # reject the cert during TLS handshake, even if the user has
         # "trusted" the installed profile. ExtendedKeyUsage=serverAuth
@@ -164,7 +188,9 @@ def ensure_self_signed_cert(force_regenerate: bool = False) -> PhoneCameraCertPa
                 key_encipherment=True,
                 data_encipherment=False,
                 key_agreement=False,
-                key_cert_sign=False,
+                # CA=True requires keyCertSign for the cert to self-sign
+                # its own issuer-of-self role.
+                key_cert_sign=True,
                 crl_sign=False,
                 encipher_only=False,
                 decipher_only=False,

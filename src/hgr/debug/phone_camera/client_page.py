@@ -57,13 +57,14 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     <div><strong>First time setup:</strong> your browser will ask for camera permission — tap Allow.</div>
     <div style="margin-top:8px"><strong>If Start fails with a certificate warning on iPhone,</strong> you need to install and trust the Touchless certificate. Do this in order:</div>
     <ol style="margin:6px 0 6px 20px;padding:0;font-size:12px;line-height:1.5">
-      <li><strong>If you previously installed a "Touchless Phone Camera" profile, delete it first:</strong> Settings → General → VPN &amp; Device Management → Touchless Phone Camera → Remove Profile. Older versions shipped a cert that iOS can't accept.</li>
-      <li>Tap <a href="/touchless-cert.cer" download="touchless.cer" style="color:#1DE9B6;text-decoration:underline">Download Touchless cert</a> (the fresh one).</li>
-      <li>iOS will prompt: "Profile Downloaded." Open Settings → General → VPN &amp; Device Management → Touchless Phone Camera → Install.</li>
-      <li>Settings → General → About → Certificate Trust Settings → enable the Touchless cert.</li>
-      <li><strong>Close this Safari tab completely and re-scan the QR from Touchless.</strong> Safari caches cert state per-tab; a fresh tab forces it to re-evaluate.</li>
-      <li>Tap Start again.</li>
+      <li><strong>If you previously installed any "Touchless Phone Camera" profile, delete it first:</strong> Settings → General → VPN &amp; Device Management → Touchless Phone Camera → Remove Profile. Earlier versions shipped certs iOS couldn't accept — they must be removed for the new one to install cleanly.</li>
+      <li>Tap <a href="/touchless-cert.cer" download="touchless.cer" style="color:#1DE9B6;text-decoration:underline">Download Touchless cert</a>.</li>
+      <li>iOS shows "Profile Downloaded." Open Settings. At the top of the main Settings screen you'll see <em>"Profile Downloaded"</em>. Tap it → Install → enter your passcode → Install → Done.</li>
+      <li><strong>Now trust the cert fully:</strong> Settings → General → About → Certificate Trust Settings. You'll see "Touchless Phone Camera" under "Enable Full Trust for Root Certificates." Toggle it on → Continue.</li>
+      <li><strong>Close this Safari tab completely</strong> (swipe it away from the tab switcher; don't just hit Back). Safari caches cert state per-tab and only re-evaluates on a fresh tab.</li>
+      <li>Re-scan the QR code on your PC, let the new Safari tab open the page, and tap Start.</li>
     </ol>
+    <div style="margin-top:8px;font-size:11px;opacity:0.7">If the Touchless cert isn't in Certificate Trust Settings, make sure you downloaded the profile using this latest build of Touchless — older builds shipped a cert that won't appear there.</div>
   </div>
 
 <script>
