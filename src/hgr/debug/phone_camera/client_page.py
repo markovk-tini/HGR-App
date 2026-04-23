@@ -55,10 +55,15 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="hint">
     <div><strong>First time setup:</strong> your browser will ask for camera permission — tap Allow.</div>
-    <div style="margin-top:8px"><strong>If Start hangs on "Connecting..." for more than 15 seconds on iPhone,</strong>
-      the self-signed certificate needs to be installed and trusted.
-      <a href="/touchless-cert.cer" download="touchless.cer" style="color:#1DE9B6;text-decoration:underline">Download Touchless cert</a> → iOS will ask to install a profile → Settings → General → VPN &amp; Device Management → install → Settings → General → About → Certificate Trust Settings → enable for Touchless. Then come back and tap Start again.
-    </div>
+    <div style="margin-top:8px"><strong>If Start fails with a certificate warning on iPhone,</strong> you need to install and trust the Touchless certificate. Do this in order:</div>
+    <ol style="margin:6px 0 6px 20px;padding:0;font-size:12px;line-height:1.5">
+      <li><strong>If you previously installed a "Touchless Phone Camera" profile, delete it first:</strong> Settings → General → VPN &amp; Device Management → Touchless Phone Camera → Remove Profile. Older versions shipped a cert that iOS can't accept.</li>
+      <li>Tap <a href="/touchless-cert.cer" download="touchless.cer" style="color:#1DE9B6;text-decoration:underline">Download Touchless cert</a> (the fresh one).</li>
+      <li>iOS will prompt: "Profile Downloaded." Open Settings → General → VPN &amp; Device Management → Touchless Phone Camera → Install.</li>
+      <li>Settings → General → About → Certificate Trust Settings → enable the Touchless cert.</li>
+      <li><strong>Close this Safari tab completely and re-scan the QR from Touchless.</strong> Safari caches cert state per-tab; a fresh tab forces it to re-evaluate.</li>
+      <li>Tap Start again.</li>
+    </ol>
   </div>
 
 <script>

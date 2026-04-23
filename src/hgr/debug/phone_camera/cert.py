@@ -21,7 +21,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
 _CERT_DIR = Path.home() / ".touchless" / "certs"
@@ -79,6 +79,26 @@ def _existing_cert_covers_ip(cert_bytes: bytes, lan_ip: str) -> bool:
             return False
     except Exception:
         return False
+    # iOS 13+ requires server certs to carry ExtendedKeyUsage=serverAuth
+    # along with KeyUsage — a cert missing either of these will install
+    # and appear "trusted" in iOS Settings but still fail at TLS handshake
+    # time, silently stalling WSS connections. If an older cert from a
+    # prior Touchless build lacks these extensions, treat it as stale and
+    # regenerate.
+    try:
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        if ExtendedKeyUsageOID.SERVER_AUTH not in list(eku):
+            return False
+    except x509.ExtensionNotFound:
+        return False
+    except Exception:
+        return False
+    try:
+        cert.extensions.get_extension_for_class(x509.KeyUsage)
+    except x509.ExtensionNotFound:
+        return False
+    except Exception:
+        return False
     try:
         san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         for entry in san_ext:
@@ -117,16 +137,48 @@ def ensure_self_signed_cert(force_regenerate: bool = False) -> PhoneCameraCertPa
         x509.NameAttribute(NameOID.COMMON_NAME, "Touchless Phone Camera"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Touchless"),
     ])
+    public_key = key.public_key()
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
-        .public_key(key.public_key())
+        .public_key(public_key)
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=_VALIDITY_DAYS))
         .add_extension(x509.SubjectAlternativeName(_san_entries(lan_ip)), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        # iOS 13+ requires these three extensions or it will silently
+        # reject the cert during TLS handshake, even if the user has
+        # "trusted" the installed profile. ExtendedKeyUsage=serverAuth
+        # is the single most important one; skipping it is the usual
+        # reason "self-signed cert on iOS Safari" tutorials stop working.
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(public_key),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(public_key),
+            critical=False,
+        )
         .sign(key, hashes.SHA256())
     )
 
