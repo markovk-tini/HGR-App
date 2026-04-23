@@ -79,6 +79,11 @@ class PhoneCameraServer:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def set_status_callback(self, on_status: Optional[StatusCallback]) -> None:
+        """Swap the status callback — used when a dialog re-opens on an
+        already-running server and wants fresh updates on its own slots."""
+        self._on_status = on_status
+
     @property
     def connected_clients(self) -> int:
         return self._active_clients

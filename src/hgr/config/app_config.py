@@ -159,11 +159,17 @@ class AppConfig:
     mic_input_gain: float = 1.0
     phone_camera_enabled: bool = False
     phone_camera_url: str = ""
-    # Transient: set True while the Settings "Connect Phone (QR)" flow is
-    # actively serving a phone browser. Not persisted in a meaningful way
-    # across launches because the in-memory server object is what the
-    # engine actually reads from; saving is cosmetic so the UI reflects
-    # the last state on re-entry to Settings.
+    # Phone-camera-via-QR state. Two orthogonal flags so the user can
+    # switch between phone and local camera mid-session without unpairing.
+    #   phone_camera_qr_paired: once the user has successfully paired a
+    #     phone via the QR dialog, this stays True across app launches
+    #     so the embedded HTTPS server auto-starts on startup — the
+    #     phone's already-open browser tab can just tap Start and
+    #     reconnect without re-scanning or re-installing the cert.
+    #   phone_camera_qr_active: engine uses the phone's capture as the
+    #     current source. Toggling this on/off does NOT stop the server;
+    #     it just swaps which camera the gesture pipeline reads from.
+    phone_camera_qr_paired: bool = False
     phone_camera_qr_active: bool = False
     camera_source_is_mirrored: bool = False
 

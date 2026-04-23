@@ -67,11 +67,21 @@ class PhoneCameraConnectDialog(QDialog):
     # is the one reliable path.
     _server_status = Signal(str, object)
 
-    def __init__(self, config: AppConfig, parent=None) -> None:
+    def __init__(self, config: AppConfig, parent=None, *, existing_server: Optional[PhoneCameraServer] = None) -> None:
         super().__init__(parent)
         self.config = config
         self._server_status.connect(self._apply_server_status)
-        self._server = PhoneCameraServer(port=8765, on_status=self._forward_server_status)
+        # When the caller already has a running server (auto-started at
+        # launch for a previously-paired phone), reuse it so clicking
+        # Cancel doesn't tear down the background listener the user is
+        # expecting to keep running. Hook up our own status callback so
+        # UI updates still flow to this dialog.
+        self._server_is_borrowed = existing_server is not None and existing_server.is_running
+        if self._server_is_borrowed:
+            self._server = existing_server
+            self._server.set_status_callback(self._forward_server_status)
+        else:
+            self._server = PhoneCameraServer(port=8765, on_status=self._forward_server_status)
         self._server_info = None
         self._streaming_seen = False
         self._committed = False
@@ -217,12 +227,20 @@ class PhoneCameraConnectDialog(QDialog):
         )
 
     def _start_server(self) -> None:
-        try:
-            info = self._server.start()
-        except Exception as exc:
-            self.url_label.setText(f"Failed to start server: {type(exc).__name__}: {exc}")
-            self.status_label.setText("Server could not start. Close and try again.")
-            return
+        if self._server_is_borrowed:
+            # Server was already running before this dialog opened; don't
+            # re-start, just surface its info.
+            info = self._server.info
+            if info is None:
+                self.status_label.setText("Server is starting... try again in a moment.")
+                return
+        else:
+            try:
+                info = self._server.start()
+            except Exception as exc:
+                self.url_label.setText(f"Failed to start server: {type(exc).__name__}: {exc}")
+                self.status_label.setText("Server could not start. Close and try again.")
+                return
         self._server_info = info
         self.url_label.setText(info.url)
         try:
@@ -230,6 +248,21 @@ class PhoneCameraConnectDialog(QDialog):
             self.qr_label.setPixmap(pix)
         except Exception as exc:
             self.qr_label.setText(f"(could not render QR: {exc})")
+        # Reflect any state the borrowed server is already in so the user
+        # doesn't see "Waiting for phone..." when the phone is already
+        # streaming.
+        if self._server_is_borrowed:
+            try:
+                if self._server.seconds_since_last_frame < 4.0:
+                    self._streaming_seen = True
+                    self.status_label.setText("Streaming — phone camera is live.")
+                    self.use_button.setEnabled(True)
+                elif self._server.connected_clients > 0:
+                    self.status_label.setText("Phone connected. Waiting for frames...")
+                else:
+                    self.status_label.setText("Server is running — waiting for phone to connect.")
+            except Exception:
+                pass
 
     def _forward_server_status(self, event: str, data: dict) -> None:
         # Server-thread entry point: re-emit as a Qt Signal which queues
@@ -275,11 +308,21 @@ class PhoneCameraConnectDialog(QDialog):
         self.camera_accepted.emit(self._server)
         self.accept()
 
+    def _detach_from_server(self) -> None:
+        # Stop receiving status updates to this dialog (which is about to
+        # be destroyed). The server may live on if it was borrowed.
+        try:
+            self._server.set_status_callback(None)
+        except Exception:
+            pass
+
     def closeEvent(self, event) -> None:
         # If the user closed the dialog without clicking "Use This Camera",
-        # tear the server down — nothing should be left listening on the
-        # LAN if they never committed.
-        if not self._committed:
+        # tear the server down — UNLESS we borrowed it (auto-started by
+        # MainWindow because a phone was previously paired), in which
+        # case the user expects it to keep running.
+        self._detach_from_server()
+        if not self._committed and not self._server_is_borrowed:
             try:
                 self._server.stop()
             except Exception:
@@ -287,8 +330,8 @@ class PhoneCameraConnectDialog(QDialog):
         super().closeEvent(event)
 
     def reject(self) -> None:  # type: ignore[override]
-        # Called for Cancel button / ESC — same cleanup as closeEvent.
-        if not self._committed:
+        self._detach_from_server()
+        if not self._committed and not self._server_is_borrowed:
             try:
                 self._server.stop()
             except Exception:
