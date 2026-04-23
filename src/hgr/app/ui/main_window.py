@@ -2378,6 +2378,21 @@ class EraserOptionsDialog(_HandSelectorBase):
         self._thickness_value.setText(str(self._selected_thickness))
 
 
+class _RefreshingCameraCombo(QComboBox):
+    """QComboBox that emits `popup_about_to_show` right before its
+    dropdown opens, so the camera list can refresh lazily without a
+    separate "Search Devices" button."""
+
+    popup_about_to_show = Signal()
+
+    def showPopup(self) -> None:  # noqa: N802 (Qt API)
+        try:
+            self.popup_about_to_show.emit()
+        except Exception:
+            pass
+        super().showPopup()
+
+
 class _PhoneCameraTestThread(QThread):
     """Background probe for the "Use phone camera" Test button.
 
@@ -2949,13 +2964,20 @@ class MainWindow(QMainWindow):
         self.camera_page_status.setWordWrap(True)
         box_layout.addWidget(self.camera_page_status)
 
-        self.camera_combo = QComboBox()
+        self.camera_combo = _RefreshingCameraCombo()
         self.camera_combo.setObjectName("settingsCameraCombo")
+        # Refresh the device list right before the user sees the list —
+        # plugging in a new webcam between app-launch and opening Settings
+        # shouldn't require a separate "Search Devices" click.
+        self.camera_combo.popup_about_to_show.connect(
+            lambda: self.refresh_camera_inventory(update_status=True, notify=False)
+        )
         box_layout.addWidget(self.camera_combo)
 
         note = QLabel(
-            "Pick a local camera from the list above. To actually use it, uncheck 'Use phone camera (QR) as source' below, "
-            "then click Save Camera Selection at the bottom."
+            "Pick a local camera from the list above — the dropdown auto-refreshes each time you open it. "
+            "To actually use the selected device, uncheck 'Use phone camera (QR) as source' below, then click "
+            "Save Camera Selection at the bottom."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
@@ -3100,15 +3122,12 @@ class MainWindow(QMainWindow):
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(8)
-        self.refresh_cameras_button = QPushButton("Search Devices")
-        self.refresh_cameras_button.clicked.connect(lambda: self.refresh_camera_inventory(update_status=True, notify=True))
         self.save_camera_button = QPushButton("Save Camera Selection")
         self.save_camera_button.clicked.connect(self.save_camera_preference_from_settings)
         self.clear_camera_button = QPushButton("Use Auto-Select")
         self.clear_camera_button.clicked.connect(self.clear_camera_preference)
-        for btn in (self.refresh_cameras_button, self.save_camera_button, self.clear_camera_button):
+        for btn in (self.save_camera_button, self.clear_camera_button):
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        actions_row.addWidget(self.refresh_cameras_button)
         actions_row.addWidget(self.save_camera_button)
         actions_row.addWidget(self.clear_camera_button)
         actions_row.addStretch(1)
@@ -3132,7 +3151,7 @@ class MainWindow(QMainWindow):
         # it's clear which setting is winning.
         if hasattr(self, "camera_combo"):
             self.camera_combo.setEnabled(not enabled)
-        for attr in ("refresh_cameras_button", "save_camera_button", "clear_camera_button"):
+        for attr in ("save_camera_button", "clear_camera_button"):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not enabled)
@@ -4245,6 +4264,23 @@ class MainWindow(QMainWindow):
         }}
         QLabel#cameraNote {{
             color: rgba(229,246,255,0.84);
+        }}
+        /* Native QMessageBox has a light-gray background and relies on a
+           dark label color for its message text. Our window-wide
+           QLabel rule sets color to our light theme color, which makes
+           the message invisible on the light popup. Scope back to sane
+           colors inside QMessageBox so its text actually shows up. */
+        QMessageBox {{
+            background-color: {self.config.surface_color};
+        }}
+        QMessageBox QLabel {{
+            color: {self.config.text_color};
+            background: transparent;
+            min-width: 240px;
+        }}
+        QMessageBox QPushButton {{
+            min-width: 80px;
+            padding: 6px 14px;
         }}
         QSlider::groove:horizontal {{
             height: 6px;
