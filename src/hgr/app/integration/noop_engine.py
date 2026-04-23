@@ -330,6 +330,9 @@ class GestureWorker(QObject):
         self._fullscreen_foreground_active = False
         self._fullscreen_foreground_process = ""
         self._fullscreen_check_last = 0.0
+        # Phone-camera-via-QR capture (owned by MainWindow / PhoneCameraServer).
+        # None when no phone is connected; set by set_phone_camera_capture().
+        self._phone_camera_capture = None
 
         self.low_fps_suggestion_overlay = LowFpsSuggestionOverlay()
         self.low_fps_suggestion_overlay.activateRequested.connect(self._handle_low_fps_suggestion_activate)
@@ -2516,7 +2519,11 @@ class GestureWorker(QObject):
     def _shutdown_runtime(self, *, emit_signal: bool) -> None:
         self._timer.stop()
         if self._cap is not None:
-            self._cap.release()
+            # Don't release the phone-camera-QR capture — it's owned by the
+            # MainWindow/PhoneCameraServer and must survive engine restarts
+            # (e.g. toggling Low FPS Mode re-opens the camera via start()).
+            if self._cap is not self._phone_camera_capture:
+                self._cap.release()
             self._cap = None
         if self.engine is not None:
             self.engine.close()
@@ -2575,17 +2582,35 @@ class GestureWorker(QObject):
         if emit_signal:
             self.running_state_changed.emit(False)
 
+    def set_phone_camera_capture(self, capture) -> None:
+        """Hand the engine a running PhoneCameraCapture from the QR-dialog flow.
+
+        When set, _open_camera() will use this capture in place of any
+        local-device or URL-based source. Callers set None to clear it
+        (e.g. when the user disconnects the phone).
+        """
+        self._phone_camera_capture = capture
+
     def _open_camera(self):
-        # Phone-camera-URL path overrides the local-device path only when the
-        # checkbox is on AND a URL has actually been saved. An explicit
-        # camera_index_override (passed in at construction, e.g. from the
-        # Settings "Test" flow) always beats the phone URL so the user can
-        # still probe a local device while phone camera is enabled.
+        # QR-dialog path wins when present: the server is already running
+        # on a worker thread and frames are flowing; we just wrap its
+        # capture in the (info, cap) shape the engine expects. A local
+        # camera_index_override still beats this (used by the in-app
+        # camera test flow).
+        phone_qr_capture = getattr(self, "_phone_camera_capture", None)
         phone_url = str(getattr(self.config, "phone_camera_url", "") or "").strip()
-        use_phone = bool(getattr(self.config, "phone_camera_enabled", False)) and phone_url
+        use_phone_url = bool(getattr(self.config, "phone_camera_enabled", False)) and phone_url
         if self.camera_index_override is not None:
             result = open_camera_by_index(self.camera_index_override, max_index=self.config.camera_scan_limit)
-        elif use_phone:
+        elif phone_qr_capture is not None and phone_qr_capture.isOpened():
+            info = SimpleNamespace(
+                index=-2,
+                backend=0,
+                backend_name="PhoneQR",
+                display_name="Phone Camera (QR)",
+            )
+            result = (info, phone_qr_capture)
+        elif use_phone_url:
             result = open_phone_camera_url(phone_url)
             if result[1] is None:
                 # Phone camera unreachable at startup — fall back to the last
@@ -2879,7 +2904,9 @@ class GestureWorker(QObject):
                     self._volume_app_label = ""
                     self._volume_app_level = None
             else:
-                app_name, app_level = self.volume_controller.get_app_audio_info(["spotify", "chrome"])
+                app_name, app_level = self.volume_controller.get_active_app_audio_info(
+                    ["spotify", "chrome"]
+                )
                 self._volume_dual_active = app_name is not None
                 self._volume_app_process = app_name or ""
                 self._volume_app_label = app_name.capitalize() if app_name else ""

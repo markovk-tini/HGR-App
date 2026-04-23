@@ -2430,6 +2430,12 @@ class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
+        # Transient flag: a prior launch might have been killed mid-QR
+        # session. There's no server running yet, so force the flag off
+        # so the engine doesn't look for one that isn't there.
+        if getattr(self.config, "phone_camera_qr_active", False):
+            self.config.phone_camera_qr_active = False
+        self._phone_camera_qr_server = None
         self._thread = None
         self._worker: Optional[GestureWorker] = None
         self.debugger_window: Optional[StandaloneDebugWindow] = None
@@ -2959,6 +2965,33 @@ class MainWindow(QMainWindow):
         self.phone_camera_status_label.setWordWrap(True)
         box_layout.addWidget(self.phone_camera_status_label)
 
+        qr_note = QLabel(
+            "Or skip the phone-app step entirely: click below, scan the QR code with your phone camera, "
+            "and Touchless will serve a small web page that streams your phone's camera directly to this PC. "
+            "Works on iOS and Android; no phone app install needed."
+        )
+        qr_note.setObjectName("cameraNote")
+        qr_note.setWordWrap(True)
+        box_layout.addWidget(qr_note)
+
+        qr_row = QHBoxLayout()
+        self.phone_camera_qr_button = QPushButton("Connect Phone (QR)")
+        self.phone_camera_qr_button.clicked.connect(self._on_phone_camera_qr_clicked)
+        qr_row.addWidget(self.phone_camera_qr_button)
+
+        self.phone_camera_qr_disconnect_button = QPushButton("Disconnect Phone")
+        self.phone_camera_qr_disconnect_button.clicked.connect(self._on_phone_camera_qr_disconnect_clicked)
+        self.phone_camera_qr_disconnect_button.setVisible(False)
+        qr_row.addWidget(self.phone_camera_qr_disconnect_button)
+
+        qr_row.addStretch(1)
+        box_layout.addLayout(qr_row)
+
+        self.phone_camera_qr_status_label = QLabel("")
+        self.phone_camera_qr_status_label.setObjectName("cameraNote")
+        self.phone_camera_qr_status_label.setWordWrap(True)
+        box_layout.addWidget(self.phone_camera_qr_status_label)
+
         self._refresh_phone_camera_controls()
 
         layout.addWidget(box)
@@ -3048,6 +3081,61 @@ class MainWindow(QMainWindow):
         prefix = "OK — " if ok else "Failed — "
         self.phone_camera_status_label.setText(prefix + message)
 
+    def _on_phone_camera_qr_clicked(self) -> None:
+        from .phone_camera_connect_dialog import PhoneCameraConnectDialog
+        dialog = PhoneCameraConnectDialog(self.config, parent=self)
+        dialog.camera_accepted.connect(self._adopt_phone_camera_server)
+        dialog.exec()
+
+    def _adopt_phone_camera_server(self, server) -> None:
+        # User clicked "Use This Camera" in the QR dialog — the server is
+        # running with frames flowing, we just need to point the engine at
+        # its capture. Treat it like any other "source switch" — flip the
+        # URL-based phone-camera flag OFF (mutually exclusive), stop any
+        # previous QR server we were holding, and restart the engine.
+        prev = getattr(self, "_phone_camera_qr_server", None)
+        if prev is not None and prev is not server:
+            try:
+                prev.stop()
+            except Exception:
+                pass
+        self._phone_camera_qr_server = server
+        # Record the state so a later engine restart (e.g. Low FPS toggle)
+        # still picks up the phone source.
+        self.config.phone_camera_enabled = False
+        self.config.phone_camera_qr_active = True
+        save_config(self.config)
+        if hasattr(self, "phone_camera_checkbox"):
+            self.phone_camera_checkbox.blockSignals(True)
+            self.phone_camera_checkbox.setChecked(False)
+            self.phone_camera_checkbox.blockSignals(False)
+        self.phone_camera_qr_status_label.setText(f"Connected via QR — {server.info.url}")
+        self.phone_camera_qr_disconnect_button.setVisible(True)
+        self.phone_camera_qr_button.setText("Re-Connect Phone (QR)")
+        self._restart_camera_for_phone_toggle()
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText("Last action: phone camera connected via QR")
+
+    def _on_phone_camera_qr_disconnect_clicked(self) -> None:
+        server = getattr(self, "_phone_camera_qr_server", None)
+        if server is not None:
+            try:
+                server.stop()
+            except Exception:
+                pass
+        self._phone_camera_qr_server = None
+        self.config.phone_camera_qr_active = False
+        save_config(self.config)
+        self.phone_camera_qr_status_label.setText("Phone camera disconnected.")
+        self.phone_camera_qr_disconnect_button.setVisible(False)
+        self.phone_camera_qr_button.setText("Connect Phone (QR)")
+        self._restart_camera_for_phone_toggle()
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText("Last action: phone camera (QR) disconnected")
+
+    def _current_phone_camera_qr_server(self):
+        return getattr(self, "_phone_camera_qr_server", None)
+
     def _restart_camera_for_phone_toggle(self) -> None:
         """Stop and re-start the engine so the new camera source is picked up.
 
@@ -3060,6 +3148,18 @@ class MainWindow(QMainWindow):
             return
         stop_fn = getattr(worker, "stop", None)
         start_fn = getattr(worker, "start", None)
+        set_phone = getattr(worker, "set_phone_camera_capture", None)
+        if callable(set_phone):
+            # Always inform the engine of the current phone-camera-QR
+            # capture (or None), BEFORE start() so _open_camera() sees it.
+            qr_server = self._current_phone_camera_qr_server()
+            qr_capture = qr_server.capture if qr_server is not None else None
+            if not bool(getattr(self.config, "phone_camera_qr_active", False)):
+                qr_capture = None
+            try:
+                set_phone(qr_capture)
+            except Exception:
+                pass
         if callable(stop_fn):
             try:
                 stop_fn()
@@ -6855,6 +6955,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.stop_engine()
+        # Tear down the phone-camera server so its daemon thread doesn't
+        # keep a port bound while the app window is closing.
+        qr_server = getattr(self, "_phone_camera_qr_server", None)
+        if qr_server is not None:
+            try:
+                qr_server.stop()
+            except Exception:
+                pass
+            self._phone_camera_qr_server = None
         self._close_hand_selector_dialog()
         self._hide_mini_live_viewer()
         self.draw_overlay.hide_overlay()

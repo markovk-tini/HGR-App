@@ -159,6 +159,12 @@ class AppConfig:
     mic_input_gain: float = 1.0
     phone_camera_enabled: bool = False
     phone_camera_url: str = ""
+    # Transient: set True while the Settings "Connect Phone (QR)" flow is
+    # actively serving a phone browser. Not persisted in a meaningful way
+    # across launches because the in-memory server object is what the
+    # engine actually reads from; saving is cosmetic so the UI reflects
+    # the last state on re-entry to Settings.
+    phone_camera_qr_active: bool = False
     camera_source_is_mirrored: bool = False
 
 
