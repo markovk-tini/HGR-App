@@ -60,11 +60,18 @@ class PhoneCameraConnectDialog(QDialog):
     """
 
     camera_accepted = Signal(object)  # PhoneCameraServer
+    # Thread-safe marshaling from the server's asyncio worker thread
+    # back onto the Qt GUI thread. Direct calls into Qt widgets from a
+    # non-Qt thread (or QTimer.singleShot scheduled from such a thread)
+    # can silently no-op — using a real Signal with Qt.QueuedConnection
+    # is the one reliable path.
+    _server_status = Signal(str, object)
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self.config = config
-        self._server = PhoneCameraServer(port=8765, on_status=self._on_server_status)
+        self._server_status.connect(self._apply_server_status)
+        self._server = PhoneCameraServer(port=8765, on_status=self._forward_server_status)
         self._server_info = None
         self._streaming_seen = False
         self._committed = False
@@ -224,30 +231,31 @@ class PhoneCameraConnectDialog(QDialog):
         except Exception as exc:
             self.qr_label.setText(f"(could not render QR: {exc})")
 
-    def _on_server_status(self, event: str, data: dict) -> None:
-        # Status callbacks arrive on the server thread. Marshal onto the
-        # GUI thread via a queued connection pattern: QTimer.singleShot(0).
-        def _apply():
-            if event == "phone_page_loaded":
-                # HTML page loaded — phone reaches the PC over HTTPS.
-                # If WSS then fails to connect, the cause is almost
-                # certainly cert-trust on iOS (Safari doesn't carry over
-                # the "Visit Website" exception to WSS).
-                if not self._streaming_seen:
-                    self.status_label.setText(
-                        f"Phone loaded the Touchless page. Waiting for camera connection..."
-                    )
-            elif event == "client_connected":
-                self.status_label.setText("Phone browser opened the video stream. Waiting for frames...")
-            elif event == "streaming":
-                self._streaming_seen = True
-                self.status_label.setText("Streaming — phone camera is live.")
-                self.use_button.setEnabled(True)
-            elif event == "client_disconnected":
-                self.status_label.setText("Phone disconnected.")
-                self._streaming_seen = False
-                self.use_button.setEnabled(False)
-        QTimer.singleShot(0, _apply)
+    def _forward_server_status(self, event: str, data: dict) -> None:
+        # Server-thread entry point: re-emit as a Qt Signal which queues
+        # the update onto the GUI thread via Qt.QueuedConnection. Never
+        # touch widgets directly here.
+        try:
+            self._server_status.emit(event, data)
+        except Exception:
+            pass
+
+    def _apply_server_status(self, event: str, data) -> None:
+        if event == "phone_page_loaded":
+            if not self._streaming_seen:
+                self.status_label.setText(
+                    "Phone loaded the Touchless page. Waiting for camera connection..."
+                )
+        elif event == "client_connected":
+            self.status_label.setText("Phone browser opened the video stream. Waiting for frames...")
+        elif event == "streaming":
+            self._streaming_seen = True
+            self.status_label.setText("Streaming — phone camera is live.")
+            self.use_button.setEnabled(True)
+        elif event == "client_disconnected":
+            self.status_label.setText("Phone disconnected.")
+            self._streaming_seen = False
+            self.use_button.setEnabled(False)
 
     def _refresh_status(self) -> None:
         if self._committed:
