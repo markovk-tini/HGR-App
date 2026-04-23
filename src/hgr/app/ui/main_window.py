@@ -2901,6 +2901,50 @@ class MainWindow(QMainWindow):
         box_layout.setContentsMargins(16, 16, 16, 16)
         box_layout.setSpacing(12)
 
+        # Small checkbox stylesheet shared across this panel.
+        checkbox_style_tpl = (
+            "QCheckBox#{name} {{"
+            "  color: {text};"
+            "  spacing: 10px;"
+            "  font-size: 13px;"
+            "}}"
+            "QCheckBox#{name}:disabled {{"
+            "  color: rgba(255,255,255,0.35);"
+            "}}"
+            "QCheckBox#{name}::indicator {{"
+            "  width: 16px;"
+            "  height: 16px;"
+            "  border-radius: 4px;"
+            "  border: 1px solid rgba(255,255,255,0.35);"
+            "  background: rgba(255,255,255,0.05);"
+            "}}"
+            "QCheckBox#{name}::indicator:checked {{"
+            "  background: {accent};"
+            "  border: 1px solid {accent};"
+            "}}"
+        )
+        section_style = (
+            f"QLabel#cameraSectionHeader {{"
+            f"  color: {self.config.accent_color};"
+            f"  font-size: 13px;"
+            f"  font-weight: 600;"
+            f"  letter-spacing: 1px;"
+            f"  text-transform: uppercase;"
+            f"  margin-top: 4px;"
+            f"}}"
+        )
+
+        def _section_header(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setObjectName("cameraSectionHeader")
+            lbl.setStyleSheet(section_style)
+            return lbl
+
+        # ============================================================
+        # 1. CONNECTED DEVICES (local camera selection)
+        # ============================================================
+        box_layout.addWidget(_section_header("Connected Devices"))
+
         self.camera_page_status = QLabel("Detected cameras: scanning...")
         self.camera_page_status.setWordWrap(True)
         box_layout.addWidget(self.camera_page_status)
@@ -2910,108 +2954,40 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(self.camera_combo)
 
         note = QLabel(
-            "Choosing Auto-select means Touchless will use the first available camera each time. "
-            "Save a specific camera only if you always want the same device used by default."
+            "Pick a local camera from the list above. To actually use it, uncheck 'Use phone camera (QR) as source' below, "
+            "then click Save Camera Selection at the bottom."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
         box_layout.addWidget(note)
 
-        actions_row = QHBoxLayout()
-        actions_row.setSpacing(8)
-        self.refresh_cameras_button = QPushButton("Search Devices")
-        self.refresh_cameras_button.clicked.connect(lambda: self.refresh_camera_inventory(update_status=True, notify=True))
-        self.save_camera_button = QPushButton("Save Camera Choice")
-        self.save_camera_button.clicked.connect(self.save_camera_preference_from_settings)
-        self.clear_camera_button = QPushButton("Use Auto-Select")
-        self.clear_camera_button.clicked.connect(self.clear_camera_preference)
-        # Preferred sizing lets each button keep its natural text width
-        # instead of sharing the row equally and clipping the label. An
-        # addStretch at the end absorbs leftover space.
-        for btn in (self.refresh_cameras_button, self.save_camera_button, self.clear_camera_button):
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        actions_row.addWidget(self.refresh_cameras_button)
-        actions_row.addWidget(self.save_camera_button)
-        actions_row.addWidget(self.clear_camera_button)
-        actions_row.addStretch(1)
-        box_layout.addLayout(actions_row)
-
         self.camera_already_mirrored_checkbox = QCheckBox("This camera source is already mirrored (skip Touchless's flip)")
         self.camera_already_mirrored_checkbox.setObjectName("cameraMirroredCheckbox")
         self.camera_already_mirrored_checkbox.setStyleSheet(
-            f"""
-            QCheckBox#cameraMirroredCheckbox {{
-                color: {self.config.text_color};
-                spacing: 10px;
-                font-size: 13px;
-            }}
-            QCheckBox#cameraMirroredCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
-            }}
-            QCheckBox#cameraMirroredCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
-            }}
-            """
+            checkbox_style_tpl.format(name="cameraMirroredCheckbox", text=self.config.text_color, accent=self.config.accent_color)
         )
         self.camera_already_mirrored_checkbox.setChecked(bool(getattr(self.config, "camera_source_is_mirrored", False)))
         self.camera_already_mirrored_checkbox.toggled.connect(self._on_camera_already_mirrored_toggled)
         box_layout.addWidget(self.camera_already_mirrored_checkbox)
 
-        low_fps_note = QLabel(
-            "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). "
-            "Touchless also offers to turn this on automatically if your measured FPS stays low for too long."
-        )
-        low_fps_note.setObjectName("cameraNote")
-        low_fps_note.setWordWrap(True)
-        box_layout.addWidget(low_fps_note)
-
-        low_fps_row = QHBoxLayout()
-        self.low_fps_button = QPushButton()
-        self.low_fps_button.setCheckable(True)
-        self.low_fps_button.setChecked(bool(self.config.low_fps_mode))
-        self.low_fps_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.low_fps_button.clicked.connect(self._on_low_fps_button_toggled)
-        low_fps_row.addWidget(self.low_fps_button)
-        low_fps_row.addStretch(1)
-        box_layout.addLayout(low_fps_row)
-        self._refresh_low_fps_button_label()
+        # ============================================================
+        # 2. PHONE CAMERA VIA HTTP URL
+        # ============================================================
+        box_layout.addWidget(_section_header("Phone Camera — Via HTTP URL"))
 
         phone_note = QLabel(
-            "If you don't have a webcam or yours is low quality, Touchless can use your phone's camera over WiFi. "
-            "Install a free IP-camera app on your phone (for example IP Webcam on Android, or Iriun / EpocCam on iOS), "
-            "start the stream, and paste the URL the app shows (like http://192.168.1.50:8080/video). "
-            "Your phone and PC must be on the same WiFi network."
+            "Use your phone's camera over WiFi by pasting an IP-camera URL. "
+            "Install a free phone app (IP Webcam on Android, Iriun / EpocCam on iOS), start the stream, and paste "
+            "the URL shown (like http://192.168.1.50:8080/video). Both devices must be on the same WiFi network."
         )
         phone_note.setObjectName("cameraNote")
         phone_note.setWordWrap(True)
         box_layout.addWidget(phone_note)
 
-        self.phone_camera_checkbox = QCheckBox("Use phone camera instead")
+        self.phone_camera_checkbox = QCheckBox("Use phone camera (URL) as source")
         self.phone_camera_checkbox.setObjectName("phoneCameraCheckbox")
         self.phone_camera_checkbox.setStyleSheet(
-            f"""
-            QCheckBox#phoneCameraCheckbox {{
-                color: {self.config.text_color};
-                spacing: 10px;
-                font-size: 14px;
-            }}
-            QCheckBox#phoneCameraCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
-            }}
-            QCheckBox#phoneCameraCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
-            }}
-            """
+            checkbox_style_tpl.format(name="phoneCameraCheckbox", text=self.config.text_color, accent=self.config.accent_color)
         )
         self.phone_camera_checkbox.setChecked(bool(getattr(self.config, "phone_camera_enabled", False)))
         self.phone_camera_checkbox.toggled.connect(self._on_phone_camera_toggled)
@@ -3036,10 +3012,15 @@ class MainWindow(QMainWindow):
         self.phone_camera_status_label.setWordWrap(True)
         box_layout.addWidget(self.phone_camera_status_label)
 
+        # ============================================================
+        # 3. PHONE CAMERA VIA QR CODE
+        # ============================================================
+        box_layout.addWidget(_section_header("Phone Camera — Via QR Code"))
+
         qr_note = QLabel(
-            "Or skip the phone-app step entirely: click below, scan the QR code with your phone camera, "
-            "and Touchless will serve a small web page that streams your phone's camera directly to this PC. "
-            "Works on iOS and Android; no phone app install needed."
+            "No phone app needed. Click Connect Phone (QR), scan the code with your phone's camera, "
+            "then follow the prompts on the phone page. Touchless serves a small web page that streams your phone's "
+            "camera directly to this PC. Works on iOS and Android."
         )
         qr_note.setObjectName("cameraNote")
         qr_note.setWordWrap(True)
@@ -3047,8 +3028,6 @@ class MainWindow(QMainWindow):
 
         qr_row = QHBoxLayout()
         qr_row.setSpacing(8)
-        # When a phone is already paired on launch the button shows the
-        # QR for the running server; otherwise it kicks off a fresh pair.
         already_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
         self.phone_camera_qr_button = QPushButton("Show QR Code" if already_paired else "Connect Phone (QR)")
         self.phone_camera_qr_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -3067,27 +3046,7 @@ class MainWindow(QMainWindow):
         self.use_phone_camera_qr_checkbox = QCheckBox("Use phone camera (QR) as source")
         self.use_phone_camera_qr_checkbox.setObjectName("usePhoneQrCheckbox")
         self.use_phone_camera_qr_checkbox.setStyleSheet(
-            f"""
-            QCheckBox#usePhoneQrCheckbox {{
-                color: {self.config.text_color};
-                spacing: 10px;
-                font-size: 13px;
-            }}
-            QCheckBox#usePhoneQrCheckbox:disabled {{
-                color: rgba(255,255,255,0.35);
-            }}
-            QCheckBox#usePhoneQrCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
-            }}
-            QCheckBox#usePhoneQrCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
-            }}
-            """
+            checkbox_style_tpl.format(name="usePhoneQrCheckbox", text=self.config.text_color, accent=self.config.accent_color)
         )
         self.use_phone_camera_qr_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_active", False)))
         self.use_phone_camera_qr_checkbox.setEnabled(already_paired)
@@ -3100,6 +3059,60 @@ class MainWindow(QMainWindow):
         self.phone_camera_qr_status_label.setObjectName("cameraNote")
         self.phone_camera_qr_status_label.setWordWrap(True)
         box_layout.addWidget(self.phone_camera_qr_status_label)
+
+        # ============================================================
+        # 4. LOW FPS MODE
+        # ============================================================
+        box_layout.addWidget(_section_header("Low FPS Mode"))
+
+        low_fps_note = QLabel(
+            "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). "
+            "Touchless also offers to turn this on automatically if your measured FPS stays low for too long."
+        )
+        low_fps_note.setObjectName("cameraNote")
+        low_fps_note.setWordWrap(True)
+        box_layout.addWidget(low_fps_note)
+
+        low_fps_row = QHBoxLayout()
+        self.low_fps_button = QPushButton()
+        self.low_fps_button.setCheckable(True)
+        self.low_fps_button.setChecked(bool(self.config.low_fps_mode))
+        self.low_fps_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.low_fps_button.clicked.connect(self._on_low_fps_button_toggled)
+        low_fps_row.addWidget(self.low_fps_button)
+        low_fps_row.addStretch(1)
+        box_layout.addLayout(low_fps_row)
+        self._refresh_low_fps_button_label()
+
+        # ============================================================
+        # 5. SAVE CAMERA SELECTION (at the bottom)
+        # ============================================================
+        box_layout.addWidget(_section_header("Save Camera Selection"))
+
+        save_hint = QLabel(
+            "When 'Use phone camera (QR) as source' or 'Use phone camera (URL) as source' is checked, Touchless uses that "
+            "phone feed as its camera — saving below confirms that choice. To switch back to a device in 'Connected Devices', "
+            "uncheck both phone options, select your device from the dropdown, then click Save Camera Selection."
+        )
+        save_hint.setObjectName("cameraNote")
+        save_hint.setWordWrap(True)
+        box_layout.addWidget(save_hint)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(8)
+        self.refresh_cameras_button = QPushButton("Search Devices")
+        self.refresh_cameras_button.clicked.connect(lambda: self.refresh_camera_inventory(update_status=True, notify=True))
+        self.save_camera_button = QPushButton("Save Camera Selection")
+        self.save_camera_button.clicked.connect(self.save_camera_preference_from_settings)
+        self.clear_camera_button = QPushButton("Use Auto-Select")
+        self.clear_camera_button.clicked.connect(self.clear_camera_preference)
+        for btn in (self.refresh_cameras_button, self.save_camera_button, self.clear_camera_button):
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        actions_row.addWidget(self.refresh_cameras_button)
+        actions_row.addWidget(self.save_camera_button)
+        actions_row.addWidget(self.clear_camera_button)
+        actions_row.addStretch(1)
+        box_layout.addLayout(actions_row)
 
         self._refresh_phone_camera_controls()
 
@@ -4530,7 +4543,15 @@ class MainWindow(QMainWindow):
             if self._worker is not None:
                 self._worker.stop()
 
-            self._worker = GestureWorker(self.config, camera_index_override=selected_camera_index)
+            # A phone camera source must override the dropdown-selected
+            # local device. GestureWorker treats a non-None
+            # camera_index_override as an unconditional choice, so we
+            # must pass None when a phone source is active to let
+            # _open_camera() see and select the phone path.
+            phone_qr_active = bool(getattr(self.config, "phone_camera_qr_active", False)) and self._current_phone_camera_qr_server() is not None
+            phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
+            worker_override = None if (phone_qr_active or phone_url_active) else selected_camera_index
+            self._worker = GestureWorker(self.config, camera_index_override=worker_override)
             self._worker.status_changed.connect(self._on_status_changed)
             self._worker.command_detected.connect(self._on_command_detected)
             self._worker.camera_selected.connect(self._on_camera_selected)
