@@ -2834,6 +2834,42 @@ class MainWindow(QMainWindow):
             "Touchless searches for cameras when it opens. You can leave it on Auto-select or save a specific camera from the devices found on this computer.",
         )
 
+        # The camera section has outgrown a single viewport. Wrap it in a
+        # scroll area so long content (phone-camera URL + QR block, etc.)
+        # scrolls vertically instead of squishing buttons horizontally.
+        scroll = QScrollArea()
+        scroll.setObjectName("cameraScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea#cameraScroll, QScrollArea#cameraScroll > QWidget,
+            QScrollArea#cameraScroll QWidget#qt_scrollarea_viewport {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#cameraScroll QScrollBar:vertical {{
+                background: transparent;
+                width: 10px;
+                margin: 4px 2px;
+            }}
+            QScrollArea#cameraScroll QScrollBar::handle:vertical {{
+                background: rgba(255,255,255,0.22);
+                border-radius: 4px;
+                min-height: 24px;
+            }}
+            QScrollArea#cameraScroll QScrollBar::handle:vertical:hover {{
+                background: rgba(255,255,255,0.36);
+            }}
+            QScrollArea#cameraScroll QScrollBar::add-line:vertical,
+            QScrollArea#cameraScroll QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            """
+        )
+
         box = QFrame()
         box.setObjectName("innerCard")
         box_layout = QVBoxLayout(box)
@@ -2857,15 +2893,22 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(note)
 
         actions_row = QHBoxLayout()
+        actions_row.setSpacing(8)
         self.refresh_cameras_button = QPushButton("Search Devices")
         self.refresh_cameras_button.clicked.connect(lambda: self.refresh_camera_inventory(update_status=True, notify=True))
         self.save_camera_button = QPushButton("Save Camera Choice")
         self.save_camera_button.clicked.connect(self.save_camera_preference_from_settings)
         self.clear_camera_button = QPushButton("Use Auto-Select")
         self.clear_camera_button.clicked.connect(self.clear_camera_preference)
+        # Preferred sizing lets each button keep its natural text width
+        # instead of sharing the row equally and clipping the label. An
+        # addStretch at the end absorbs leftover space.
+        for btn in (self.refresh_cameras_button, self.save_camera_button, self.clear_camera_button):
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         actions_row.addWidget(self.refresh_cameras_button)
         actions_row.addWidget(self.save_camera_button)
         actions_row.addWidget(self.clear_camera_button)
+        actions_row.addStretch(1)
         box_layout.addLayout(actions_row)
 
         self.camera_already_mirrored_checkbox = QCheckBox("This camera source is already mirrored (skip Touchless's flip)")
@@ -2906,6 +2949,7 @@ class MainWindow(QMainWindow):
         self.low_fps_button = QPushButton()
         self.low_fps_button.setCheckable(True)
         self.low_fps_button.setChecked(bool(self.config.low_fps_mode))
+        self.low_fps_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.low_fps_button.clicked.connect(self._on_low_fps_button_toggled)
         low_fps_row.addWidget(self.low_fps_button)
         low_fps_row.addStretch(1)
@@ -2956,6 +3000,8 @@ class MainWindow(QMainWindow):
         phone_row.addWidget(self.phone_camera_url_input, 1)
 
         self.phone_camera_test_button = QPushButton("Test")
+        self.phone_camera_test_button.setMinimumWidth(72)
+        self.phone_camera_test_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.phone_camera_test_button.clicked.connect(self._on_phone_camera_test_clicked)
         phone_row.addWidget(self.phone_camera_test_button, 0)
         box_layout.addLayout(phone_row)
@@ -2975,11 +3021,14 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(qr_note)
 
         qr_row = QHBoxLayout()
+        qr_row.setSpacing(8)
         self.phone_camera_qr_button = QPushButton("Connect Phone (QR)")
+        self.phone_camera_qr_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.phone_camera_qr_button.clicked.connect(self._on_phone_camera_qr_clicked)
         qr_row.addWidget(self.phone_camera_qr_button)
 
         self.phone_camera_qr_disconnect_button = QPushButton("Disconnect Phone")
+        self.phone_camera_qr_disconnect_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.phone_camera_qr_disconnect_button.clicked.connect(self._on_phone_camera_qr_disconnect_clicked)
         self.phone_camera_qr_disconnect_button.setVisible(False)
         qr_row.addWidget(self.phone_camera_qr_disconnect_button)
@@ -2994,8 +3043,8 @@ class MainWindow(QMainWindow):
 
         self._refresh_phone_camera_controls()
 
-        layout.addWidget(box)
-        layout.addStretch(1)
+        scroll.setWidget(box)
+        layout.addWidget(scroll, 1)
         return panel
 
     def _refresh_phone_camera_controls(self) -> None:
