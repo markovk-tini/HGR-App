@@ -126,15 +126,16 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   <div class="hint">
     <div><strong>First time setup:</strong> your browser will ask for camera permission — tap Allow.</div>
-    <div style="margin-top:8px"><strong>If Start fails with a certificate warning on iPhone,</strong> you need to install and trust the Touchless certificate. Do this in order:</div>
+    <div style="margin-top:8px"><strong>If Start fails on iPhone, install and trust the Touchless Root CA.</strong> You only do this once, ever — after it's trusted, Touchless works on this phone forever, including across LAN IP changes.</div>
     <ol style="margin:6px 0 6px 20px;padding:0;font-size:12px;line-height:1.5">
-      <li><strong>If you previously installed any "Touchless Phone Camera" profile, delete it first:</strong> Settings → General → VPN &amp; Device Management → Touchless Phone Camera → Remove Profile. Earlier versions shipped certs iOS couldn't accept — they must be removed for the new one to install cleanly.</li>
-      <li>Tap <a href="/touchless-cert.cer" download="touchless.cer" style="color:#1DE9B6;text-decoration:underline">Download Touchless cert</a>.</li>
-      <li>iOS shows "Profile Downloaded." Open Settings. At the top of the main Settings screen you'll see <em>"Profile Downloaded"</em>. Tap it → Install → enter your passcode → Install → Done.</li>
-      <li><strong>Now trust the cert fully:</strong> Settings → General → About → Certificate Trust Settings. You'll see "Touchless Phone Camera" under "Enable Full Trust for Root Certificates." Toggle it on → Continue.</li>
-      <li><strong>Close this Safari tab completely</strong> (swipe it away from the tab switcher; don't just hit Back). Safari caches cert state per-tab and only re-evaluates on a fresh tab.</li>
-      <li>Re-scan the QR code on your PC, let the new Safari tab open the page, and tap Start.</li>
+      <li><strong>Delete any older Touchless profile first.</strong> Settings → General → VPN &amp; Device Management → tap anything named "Touchless Phone Camera" or "Touchless Server" → Remove Profile. Earlier builds shipped certs iOS couldn't accept; leaving them installed blocks the new root from working.</li>
+      <li>Tap <a href="/touchless-cert.cer" download="touchless-root-ca.cer" style="color:#1DE9B6;text-decoration:underline">Download Touchless Root CA</a>.</li>
+      <li>iOS shows "Profile Downloaded." Open Settings — at the top you'll see <em>"Profile Downloaded"</em>. Tap it → Install → enter passcode → Install → Done.</li>
+      <li><strong>Trust the root fully:</strong> Settings → General → About → Certificate Trust Settings. "Touchless Root CA" appears under "Enable Full Trust for Root Certificates." Toggle it on → Continue.</li>
+      <li><strong>Close this Safari tab</strong> (swipe it away from the tab switcher). Safari caches cert state per-tab — a fresh tab is required for iOS to re-evaluate trust.</li>
+      <li>Re-scan the QR on your PC from a fresh Safari tab and tap Start.</li>
     </ol>
+    <div style="margin-top:8px;font-size:11px;opacity:0.7">If the profile doesn't appear as "Touchless Root CA" in Certificate Trust Settings, you're using an older build — pull latest Touchless on your PC and retry.</div>
   </div>
 
 <script>

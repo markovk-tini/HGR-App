@@ -252,14 +252,15 @@ class PhoneCameraServer:
                 ("Content-Length", str(len(body))),
             ])
             return WsResponse(HTTPStatus.OK.value, "OK", headers, body)
-        if path in ("/cert", "/cert.cer", "/touchless.cer", "/touchless-cert.cer"):
-            # Serve the Touchless cert for iOS trust installation. iOS
-            # offers to install a .cer as a profile; after install the
-            # user enables full trust in Settings -> General -> About ->
-            # Certificate Trust Settings. Without this, Safari's WSS
-            # connections to self-signed origins silently stall.
+        if path in ("/cert", "/cert.cer", "/touchless.cer", "/touchless-cert.cer", "/ca.cer", "/touchless-ca.cer"):
+            # Serve the *root CA* cert (not the server leaf). iOS installs
+            # the CA as a profile, user enables full trust in Settings,
+            # and all server leaf certs signed by this root are then
+            # accepted automatically — including future leafs when the
+            # LAN IP changes. The server leaf itself is never downloaded
+            # to the phone.
             try:
-                body = self._cert.cert_path.read_bytes() if self._cert is not None else b""
+                body = self._cert.ca_cert_path.read_bytes() if self._cert is not None else b""
             except Exception:
                 body = b""
             if not body:
@@ -268,7 +269,7 @@ class PhoneCameraServer:
             headers = Headers([
                 ("Content-Type", "application/x-x509-ca-cert"),
                 ("Content-Length", str(len(body))),
-                ("Content-Disposition", "attachment; filename=\"touchless.cer\""),
+                ("Content-Disposition", "attachment; filename=\"touchless-root-ca.cer\""),
                 ("Cache-Control", "no-store"),
             ])
             return WsResponse(HTTPStatus.OK.value, "OK", headers, body)
