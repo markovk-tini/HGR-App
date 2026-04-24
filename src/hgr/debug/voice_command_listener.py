@@ -431,9 +431,13 @@ class VoiceCommandListener:
                     preroll.append(mono.copy())
 
         import sys as _sys
+        source_desc = (
+            "phone-external"
+            if external is not None
+            else f"local-sd(idx={self._preferred_input_device_index} name={self._preferred_input_device_name!r})"
+        )
         print(
-            f"[voice] mode={transcript_mode} device_index={self._preferred_input_device_index} "
-            f"device_name={self._preferred_input_device_name!r} gain={self._input_gain:.2f} "
+            f"[voice] mode={transcript_mode} source={source_desc} gain={self._input_gain:.2f} "
             f"noise_floor={final_noise_floor:.4f} trigger={final_trigger_threshold:.4f} "
             f"max_rms_seen={max_rms_seen:.4f} voice_started={voice_started} chunks={len(chunks)}",
             file=_sys.stderr,

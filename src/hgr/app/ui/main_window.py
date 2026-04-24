@@ -2452,6 +2452,20 @@ class MainWindow(QMainWindow):
         # reinstall (as long as the LAN IP didn't change, which it
         # usually doesn't across a single session / overnight on the
         # same WiFi).
+        # Defensive state-consistency: a prior run might have saved
+        # phone_camera_qr_use_mic=True with no accompanying pairing. If
+        # we leave it True when not paired, the UI surfaces a "checked
+        # but disabled" checkbox with no way to uncheck, which is
+        # exactly the dead-end users hit on first install.
+        if (
+            bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+            and not bool(getattr(self.config, "phone_camera_qr_paired", False))
+        ):
+            self.config.phone_camera_qr_use_mic = False
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
         if bool(getattr(self.config, "phone_camera_qr_paired", False)):
             try:
                 from ..debug.phone_camera import PhoneCameraServer
@@ -3264,8 +3278,8 @@ class MainWindow(QMainWindow):
             self.use_phone_mic_checkbox.setEnabled(True)
         if hasattr(self, "use_phone_mic_hint"):
             self.use_phone_mic_hint.setText(
-                "Also make sure the phone page's **Mic** dropdown is set to 'send to PC' — otherwise no audio "
-                "reaches Touchless."
+                "Also make sure the phone page's Mic dropdown is set to 'send to PC' — otherwise no audio "
+                "reaches Touchless and voice commands fall back to the local mic."
             )
         self.phone_camera_qr_status_label.setText(f"Paired — {server.info.url}")
         self.phone_camera_qr_disconnect_button.setVisible(True)
@@ -3300,8 +3314,9 @@ class MainWindow(QMainWindow):
             self.use_phone_mic_checkbox.blockSignals(False)
         if hasattr(self, "use_phone_mic_hint"):
             self.use_phone_mic_hint.setText(
-                "Pair a phone first via Settings → Camera → Connect Phone (QR) to enable this option."
+                "Pair a phone first via Settings → Camera → Connect Phone (QR), then return here to enable this."
             )
+        self._refresh_phone_mic_dependent_ui()
         # Ensure the voice pipeline drops the now-stopped audio source
         # BEFORE the engine restart so the next command goes to the
         # local mic as expected.
@@ -3336,13 +3351,46 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_use_phone_mic_toggled(self, checked: bool) -> None:
+        # Block "on" without a paired phone: there's nowhere for phone
+        # audio to come from, so flipping this on would silently still
+        # use the local mic. Force back to off and update the hint so
+        # the user knows what to do.
+        if checked and not bool(getattr(self.config, "phone_camera_qr_paired", False)):
+            if hasattr(self, "use_phone_mic_checkbox"):
+                self.use_phone_mic_checkbox.blockSignals(True)
+                self.use_phone_mic_checkbox.setChecked(False)
+                self.use_phone_mic_checkbox.blockSignals(False)
+            if hasattr(self, "use_phone_mic_hint"):
+                self.use_phone_mic_hint.setText(
+                    "No phone is paired yet. Go to Settings → Camera → Connect Phone (QR) first, "
+                    "then come back here and turn this on."
+                )
+            self.config.phone_camera_qr_use_mic = False
+            save_config(self.config)
+            self._apply_phone_mic_preference()
+            if hasattr(self, "last_action_label"):
+                self.last_action_label.setText("Last action: phone not paired — pair first")
+            self._refresh_phone_mic_dependent_ui()
+            return
         self.config.phone_camera_qr_use_mic = bool(checked)
         save_config(self.config)
         self._apply_phone_mic_preference()
+        self._refresh_phone_mic_dependent_ui()
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
                 "Last action: using phone microphone" if checked else "Last action: using local microphone"
             )
+
+    def _refresh_phone_mic_dependent_ui(self) -> None:
+        """Grey the local-mic dropdown + save/clear buttons when phone
+        mic is the chosen source, so it's obvious which input Touchless
+        will actually use. The dropdown still reflects the saved
+        preference — flipping the checkbox off restores interactivity."""
+        phone_active = bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+        for attr in ("microphone_combo", "save_microphone_button", "clear_microphone_button"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.setEnabled(not phone_active)
 
     def _on_use_phone_camera_qr_toggled(self, checked: bool) -> None:
         """Switch which camera source the engine reads from.
@@ -3426,11 +3474,82 @@ class MainWindow(QMainWindow):
             "Touchless can use the default Windows microphone automatically or a specific saved microphone if you have more than one input device.",
         )
 
+        # Wrap the panel body in a scroll area so the mic selector +
+        # phone-mic toggle + test/gain controls don't get squeezed when
+        # the Settings column is narrow. Matches the Camera panel's
+        # pattern — accent-colored handle on a faint track.
+        scroll = QScrollArea()
+        scroll.setObjectName("micScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea#micScroll, QScrollArea#micScroll > QWidget,
+            QScrollArea#micScroll QWidget#qt_scrollarea_viewport {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#micScroll QScrollBar:vertical {{
+                background: rgba(255,255,255,0.04);
+                width: 10px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
+            }}
+            QScrollArea#micScroll QScrollBar::handle:vertical {{
+                background: {self.config.accent_color};
+                border-radius: 5px;
+                min-height: 32px;
+            }}
+            QScrollArea#micScroll QScrollBar::handle:vertical:hover {{
+                background: {self.config.accent_color};
+                border: 1px solid rgba(255,255,255,0.25);
+            }}
+            QScrollArea#micScroll QScrollBar::add-line:vertical,
+            QScrollArea#micScroll QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: transparent;
+            }}
+            QScrollArea#micScroll QScrollBar::add-page:vertical,
+            QScrollArea#micScroll QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            """
+        )
+
+        scroll_container = QWidget()
+        scroll_vbox = QVBoxLayout(scroll_container)
+        scroll_vbox.setContentsMargins(0, 0, 0, 0)
+        scroll_vbox.setSpacing(14)
+
+        section_style = (
+            f"QLabel#micSectionHeader {{"
+            f"  color: {self.config.accent_color};"
+            f"  font-size: 13px;"
+            f"  font-weight: 600;"
+            f"  letter-spacing: 1px;"
+            f"  text-transform: uppercase;"
+            f"  margin-top: 4px;"
+            f"}}"
+        )
+
+        def _section_header(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setObjectName("micSectionHeader")
+            lbl.setStyleSheet(section_style)
+            return lbl
+
         box = QFrame()
         box.setObjectName("innerCard")
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(16, 16, 16, 16)
         box_layout.setSpacing(12)
+
+        # ============================================================
+        # LOCAL MICROPHONE
+        # ============================================================
+        box_layout.addWidget(_section_header("Local Microphone"))
 
         self.microphone_combo = QComboBox()
         self.microphone_combo.setObjectName("settingsMicrophoneCombo")
@@ -3444,27 +3563,21 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         box_layout.addWidget(note)
 
-        actions_row = QHBoxLayout()
-        self.save_microphone_button = QPushButton("Save Microphone Choice")
-        self.save_microphone_button.clicked.connect(self.save_microphone_preference_from_settings)
-        self.clear_microphone_button = QPushButton("Use Auto-Select")
-        self.clear_microphone_button.clicked.connect(self.clear_microphone_preference)
-        actions_row.addWidget(self.save_microphone_button)
-        actions_row.addWidget(self.clear_microphone_button)
-        box_layout.addLayout(actions_row)
+        # ============================================================
+        # PHONE MICROPHONE (QR)
+        # ============================================================
+        box_layout.addWidget(_section_header("Phone Microphone (QR)"))
 
-        # --- Phone Microphone (QR) ---------------------------------------
         phone_mic_note = QLabel(
-            "If your phone is paired via Settings → Camera → Connect Phone (QR), you can also route its "
-            "microphone into Touchless. Phone mics are usually cleaner than laptop webcam mics, and this bypasses "
-            "the local device dropdown above whenever it's on."
+            "If your phone is paired via Settings → Camera → Connect Phone (QR), you can route its "
+            "microphone into Touchless. Phone mics are usually cleaner than laptop webcam mics."
         )
         phone_mic_note.setObjectName("cameraNote")
         phone_mic_note.setWordWrap(True)
         box_layout.addWidget(phone_mic_note)
 
         already_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
-        self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) for voice commands and dictation")
+        self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) as source")
         self.use_phone_mic_checkbox.setObjectName("usePhoneMicCheckbox")
         self.use_phone_mic_checkbox.setStyleSheet(
             f"""
@@ -3472,9 +3585,6 @@ class MainWindow(QMainWindow):
                 color: {self.config.text_color};
                 spacing: 10px;
                 font-size: 13px;
-            }}
-            QCheckBox#usePhoneMicCheckbox:disabled {{
-                color: rgba(255,255,255,0.35);
             }}
             QCheckBox#usePhoneMicCheckbox::indicator {{
                 width: 16px;
@@ -3490,19 +3600,51 @@ class MainWindow(QMainWindow):
             """
         )
         self.use_phone_mic_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_use_mic", False)))
-        self.use_phone_mic_checkbox.setEnabled(already_paired)
+        # Intentionally always enabled so the user can clear a stale
+        # "checked" state even when the phone isn't currently paired.
+        # The _on_use_phone_mic_toggled handler validates state and
+        # refuses to turn on without a paired phone (and shows a hint).
+        self.use_phone_mic_checkbox.setEnabled(True)
         self.use_phone_mic_checkbox.toggled.connect(self._on_use_phone_mic_toggled)
         box_layout.addWidget(self.use_phone_mic_checkbox)
 
         self.use_phone_mic_hint = QLabel(
-            "Also make sure the phone page's **Mic** dropdown is set to 'send to PC' — otherwise no audio "
-            "reaches Touchless."
+            "Also make sure the phone page's Mic dropdown is set to 'send to PC' — otherwise no audio "
+            "reaches Touchless and voice commands fall back to the local mic."
             if already_paired
-            else "Pair a phone first via Settings → Camera → Connect Phone (QR) to enable this option."
+            else "Pair a phone first via Settings → Camera → Connect Phone (QR), then return here to enable this."
         )
         self.use_phone_mic_hint.setObjectName("cameraNote")
         self.use_phone_mic_hint.setWordWrap(True)
         box_layout.addWidget(self.use_phone_mic_hint)
+
+        # ============================================================
+        # SAVE MICROPHONE SELECTION (at the bottom)
+        # ============================================================
+        box_layout.addWidget(_section_header("Save Microphone Selection"))
+
+        save_hint = QLabel(
+            "When 'Use phone microphone (QR) as source' is checked, Touchless uses the phone's mic regardless of "
+            "the device selected above — saving confirms the phone as the source. To go back to a local device, "
+            "uncheck the phone option, pick a device from Local Microphone, then click Save Microphone Choice."
+        )
+        save_hint.setObjectName("cameraNote")
+        save_hint.setWordWrap(True)
+        box_layout.addWidget(save_hint)
+
+        actions_row = QHBoxLayout()
+        self.save_microphone_button = QPushButton("Save Microphone Choice")
+        self.save_microphone_button.clicked.connect(self.save_microphone_preference_from_settings)
+        self.clear_microphone_button = QPushButton("Use Auto-Select")
+        self.clear_microphone_button.clicked.connect(self.clear_microphone_preference)
+        for btn in (self.save_microphone_button, self.clear_microphone_button):
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        actions_row.addWidget(self.save_microphone_button)
+        actions_row.addWidget(self.clear_microphone_button)
+        actions_row.addStretch(1)
+        box_layout.addLayout(actions_row)
+
+        scroll_vbox.addWidget(box)
 
         test_box = QFrame()
         test_box.setObjectName("innerCard")
@@ -3593,9 +3735,14 @@ class MainWindow(QMainWindow):
         self._mic_test_level_timer.timeout.connect(self._refresh_mic_test_level_display)
         self._update_mic_test_playback_button_state()
 
-        layout.addWidget(box)
-        layout.addWidget(test_box)
-        layout.addStretch(1)
+        scroll_vbox.addWidget(test_box)
+        scroll_vbox.addStretch(1)
+
+        scroll.setWidget(scroll_container)
+        layout.addWidget(scroll, 1)
+        # Reflect current phone-mic preference on the local dropdown +
+        # save/clear buttons (greyed when phone mic is active).
+        self._refresh_phone_mic_dependent_ui()
         return panel
 
     def _on_mic_test_gain_changed(self, value: int) -> None:
