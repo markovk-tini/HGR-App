@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
+
+from ..utils.subprocess_utils import launch_external
 from urllib import request as urllib_request
 
 import psutil
@@ -160,13 +162,12 @@ class SpotifyController:
                 return True
             except Exception:
                 continue
+        # ShellExecuteW via URI handler / App Paths, avoids the
+        # `cmd /c start` dropper pattern Norton flags.
         for target in ("spotify:", "spotify"):
-            try:
-                subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
+            if launch_external(target):
                 self._message = "launching spotify"
                 return True
-            except Exception:
-                continue
         self._message = "spotify launch path not found"
         return False
 

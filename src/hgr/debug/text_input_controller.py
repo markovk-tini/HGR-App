@@ -456,13 +456,17 @@ class TextInputController:
 
     def _launch_notepad_for_dictation(self, *, timeout: float = 4.0) -> bool:
         launched = False
-        for cmd in (["notepad.exe"], ["cmd", "/c", "start", "", "notepad.exe"]):
-            try:
-                subprocess.Popen(cmd, shell=False)
-                launched = True
-                break
-            except Exception:
-                continue
+        # Try direct Popen first (fastest path); if that fails, fall back
+        # to ShellExecuteW via our launch_external helper. Both avoid the
+        # `cmd /c start` Norton-flagged pattern.
+        try:
+            subprocess.Popen(["notepad.exe"], shell=False)
+            launched = True
+        except Exception:
+            pass
+        if not launched:
+            from ..utils.subprocess_utils import launch_external
+            launched = launch_external("notepad.exe")
         if not launched:
             return False
         deadline = time.monotonic() + float(timeout)

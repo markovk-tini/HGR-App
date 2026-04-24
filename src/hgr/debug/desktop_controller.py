@@ -19,6 +19,8 @@ from typing import Any
 
 import psutil
 
+from ..utils.subprocess_utils import launch_external
+
 try:
     import winreg
 except ImportError:  # pragma: no cover - only unavailable off Windows
@@ -2165,14 +2167,13 @@ try {
                 subprocess.Popen([target_path], shell=False)
             return True
         except Exception:
-            try:
-                if arguments:
-                    subprocess.Popen(["cmd", "/c", "start", "", target_path, arguments], shell=False)
-                else:
-                    subprocess.Popen(["cmd", "/c", "start", "", target_path], shell=False)
-                return True
-            except Exception:
-                return False
+            pass
+        # Fallback via ShellExecuteW (matches Explorer's open behavior)
+        # rather than `cmd /c start` which Norton SONAR flags.
+        if arguments:
+            parsed_args = shlex.split(arguments, posix=False)
+            return launch_external(target_path, args=parsed_args)
+        return launch_external(target_path)
 
     def _target_exists_or_is_launchable(self, target: str) -> bool:
         candidate = Path(target)
@@ -2194,11 +2195,8 @@ try {
             return self._launch_target(target)
         if self._launch_target(target):
             return True
-        try:
-            subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
-            return True
-        except Exception:
-            return False
+        # ShellExecuteW fallback instead of `cmd /c start`.
+        return launch_external(target)
 
     def _launch_hgr_target(self, target: str) -> bool:
         lowered = target.lower()
@@ -2351,14 +2349,14 @@ try {
             if hasattr(os, "startfile"):
                 os.startfile(target)
             else:  # pragma: no cover
-                subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
+                if not launch_external(target):
+                    return False
             return True
         except Exception:
-            try:
-                subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
-                return True
-            except Exception:
-                return False
+            # ShellExecuteW fallback — os.startfile internally calls the
+            # same API, but the ctypes wrapper bypasses whatever
+            # exception path startfile hit above.
+            return launch_external(target)
 
 
     def minimize_active_window(self) -> bool:

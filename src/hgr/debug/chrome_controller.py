@@ -13,6 +13,8 @@ from urllib.parse import quote_plus
 
 import psutil
 
+from ..utils.subprocess_utils import launch_external
+
 
 SW_RESTORE = 9
 KEYEVENTF_KEYUP = 0x0002
@@ -494,11 +496,9 @@ class ChromeController:
                 return True
             except Exception:
                 continue
-        try:
-            subprocess.Popen(["cmd", "/c", "start", "", "chrome", *args], shell=False)
-            return True
-        except Exception:
-            return False
+        # Fallback via ShellExecuteW (App Paths registry lookup) — avoids
+        # `cmd /c start` which Norton SONAR flags as a dropper pattern.
+        return launch_external("chrome", args=args)
 
     def _normalize_target_url(self, target: str) -> str | None:
         normalized = target.strip()

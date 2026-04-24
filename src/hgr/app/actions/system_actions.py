@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from ...utils.subprocess_utils import launch_external
+
 
 class SystemActions:
     def __init__(self, open_settings_callback: Optional[Callable[[], None]] = None):
@@ -13,10 +15,14 @@ class SystemActions:
     def open_google_chrome(self) -> str:
         system = platform.system()
         try:
+            if system == "Windows":
+                # ShellExecuteW via App Paths registry — no cmd.exe spawn
+                # (that's the dropper pattern Norton SONAR flags).
+                if launch_external("chrome"):
+                    return "Opened Google Chrome"
+                return "Could not open Google Chrome"
             if system == "Darwin":
                 subprocess.Popen(["open", "-a", "Google Chrome"])
-            elif system == "Windows":
-                subprocess.Popen(["cmd", "/c", "start", "", "chrome"], shell=False)
             else:
                 subprocess.Popen(["google-chrome"])
             return "Opened Google Chrome"
@@ -29,10 +35,14 @@ class SystemActions:
     def open_system_settings(self) -> str:
         system = platform.system()
         try:
+            if system == "Windows":
+                # The `ms-settings:` URI is handled by ShellExecuteW's
+                # registered protocol handler, same as when Explorer opens it.
+                if launch_external("ms-settings:"):
+                    return "Opened device settings"
+                return "Could not open device settings"
             if system == "Darwin":
                 subprocess.Popen(["open", "-a", "System Settings"])
-            elif system == "Windows":
-                subprocess.Popen(["cmd", "/c", "start", "", "ms-settings:"], shell=False)
             else:
                 subprocess.Popen(["xdg-open", "settings://"])
             return "Opened device settings"
