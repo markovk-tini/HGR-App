@@ -372,6 +372,12 @@ class VoiceCommandListener:
         # overflow) contract that sd.InputStream.read returns, so no
         # changes to the loop below are needed.
         external = self._external_audio_source
+        if external is not None and hasattr(external, "drain"):
+            # Discard any audio buffered before this session started —
+            # otherwise a tap sound or idle chatter from seconds ago
+            # fires voice activation on the very first read and the
+            # loop enters the recording path with no real speech.
+            external.drain()
         stream_ctx = external if external is not None else sd.InputStream(**stream_kwargs)
 
         with stream_ctx as stream:
@@ -411,10 +417,15 @@ class VoiceCommandListener:
                         window = ambient_levels[-6:]
                         raw_floor = float(np.median(np.asarray(window, dtype=np.float32)))
                     else:
-                        raw_floor = 0.0008
-                    noise_floor = max(0.0005, raw_floor)
-                    trigger_threshold = max(noise_floor * 2.0, 0.0025)
-                    silence_threshold = max(noise_floor * 1.3, 0.0015)
+                        raw_floor = 0.002
+                    noise_floor = max(0.002, raw_floor)
+                    # Post 4x phone-worklet boost, normal speech lands
+                    # at ~0.05-0.1 RMS. Set the trigger high enough to
+                    # ignore ambient room noise and gentle phone handling
+                    # sounds, but low enough that quiet speech still
+                    # fires. Silence threshold matches local defaults.
+                    trigger_threshold = max(noise_floor * 2.5, 0.015)
+                    silence_threshold = max(noise_floor * 1.5, 0.006)
                 else:
                     noise_floor = self._estimate_noise_floor(ambient_levels)
                     trigger_threshold = max(noise_floor * 2.0, 0.008)

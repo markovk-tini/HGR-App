@@ -97,6 +97,18 @@ class PhoneAudioSource:
             self._total_samples = 0
             self._cond.notify_all()
 
+    def drain(self) -> None:
+        """Discard all currently-buffered samples without closing.
+
+        Called at the start of a voice session so that leftover audio
+        from before the user pressed the voice button (idle chatter,
+        phone tap sounds, whatever's in the 2.5s rolling buffer) can't
+        fire voice-activation on the first read.
+        """
+        with self._cond:
+            self._buffer.clear()
+            self._total_samples = 0
+
     # ------------------------------------------------------------------
     # sounddevice.InputStream-shaped surface
     # ------------------------------------------------------------------
