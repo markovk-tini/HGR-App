@@ -262,7 +262,7 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   // PC side re-normalizes the whole recording to 0.95 peak before
   // whisper sees it, so mild clipping doesn't degrade recognition.
   const PCM_WORKLET_SRC =
-    "const BOOST = 8.0;" +
+    "const BOOST = 20.0;" +
     "class PcmCapture extends AudioWorkletProcessor {" +
     "  process(inputs) {" +
     "    const ch = inputs[0] && inputs[0][0];" +

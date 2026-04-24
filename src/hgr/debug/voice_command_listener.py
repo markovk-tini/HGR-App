@@ -392,9 +392,26 @@ class VoiceCommandListener:
                 if not voice_started and block_index < ambient_blocks:
                     ambient_levels.append(rms)
 
-                noise_floor = self._estimate_noise_floor(ambient_levels)
-                trigger_threshold = max(noise_floor * 2.0, 0.008)
-                silence_threshold = max(noise_floor * 1.3, 0.005)
+                # External (phone) sources deliver a much lower float
+                # amplitude than a local sounddevice mic even after
+                # the phone-side boost — iOS Safari's getUserMedia
+                # path is extremely quiet regardless of
+                # autoGainControl. Compute a lower-bound noise floor
+                # and thresholds so real speech reliably crosses them
+                # on phone audio.
+                if external is not None:
+                    if ambient_levels:
+                        window = ambient_levels[-6:]
+                        raw_floor = float(np.median(np.asarray(window, dtype=np.float32)))
+                    else:
+                        raw_floor = 0.0008
+                    noise_floor = max(0.0005, raw_floor)
+                    trigger_threshold = max(noise_floor * 2.0, 0.0025)
+                    silence_threshold = max(noise_floor * 1.3, 0.0015)
+                else:
+                    noise_floor = self._estimate_noise_floor(ambient_levels)
+                    trigger_threshold = max(noise_floor * 2.0, 0.008)
+                    silence_threshold = max(noise_floor * 1.3, 0.005)
                 final_noise_floor = noise_floor
                 final_trigger_threshold = trigger_threshold
                 if rms > max_rms_seen:
