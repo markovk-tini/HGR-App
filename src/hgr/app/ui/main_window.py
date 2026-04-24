@@ -3075,25 +3075,6 @@ class MainWindow(QMainWindow):
         self.use_phone_camera_qr_checkbox.toggled.connect(self._on_use_phone_camera_qr_toggled)
         box_layout.addWidget(self.use_phone_camera_qr_checkbox)
 
-        self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) for voice commands and dictation")
-        self.use_phone_mic_checkbox.setObjectName("usePhoneMicCheckbox")
-        self.use_phone_mic_checkbox.setStyleSheet(
-            checkbox_style_tpl.format(name="usePhoneMicCheckbox", text=self.config.text_color, accent=self.config.accent_color)
-        )
-        self.use_phone_mic_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_use_mic", False)))
-        self.use_phone_mic_checkbox.setEnabled(already_paired)
-        self.use_phone_mic_checkbox.toggled.connect(self._on_use_phone_mic_toggled)
-        box_layout.addWidget(self.use_phone_mic_checkbox)
-
-        mic_hint = QLabel(
-            "Your phone's microphone is usually cleaner than a laptop webcam mic. When this is on, make sure the "
-            "phone page's Mic dropdown is set to 'send to PC' — otherwise no audio reaches Touchless and the voice "
-            "pipeline falls back to silence."
-        )
-        mic_hint.setObjectName("cameraNote")
-        mic_hint.setWordWrap(True)
-        box_layout.addWidget(mic_hint)
-
         self.phone_camera_qr_status_label = QLabel(
             "Phone paired — tap Start on your phone's browser to connect." if already_paired else ""
         )
@@ -3281,6 +3262,11 @@ class MainWindow(QMainWindow):
             self.use_phone_camera_qr_checkbox.blockSignals(False)
         if hasattr(self, "use_phone_mic_checkbox"):
             self.use_phone_mic_checkbox.setEnabled(True)
+        if hasattr(self, "use_phone_mic_hint"):
+            self.use_phone_mic_hint.setText(
+                "Also make sure the phone page's **Mic** dropdown is set to 'send to PC' — otherwise no audio "
+                "reaches Touchless."
+            )
         self.phone_camera_qr_status_label.setText(f"Paired — {server.info.url}")
         self.phone_camera_qr_disconnect_button.setVisible(True)
         self.phone_camera_qr_button.setText("Show QR Code")
@@ -3312,6 +3298,10 @@ class MainWindow(QMainWindow):
             self.use_phone_mic_checkbox.setChecked(False)
             self.use_phone_mic_checkbox.setEnabled(False)
             self.use_phone_mic_checkbox.blockSignals(False)
+        if hasattr(self, "use_phone_mic_hint"):
+            self.use_phone_mic_hint.setText(
+                "Pair a phone first via Settings → Camera → Connect Phone (QR) to enable this option."
+            )
         # Ensure the voice pipeline drops the now-stopped audio source
         # BEFORE the engine restart so the next command goes to the
         # local mic as expected.
@@ -3462,6 +3452,57 @@ class MainWindow(QMainWindow):
         actions_row.addWidget(self.save_microphone_button)
         actions_row.addWidget(self.clear_microphone_button)
         box_layout.addLayout(actions_row)
+
+        # --- Phone Microphone (QR) ---------------------------------------
+        phone_mic_note = QLabel(
+            "If your phone is paired via Settings → Camera → Connect Phone (QR), you can also route its "
+            "microphone into Touchless. Phone mics are usually cleaner than laptop webcam mics, and this bypasses "
+            "the local device dropdown above whenever it's on."
+        )
+        phone_mic_note.setObjectName("cameraNote")
+        phone_mic_note.setWordWrap(True)
+        box_layout.addWidget(phone_mic_note)
+
+        already_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+        self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) for voice commands and dictation")
+        self.use_phone_mic_checkbox.setObjectName("usePhoneMicCheckbox")
+        self.use_phone_mic_checkbox.setStyleSheet(
+            f"""
+            QCheckBox#usePhoneMicCheckbox {{
+                color: {self.config.text_color};
+                spacing: 10px;
+                font-size: 13px;
+            }}
+            QCheckBox#usePhoneMicCheckbox:disabled {{
+                color: rgba(255,255,255,0.35);
+            }}
+            QCheckBox#usePhoneMicCheckbox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid rgba(255,255,255,0.35);
+                background: rgba(255,255,255,0.05);
+            }}
+            QCheckBox#usePhoneMicCheckbox::indicator:checked {{
+                background: {self.config.accent_color};
+                border: 1px solid {self.config.accent_color};
+            }}
+            """
+        )
+        self.use_phone_mic_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_use_mic", False)))
+        self.use_phone_mic_checkbox.setEnabled(already_paired)
+        self.use_phone_mic_checkbox.toggled.connect(self._on_use_phone_mic_toggled)
+        box_layout.addWidget(self.use_phone_mic_checkbox)
+
+        self.use_phone_mic_hint = QLabel(
+            "Also make sure the phone page's **Mic** dropdown is set to 'send to PC' — otherwise no audio "
+            "reaches Touchless."
+            if already_paired
+            else "Pair a phone first via Settings → Camera → Connect Phone (QR) to enable this option."
+        )
+        self.use_phone_mic_hint.setObjectName("cameraNote")
+        self.use_phone_mic_hint.setWordWrap(True)
+        box_layout.addWidget(self.use_phone_mic_hint)
 
         test_box = QFrame()
         test_box.setObjectName("innerCard")
@@ -4677,6 +4718,13 @@ class MainWindow(QMainWindow):
                     self._worker.set_phone_camera_capture(qr_server.capture)
                 except Exception:
                     pass
+            # Sync the phone-mic preference onto the freshly-constructed
+            # voice listener — without this, a new engine start picks up
+            # a new VoiceCommandListener that never had its external
+            # audio source installed, so voice commands silently fall
+            # back to the local sounddevice mic even while `/audio`
+            # POSTs are flowing from the phone.
+            self._apply_phone_mic_preference()
 
             self.camera_label.setText(f"Camera: Camera {selected_camera_index}")
             self.status_label.setText("Status: starting...")
