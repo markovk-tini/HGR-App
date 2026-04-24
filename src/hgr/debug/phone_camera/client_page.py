@@ -116,6 +116,13 @@ CLIENT_HTML = r"""<!DOCTYPE html>
         <option value="user">front</option>
       </select>
     </label>
+    <label class="ctl-row">
+      <span class="ctl-label">Mic</span>
+      <select class="ctl-select" id="micSelect">
+        <option value="off" selected>off</option>
+        <option value="on">send to PC</option>
+      </select>
+    </label>
   </div>
 
   <div class="buttons">
@@ -152,6 +159,7 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   const fpsSelect = document.getElementById("fpsSelect");
   const qualSelect = document.getElementById("qualSelect");
   const facingSelect = document.getElementById("facingSelect");
+  const micSelect = document.getElementById("micSelect");
 
   let stream = null;
   let canvas = null;
@@ -164,6 +172,16 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   let lastSentAt = 0;
   let inflightPost = false;  // prevent overlapping POSTs — drop frames rather than pile up
   let consecutivePostErrors = 0;
+
+  // Audio pipeline state.
+  let audioContext = null;
+  let audioSourceNode = null;
+  let audioWorkletNode = null;
+  let audioQueue = [];       // pending Int16 bytes not yet POSTed
+  let audioQueuedBytes = 0;
+  let audioInflight = false;
+  let audioSampleRate = 48000;
+  const AUDIO_CHUNK_BYTES = 9600;  // ~100ms of 48kHz mono Int16 (48000 * 2 * 0.1)
 
   function setStatus(text, kind) {
     statusEl.textContent = text;
@@ -204,8 +222,11 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     }
     const res = currentRes();
     const fps = currentFps();
+    const wantMic = micSelect.value === "on";
     const constraints = {
-      audio: false,
+      audio: wantMic
+        ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        : false,
       video: {
         facingMode: { ideal: facingSelect.value },
         width: { ideal: res.width },
@@ -217,7 +238,118 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     previewEl.srcObject = stream;
     const track = stream.getVideoTracks()[0];
     const settings = track.getSettings ? track.getSettings() : {};
+    if (wantMic) {
+      try { await startAudioPipeline(stream); }
+      catch (err) { console.warn("audio pipeline failed:", err); }
+    } else {
+      stopAudioPipeline();
+    }
     return { width: settings.width || res.width, height: settings.height || res.height, fps: settings.frameRate || fps };
+  }
+
+  // --- Audio capture + upload ------------------------------------------------
+  //
+  // The AudioWorklet inline-registers as "pcm-capture". Each 128-sample tick
+  // (browser default) arrives as Float32, we clamp + convert to Int16, and
+  // post the bytes back to the main thread. Main thread batches ~100ms
+  // worth (9600 bytes at 48kHz mono Int16) then POSTs to /audio.
+  const PCM_WORKLET_SRC =
+    "class PcmCapture extends AudioWorkletProcessor {" +
+    "  process(inputs) {" +
+    "    const ch = inputs[0] && inputs[0][0];" +
+    "    if (!ch || !ch.length) return true;" +
+    "    const out = new Int16Array(ch.length);" +
+    "    for (let i = 0; i < ch.length; i++) {" +
+    "      let s = ch[i]; if (s > 1) s = 1; else if (s < -1) s = -1;" +
+    "      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;" +
+    "    }" +
+    "    this.port.postMessage(out.buffer, [out.buffer]);" +
+    "    return true;" +
+    "  }" +
+    "}" +
+    "registerProcessor('pcm-capture', PcmCapture);";
+
+  async function startAudioPipeline(mediaStream) {
+    const audioTrack = mediaStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+    // iOS Safari 14.1+ supports AudioWorklet; earlier doesn't. If it
+    // isn't available, silently skip — voice still works with the
+    // laptop mic on the PC side.
+    if (!window.AudioContext && !window.webkitAudioContext) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AC({ sampleRate: 48000 });
+    audioSampleRate = audioContext.sampleRate || 48000;
+    if (!audioContext.audioWorklet) {
+      try { await audioContext.close(); } catch (_) {}
+      audioContext = null;
+      return;
+    }
+    const blob = new Blob([PCM_WORKLET_SRC], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    try {
+      await audioContext.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    audioSourceNode = audioContext.createMediaStreamSource(mediaStream);
+    audioWorkletNode = new AudioWorkletNode(audioContext, "pcm-capture");
+    audioWorkletNode.port.onmessage = (e) => {
+      if (!sending) return;
+      const buf = e.data;  // ArrayBuffer of Int16
+      if (!buf || !(buf instanceof ArrayBuffer)) return;
+      audioQueue.push(buf);
+      audioQueuedBytes += buf.byteLength;
+      // Fire-and-forget flush at ~100ms worth of samples.
+      if (audioQueuedBytes >= AUDIO_CHUNK_BYTES) {
+        flushAudioQueue();
+      }
+    };
+    audioSourceNode.connect(audioWorkletNode);
+    // Intentionally NOT connected to destination — we don't want to
+    // play the mic back through the phone's speakers.
+  }
+
+  async function flushAudioQueue() {
+    if (audioInflight || audioQueue.length === 0) return;
+    // Coalesce pending chunks into one contiguous buffer.
+    const merged = new Uint8Array(audioQueuedBytes);
+    let offset = 0;
+    for (const ab of audioQueue) {
+      merged.set(new Uint8Array(ab), offset);
+      offset += ab.byteLength;
+    }
+    audioQueue = [];
+    audioQueuedBytes = 0;
+    audioInflight = true;
+    try {
+      await fetch("/audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: merged,
+        cache: "no-store",
+        keepalive: false,
+      });
+    } catch (_) { /* drop on error; next chunk will retry */ }
+    finally { audioInflight = false; }
+  }
+
+  function stopAudioPipeline() {
+    if (audioWorkletNode) {
+      try { audioWorkletNode.disconnect(); } catch (_) {}
+      try { audioWorkletNode.port.close(); } catch (_) {}
+      audioWorkletNode = null;
+    }
+    if (audioSourceNode) {
+      try { audioSourceNode.disconnect(); } catch (_) {}
+      audioSourceNode = null;
+    }
+    if (audioContext) {
+      try { audioContext.close(); } catch (_) {}
+      audioContext = null;
+    }
+    audioQueue = [];
+    audioQueuedBytes = 0;
+    audioInflight = false;
   }
 
   async function startLoop() {
@@ -333,6 +465,7 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   function stopLoop() {
     sending = false;
+    stopAudioPipeline();
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     if (wakeLock) { try { wakeLock.release(); } catch (_) {} wakeLock = null; }
     statsEl.textContent = "";
@@ -389,6 +522,7 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   resSelect.addEventListener("change", restartStreamOnSettingsChange);
   fpsSelect.addEventListener("change", restartStreamOnSettingsChange);
   facingSelect.addEventListener("change", restartStreamOnSettingsChange);
+  micSelect.addEventListener("change", restartStreamOnSettingsChange);
 
   // ESC / back-gesture to exit fullscreen
   document.addEventListener("fullscreenchange", () => {

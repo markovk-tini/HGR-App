@@ -3075,6 +3075,25 @@ class MainWindow(QMainWindow):
         self.use_phone_camera_qr_checkbox.toggled.connect(self._on_use_phone_camera_qr_toggled)
         box_layout.addWidget(self.use_phone_camera_qr_checkbox)
 
+        self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) for voice commands and dictation")
+        self.use_phone_mic_checkbox.setObjectName("usePhoneMicCheckbox")
+        self.use_phone_mic_checkbox.setStyleSheet(
+            checkbox_style_tpl.format(name="usePhoneMicCheckbox", text=self.config.text_color, accent=self.config.accent_color)
+        )
+        self.use_phone_mic_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_use_mic", False)))
+        self.use_phone_mic_checkbox.setEnabled(already_paired)
+        self.use_phone_mic_checkbox.toggled.connect(self._on_use_phone_mic_toggled)
+        box_layout.addWidget(self.use_phone_mic_checkbox)
+
+        mic_hint = QLabel(
+            "Your phone's microphone is usually cleaner than a laptop webcam mic. When this is on, make sure the "
+            "phone page's Mic dropdown is set to 'send to PC' — otherwise no audio reaches Touchless and the voice "
+            "pipeline falls back to silence."
+        )
+        mic_hint.setObjectName("cameraNote")
+        mic_hint.setWordWrap(True)
+        box_layout.addWidget(mic_hint)
+
         self.phone_camera_qr_status_label = QLabel(
             "Phone paired — tap Start on your phone's browser to connect." if already_paired else ""
         )
@@ -3260,6 +3279,8 @@ class MainWindow(QMainWindow):
             self.use_phone_camera_qr_checkbox.setChecked(True)
             self.use_phone_camera_qr_checkbox.setEnabled(True)
             self.use_phone_camera_qr_checkbox.blockSignals(False)
+        if hasattr(self, "use_phone_mic_checkbox"):
+            self.use_phone_mic_checkbox.setEnabled(True)
         self.phone_camera_qr_status_label.setText(f"Paired — {server.info.url}")
         self.phone_camera_qr_disconnect_button.setVisible(True)
         self.phone_camera_qr_button.setText("Show QR Code")
@@ -3286,9 +3307,52 @@ class MainWindow(QMainWindow):
             self.use_phone_camera_qr_checkbox.setChecked(False)
             self.use_phone_camera_qr_checkbox.setEnabled(False)
             self.use_phone_camera_qr_checkbox.blockSignals(False)
+        if hasattr(self, "use_phone_mic_checkbox"):
+            self.use_phone_mic_checkbox.blockSignals(True)
+            self.use_phone_mic_checkbox.setChecked(False)
+            self.use_phone_mic_checkbox.setEnabled(False)
+            self.use_phone_mic_checkbox.blockSignals(False)
+        # Ensure the voice pipeline drops the now-stopped audio source
+        # BEFORE the engine restart so the next command goes to the
+        # local mic as expected.
+        self.config.phone_camera_qr_use_mic = False
+        save_config(self.config)
+        self._apply_phone_mic_preference()
         self._restart_camera_for_phone_toggle()
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText("Last action: phone camera (QR) unpaired")
+
+    def _apply_phone_mic_preference(self) -> None:
+        """Point the voice pipeline at the phone mic or the local mic.
+
+        Called every time the phone-camera-QR server state changes or
+        the user toggles the "Use phone microphone" checkbox. Idempotent —
+        clearing the external source re-enables sounddevice on the
+        very next voice command.
+        """
+        worker = getattr(self, "_worker", None)
+        listener = getattr(worker, "voice_listener", None) if worker is not None else None
+        if listener is None or not hasattr(listener, "set_external_audio_source"):
+            return
+        qr_server = self._current_phone_camera_qr_server()
+        use_phone_mic = (
+            qr_server is not None
+            and bool(getattr(self.config, "phone_camera_qr_paired", False))
+            and bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+        )
+        try:
+            listener.set_external_audio_source(qr_server.audio_source if use_phone_mic else None)
+        except Exception:
+            pass
+
+    def _on_use_phone_mic_toggled(self, checked: bool) -> None:
+        self.config.phone_camera_qr_use_mic = bool(checked)
+        save_config(self.config)
+        self._apply_phone_mic_preference()
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText(
+                "Last action: using phone microphone" if checked else "Last action: using local microphone"
+            )
 
     def _on_use_phone_camera_qr_toggled(self, checked: bool) -> None:
         """Switch which camera source the engine reads from.
@@ -3333,6 +3397,8 @@ class MainWindow(QMainWindow):
                 set_phone(qr_capture)
             except Exception:
                 pass
+        # Similarly sync the phone-microphone source for the voice pipeline.
+        self._apply_phone_mic_preference()
         if callable(stop_fn):
             try:
                 stop_fn()

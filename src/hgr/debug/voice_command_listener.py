@@ -109,6 +109,20 @@ class VoiceCommandListener:
             self.set_input_device_name(preferred_input_device)
         elif isinstance(preferred_input_device, int):
             self._preferred_input_device_index = preferred_input_device
+        # Optional override: when set, the voice pipeline reads PCM from
+        # this source instead of sounddevice. Used for the phone-camera
+        # QR flow's mic stream.
+        self._external_audio_source = None
+
+    def set_external_audio_source(self, source) -> None:
+        """Install an object that exposes `sd.InputStream.read(frames)`
+        semantics — returns `(ndarray (frames,1) float32, overflow)`.
+
+        When set, the next `_record_to_wav()` call will read from this
+        source instead of opening a sounddevice input stream. Pass
+        `None` to clear and go back to local mic.
+        """
+        self._external_audio_source = source
 
     @property
     def available(self) -> bool:
@@ -352,7 +366,15 @@ class VoiceCommandListener:
         if self._preferred_input_device_index is not None:
             stream_kwargs["device"] = self._preferred_input_device_index
 
-        with sd.InputStream(**stream_kwargs) as stream:
+        # Route through the phone-posted PCM source instead of
+        # sounddevice when one has been installed. The external source
+        # exposes the same read(frames) -> (ndarray (frames,1) float32,
+        # overflow) contract that sd.InputStream.read returns, so no
+        # changes to the loop below are needed.
+        external = self._external_audio_source
+        stream_ctx = external if external is not None else sd.InputStream(**stream_kwargs)
+
+        with stream_ctx as stream:
             for block_index in range(max_blocks):
                 if stop_event is not None and stop_event.is_set():
                     if voice_started and chunks:

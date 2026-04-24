@@ -8,7 +8,8 @@ exposes the received frames through a `cv2.VideoCapture`-shaped API so
 the existing engine camera-open path can consume them unchanged.
 """
 
+from .audio_source import PhoneAudioSource
 from .capture import PhoneCameraCapture
 from .server import PhoneCameraServer
 
-__all__ = ["PhoneCameraCapture", "PhoneCameraServer"]
+__all__ = ["PhoneAudioSource", "PhoneCameraCapture", "PhoneCameraServer"]

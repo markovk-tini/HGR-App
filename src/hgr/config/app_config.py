@@ -171,6 +171,12 @@ class AppConfig:
     #     it just swaps which camera the gesture pipeline reads from.
     phone_camera_qr_paired: bool = False
     phone_camera_qr_active: bool = False
+    # When True AND the QR server is running AND phone_camera_qr_paired,
+    # the voice pipeline reads microphone audio from the phone (POSTed
+    # to /audio) instead of the local sounddevice input. The phone
+    # page must have its "Mic: send to PC" toggle on for audio to
+    # actually arrive.
+    phone_camera_qr_use_mic: bool = False
     camera_source_is_mirrored: bool = False
 
 

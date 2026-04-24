@@ -24,6 +24,7 @@ from typing import Callable, Optional
 
 from aiohttp import web
 
+from .audio_source import PhoneAudioSource
 from .capture import PhoneCameraCapture
 from .cert import PhoneCameraCertPaths, ensure_self_signed_cert
 from .client_page import CLIENT_HTML
@@ -57,15 +58,23 @@ class PhoneCameraServer:
         self._runner: Optional[web.AppRunner] = None
         self._stop_future: Optional[asyncio.Future] = None
         self._capture = PhoneCameraCapture()
+        # Shared phone audio source; voice pipeline reads from here when
+        # the "Use phone microphone" toggle is on.
+        self._audio_source = PhoneAudioSource()
         self._active_clients = 0
         self._last_frame_at = 0.0
         self._announced_stream = False
+        self._announced_audio = False
         self._info: Optional[PhoneCameraServerInfo] = None
         self._cert: Optional[PhoneCameraCertPaths] = None
 
     @property
     def capture(self) -> PhoneCameraCapture:
         return self._capture
+
+    @property
+    def audio_source(self) -> PhoneAudioSource:
+        return self._audio_source
 
     @property
     def info(self) -> Optional[PhoneCameraServerInfo]:
@@ -144,6 +153,7 @@ class PhoneCameraServer:
         self._runner = None
         self._stop_future = None
         self._capture.release()
+        self._audio_source.close()
         self._emit_status("stopped", {})
 
     def _request_shutdown(self) -> None:
@@ -171,6 +181,7 @@ class PhoneCameraServer:
         app.router.add_get("/ca.cer", self._handle_cert)
         app.router.add_get("/touchless-ca.cer", self._handle_cert)
         app.router.add_post("/frame", self._handle_frame)
+        app.router.add_post("/audio", self._handle_audio)
 
         self._runner = web.AppRunner(app, handle_signals=False)
         try:
@@ -253,6 +264,29 @@ class PhoneCameraServer:
             _log(f"POST /frame first frame from {peer} size={len(payload)} bytes")
             self._emit_status("client_connected", {"total": self._active_clients})
             self._emit_status("streaming", {"bytes": len(payload)})
+        return web.Response(status=204, text="")
+
+    async def _handle_audio(self, request: web.Request) -> web.Response:
+        """Accept a chunk of raw 16-bit signed LE mono PCM.
+
+        The phone captures audio via AudioWorklet, resamples to 48kHz
+        mono Int16, and POSTs ~100ms chunks. We drop them into the
+        PhoneAudioSource buffer; the voice pipeline reads from there
+        when the "Use phone microphone" toggle is on.
+        """
+        peer = self._peer(request)
+        try:
+            payload = await request.read()
+        except Exception as exc:
+            _log(f"POST /audio from {peer} read error: {type(exc).__name__}")
+            return web.Response(status=400, text="read failed")
+        if not payload:
+            return web.Response(status=204, text="")
+        self._audio_source.push_pcm_int16(payload)
+        if not self._announced_audio:
+            self._announced_audio = True
+            _log(f"POST /audio first chunk from {peer} size={len(payload)} bytes")
+            self._emit_status("audio_streaming", {"bytes": len(payload)})
         return web.Response(status=204, text="")
 
     def _emit_status(self, event: str, data: dict) -> None:
