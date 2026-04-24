@@ -384,7 +384,14 @@ class VoiceCommandListener:
                 mono = np.squeeze(np.asarray(data, dtype=np.float32))
                 if mono.ndim == 0:
                     mono = np.asarray([float(mono)], dtype=np.float32)
-                gain = self._input_gain
+                # Phone audio is already boosted in the AudioWorklet on
+                # the phone side. Stacking the user's PC-side gain (which
+                # was calibrated for a local mic) on top causes heavy
+                # clipping — previous logs showed max_rms=4.9 (audio
+                # saturated). Whisper can't transcribe crushed waveforms,
+                # so the symptom is "not understood" despite a loud
+                # clean-sounding mic test. For external, skip PC gain.
+                gain = 1.0 if external is not None else self._input_gain
                 if gain != 1.0:
                     mono = mono * gain
                 rms = float(np.sqrt(np.mean(np.square(mono))) + 1e-9)
