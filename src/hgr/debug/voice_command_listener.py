@@ -384,10 +384,26 @@ class VoiceCommandListener:
                 mono = np.squeeze(np.asarray(data, dtype=np.float32))
                 if mono.ndim == 0:
                     mono = np.asarray([float(mono)], dtype=np.float32)
-                gain = self._input_gain
+                # Phone audio already comes pre-AGC from the browser
+                # (autoGainControl+noiseSuppression on the getUserMedia
+                # constraints). Applying the user's saved laptop-mic
+                # gain on top pushes phone samples past [-1,1] into
+                # clipping territory — max_rms_seen > 1.0 in the log
+                # stats is the tell. For external sources, use unit
+                # gain; for local sounddevice, keep the user's setting.
+                gain = 1.0 if external is not None else self._input_gain
                 if gain != 1.0:
                     mono = mono * gain
                 rms = float(np.sqrt(np.mean(np.square(mono))) + 1e-9)
+                # External-source blocks can be pure zeros for two
+                # reasons that both fake silence: (a) network buffer
+                # underrun between phone POSTs → zero-pad from
+                # PhoneAudioSource.read, (b) phone's aggressive noise
+                # gate zeroing between syllables. A local sounddevice
+                # input is always dithered by ambient noise so it
+                # never produces exact zeros. Flag it to skip silence
+                # accounting below.
+                is_padded_silence = external is not None and rms < 1e-6
 
                 if not voice_started and block_index < ambient_blocks:
                     ambient_levels.append(rms)
@@ -403,7 +419,12 @@ class VoiceCommandListener:
                 if voice_started:
                     chunks.append(mono.copy())
                     voice_blocks += 1
-                    if rms <= silence_threshold:
+                    if is_padded_silence:
+                        # Phone noise-gate or network underrun — do not
+                        # count toward end-of-utterance silence. Otherwise
+                        # gaps between syllables close the recording early.
+                        pass
+                    elif rms <= silence_threshold:
                         silence_blocks += 1
                     else:
                         silence_blocks = 0
