@@ -1,100 +1,88 @@
-# HGR App
+# Touchless
 
-HGR App is a desktop hand-gesture and voice-control system for Windows. It combines a live camera feed, hand-pose recognition, gesture routing, voice command parsing, and a polished PySide6 user interface so a user can control everyday desktop tasks with a small set of gestures and spoken commands.
+Touchless is a Windows desktop assistant that lets you control your PC hands-free through hand gestures (via webcam) and voice commands. It combines real-time hand-pose recognition, gesture routing, local speech transcription, and a polished PySide6 interface so everyday desktop tasks — volume, media, browser, windows, dictation, app launching — can be driven without touching mouse or keyboard.
 
-The current codebase is centered around a modern `src/hgr` application structure with a Qt main window, a shared live runtime, a guided tutorial, a settings/gesture-guide experience, and separate controllers for Spotify, Chrome, mouse input, system volume, and voice features.
+> Formerly developed under the working title *HGR App*. The project was renamed to **Touchless** as it moved out of prototype phase.
 
 ---
 
-## What the project does
+## What it does
 
-At a high level, HGR App turns camera-tracked hand motions into desktop actions.
+At a high level, Touchless turns camera-tracked hand motions and spoken commands into desktop actions.
 
-### Core control areas
+**Control areas:**
 
-- **Spotify control**
-  - Open/focus Spotify
-  - Play/pause
-  - Next/previous track
-  - Shuffle/repeat
-  - Open the Spotify gesture wheel
+- **System** — volume up/down, mute/unmute, brightness. Volume can drive master volume or a per-app session (Chrome, Spotify, YouTube).
+- **Mouse mode** — use a hand in the air as a cursor, with pinch-to-click and drag.
+- **Drawing mode** — draw an on-screen overlay with gestures, saveable as PNG.
+- **Browser** — open Chrome, back/forward, refresh, new/incognito tab, Chrome gesture wheel.
+- **Media** — Spotify play/pause/skip/shuffle/repeat, YouTube gesture mode for the active Chrome tab.
+- **Windows** — minimize, maximize, close active window.
+- **Dictation** — live offline speech-to-text via whisper.cpp, streamed word-by-word into any focused text field.
+- **Voice commands** — free-form spoken commands routed to Chrome, Spotify, File Explorer, Outlook, system settings, or the installed-app catalog.
 
-- **Chrome control**
-  - Open/focus Chrome
-  - Back/forward
-  - Refresh
-  - New tab / incognito tab
-  - Open the Chrome gesture wheel
+**Camera inputs Touchless supports:**
 
-- **System controls**
-  - System volume up/down
-  - Mute/unmute
-  - Mouse mode with gesture-based cursor movement and clicks
-
-- **Voice features**
-  - Voice command activation from hand gestures
-  - Spoken commands routed to Chrome, Spotify, system app launching, settings, Outlook, file explorer, and file opening
-  - Experimental dictation workflow
-
-- **Guided onboarding**
-  - A six-part tutorial that uses the live runtime
-  - A settings page with instructions, gesture guide, colors, camera controls, and tutorial access
+- Any local Windows webcam (USB, internal, OEM virtual).
+- IP-camera-style phone apps (IP Webcam on Android, Iriun / EpocCam on iOS) via an HTTPS stream URL.
+- **Phone camera via QR code** — scan a QR, open a short-lived HTTPS page hosted inside Touchless, stream your phone's camera directly to the PC over the LAN. No phone-side app install required. Works on iOS and Android.
 
 ---
 
 ## User experience
 
-The main app launches a custom-frameless PySide6 window with a home page and a settings stack. The home page includes **Start**, **End**, **Settings**, a runtime status card, and a **Live View** / debugger entry point. The settings page includes sections for Instructions, Gesture Guide, Colors, Camera, and Tutorial. The tutorial window is a guided six-step walkthrough built on top of the same runtime concepts used by the main application.
+The main app launches a custom-frameless PySide6 window with a home page and a settings stack. The home page includes **Start**, **End**, **Settings**, a runtime status card, and a **Live View** / debugger entry point. The settings page includes sections for Instructions, Gesture Guide, Camera, Microphone, Colors, Save Locations, and Tutorial. The tutorial window is a guided walkthrough built on top of the same runtime the main app uses.
 
-This structure is visible in the current startup and window code:
-- `run_app.py` bootstraps the project and forwards into `hgr.app.main.main()`
-- `hgr.app.main.main()` creates the Qt app, loads the config, and shows `MainWindow`
-- `MainWindow` builds the home page, settings page, tutorial entry point, and live/debug access
+Live gesture feedback shows through:
+- A mini live viewer (corner preview)
+- A full live-view window
+- An in-app debugger with raw landmarks, confidence scores, and recognizer internals.
 
 ---
 
 ## Technical overview
 
-HGR App is organized as a layered runtime:
+Touchless is organized as a layered runtime:
 
 1. **Camera + tracking**
-   - Captures frames from the selected/default camera
-   - Produces landmarks and handedness information
+   - Captures frames from the selected/default camera (local, phone URL, or phone-QR).
+   - Produces landmarks and handedness information using MediaPipe.
+   - Auto-switches into a lower-resolution, lower-complexity mode ("Low FPS Mode") when the host machine is CPU-starved, e.g. while a fullscreen game has foreground focus. Users are offered a single-click toggle if their measured FPS stays low.
 
 2. **Gesture recognition**
-   - Classifies static poses such as fist, one, two, three, four, mute, volume pose, and wheel poses
-   - Tracks dynamic gestures such as swipe left, swipe right, and repeat/refresh-like circular motions
-   - Stabilizes results across frames
+   - Classifies static poses such as fist, one, two, three, four, mute, volume pose, wheel poses.
+   - Tracks dynamic gestures such as swipe left, swipe right, and repeat/refresh motions.
+   - Stabilizes results across frames with hold timing, cooldowns, and mode gating.
 
 3. **Control routing**
-   - Sends recognized gestures to the correct subsystem:
-     - Spotify
-     - Chrome
-     - Mouse mode
-     - Volume control
-     - Voice activation / dictation
+   - Dispatches recognized gestures to subsystem controllers for Chrome, Spotify, YouTube, mouse, volume, drawing, window management, and voice/dictation activation.
 
 4. **Voice pipeline**
-   - Starts a voice command session from the left-hand trigger gesture
-   - Transcribes speech
-   - Parses spoken intent
-   - Routes the action to Chrome, Spotify, desktop/system app launching, Outlook, settings, or file handling
+   - Left-hand gestures toggle voice command / dictation modes.
+   - Local speech transcription via whisper.cpp with automatic CUDA → Vulkan → CPU backend fallback, plus a SAPI fallback on Windows.
+   - A grammar-correction pass via llama.cpp + Qwen 2.5 cleans up dictation output (email addresses, phone numbers, URLs, punctuation).
+   - Voice commands are parsed by an intent classifier and routed to Chrome, Spotify, desktop/system app launching, Outlook, settings, or file handling.
 
 5. **UI feedback**
-   - Updates overlays, tutorial prompts, live status, gesture guide content, and tutorial state
-   - Provides a debugger/test window for inspection and tuning
+   - On-screen overlays for volume, mouse, drawing, voice status, and low-FPS suggestions.
+   - Per-session dual-bar overlay for simultaneous system-volume and per-app-volume control.
 
 ---
 
-## Repository organization
-
-Below is the effective organization reflected by the current project files.
+## Repository layout
 
 ```text
-HGR App v1.0.0/
+Touchless/
 ├── run_app.py                  # Main launcher
 ├── run_debug.py                # Debug/live-inspection launcher
 ├── run_test.py                 # Gesture test window launcher
+├── LICENSE                     # MIT
+├── README.md
+├── builder/
+│   └── windows/
+│       └── hgr_app.spec        # PyInstaller build spec
+├── installers/
+│   └── windows/                # Inno Setup scripts
 ├── src/
 │   └── hgr/
 │       ├── app/
@@ -107,18 +95,16 @@ HGR App v1.0.0/
 │       │       ├── main_window.py
 │       │       ├── tutorial_window.py
 │       │       ├── live_view_window.py
-│       │       └── mini_live_viewer.py
-│       ├── core/
-│       │   ├── arbitration/
-│       │   ├── classifiers/
-│       │   ├── features/
-│       │   ├── pipeline/
-│       │   └── tracking/
+│       │       ├── mini_live_viewer.py
+│       │       └── phone_camera_connect_dialog.py
 │       ├── debug/
-│       │   ├── debug_window.py
+│       │   ├── phone_camera/           # Embedded HTTPS + WS server + self-signed CA
 │       │   ├── chrome_controller.py
+│       │   ├── chrome_gesture_router.py
 │       │   ├── desktop_controller.py
-│       │   ├── live_dictation_streamer.py
+│       │   ├── foreground_window.py
+│       │   ├── low_fps_suggestion_overlay.py
+│       │   ├── media_controller.py
 │       │   ├── mouse_controller.py
 │       │   ├── mouse_gesture.py
 │       │   ├── mouse_overlay.py
@@ -127,326 +113,126 @@ HGR App v1.0.0/
 │       │   ├── spotify_gesture_router.py
 │       │   ├── text_input_controller.py
 │       │   ├── voice_command_listener.py
-│       │   ├── voice_status_overlay.py
 │       │   ├── volume_controller.py
-│       │   └── volume_gesture.py
+│       │   ├── volume_gesture.py
+│       │   ├── youtube_controller.py
+│       │   └── youtube_gesture_router.py
 │       ├── gesture/
 │       │   ├── recognition/
-│       │   └── ui/
-│       │       └── test_window.py
+│       │   ├── rendering/
+│       │   ├── tracking/
+│       │   └── ui/test_window.py
 │       ├── voice/
 │       │   ├── command_processor.py
 │       │   ├── dictation.py
+│       │   ├── grammar_corrector.py
+│       │   ├── live_dictation.py
+│       │   ├── llama_server.py
+│       │   ├── sapi_stream.py
+│       │   ├── whisper_refiner.py
+│       │   ├── whisper_stream.py
 │       │   └── training_data.py
 │       ├── config/
+│       │   └── app_config.py
 │       └── utils/
-├── tests/                      # Representative test suite (current uploads include many test_*.py files)
-├── GestureGuide/               # Static PNGs and dynamic MP4 assets used by the gesture guide
-├── whisper.cpp/                # Optional local Whisper CLI build and models
-└── assets/                     # Icons and other application assets
+│           ├── runtime_paths.py
+│           └── subprocess_utils.py
+├── tests/                      # Representative test suite
+├── GestureGuide/               # Static PNGs and dynamic MP4 assets
+├── whisper.cpp/                # Local whisper build + models (gitignored)
+├── llama.cpp/                  # Local llama build for grammar correction (gitignored)
+└── assets/                     # Icons and misc application assets
 ```
-
-### Key folders
-
-#### `src/hgr/app`
-The application shell:
-- app startup
-- camera/session setup
-- shared live runtime integration
-- Qt UI windows
-- overlays used by the main program
-
-#### `src/hgr/core`
-The recognition stack:
-- gesture smoothing/arbitration
-- static feature extraction
-- static/dynamic classification
-- backend pipeline and tracking
-
-#### `src/hgr/debug`
-The controller layer and developer tooling:
-- Spotify, Chrome, desktop, mouse, volume, text input, and voice controllers
-- the debug window
-- overlays for volume, mouse, and voice status
-- live dictation streaming helpers
-
-#### `src/hgr/voice`
-Voice-specific logic:
-- command parsing and routing
-- dictation text formatting/processing
-- voice training-data utilities
-
-#### `src/hgr/app/ui`
-Primary UI windows:
-- `main_window.py` for the app shell and settings pages
-- `tutorial_window.py` for the guided six-part tutorial
-- live view / mini viewer windows
-
-#### `tests`
-The project has a substantial test surface, including tests for:
-- backend pipeline stability
-- static features and gesture groups
-- dynamic gestures
-- mouse tracking logic
-- volume gesture logic
-- Chrome routing
-- Spotify routing
-- voice parsing and execution
-- desktop/file-opening behavior
 
 ---
 
-## Main runtime components
-
-### 1. Main app
-The main application launches through:
+## Running from source
 
 ```bash
+git clone https://github.com/markovk-tini/HGR-App.git
+cd HGR-App
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt   # if requirements.txt is present; otherwise install PySide6, mediapipe, opencv-python, numpy, sounddevice, pycaw, comtypes, qrcode, cryptography, aiohttp, Pillow, psutil
 python run_app.py
 ```
 
-This creates the Qt application, loads configuration, and opens `MainWindow`.
+Developer entry points:
 
-### 2. Debug / live inspection window
-The debug window is a developer-facing live inspection tool that shows:
-- camera feed
-- gesture labels
-- handedness
-- finger states
-- confidence and candidate scores
-- dynamic gestures
-- volume status
-- voice status
-
-Run it with:
-
-```bash
-python run_debug.py
-```
-
-### 3. Gesture test window
-The separate gesture test UI is intended for focused validation of gesture behavior and voice/overlay interactions:
-
-```bash
-python run_test.py
-```
-
----
-
-## Gesture model and control design
-
-The app distinguishes between:
-
-### Static gestures
-Examples in the current UI and test coverage include:
-- fist
-- one
-- two
-- three
-- four
-- mute
-- volume pose
-- wheel pose
-- Chrome wheel pose
-- left-hand voice and mode toggles
-
-### Dynamic gestures
-Examples include:
-- swipe left
-- swipe right
-- repeat-circle / refresh-like motion
-
-The system does not treat every detected pose as an immediate action. It uses:
-- frame stabilization
-- hold timing
-- cooldowns
-- mode gating
-- context-aware routing
-
-That design is why Spotify, Chrome, mouse mode, and tutorial navigation can share the same recognition runtime without every gesture firing all actions at once.
-
----
-
-## Voice command capabilities
-
-The current voice pipeline is designed to support commands such as:
-- opening or searching in Chrome
-- playing a track/playlist/album/artist on Spotify
-- opening settings pages
-- opening File Explorer or specific files
-- opening Outlook folders
-- launching installed applications through the desktop app catalog
-
-The voice parser/controller tests show explicit support for:
-- Spotify play requests
-- Chrome open/search requests
-- settings intents
-- file explorer requests
-- Outlook folder navigation
-- generic app-open flows
-- exporting voice training bundles for future improvement
-
----
-
-## Gesture guide and tutorial
-
-### Gesture Guide
-The settings page includes a Gesture Guide panel that documents:
-- gesture name
-- action
-- how to perform it
-
-In the current project direction, this guide also supports:
-- static gesture images (`.png`)
-- dynamic gesture videos (`.mp4`)
-- grouped sections for static and dynamic gestures
-
-### Tutorial
-The tutorial is a guided six-part onboarding flow using live runtime behavior:
-1. Swipe practice
-2. Spotify open/focus
-3. Play/pause
-4. Gesture wheel
-5. Mouse mode
-6. Voice command
-
-The tutorial is intended to teach the real control vocabulary rather than a separate demo-only control scheme.
-
----
-
-## Platform expectations
-
-This project is strongly **Windows-focused** in its current form.
-
-A large portion of the controller layer explicitly checks for Windows or uses Windows-specific mechanisms such as:
-- window focusing
-- keyboard shortcuts
-- system volume APIs
-- mouse injection
-- Outlook / Settings / Explorer launch behavior
-- Windows-oriented voice/text control workflows
-
-If you want cross-platform support later, the clean approach will be to keep the gesture/voice recognition core portable and replace the controller layer per operating system.
+- `run_app.py` — the user-facing Touchless app.
+- `run_debug.py` — live inspection window with per-frame landmarks, finger states, recognizer internals.
+- `run_test.py` — gesture test harness for tuning recognition thresholds.
 
 ---
 
 ## Whisper / speech setup
 
-The project can be pointed at a local `whisper.cpp` build. A practical local setup is:
+Touchless ships with a pre-built `whisper.cpp` tree when installed. When running from source, you need a local build. Expected layout:
 
 ```text
 whisper.cpp/
-├── build/
+├── build/                          # or build_cuda / build_vulkan / build_stream
 │   └── bin/
 │       └── Release/
 │           └── whisper-cli.exe
 └── models/
     ├── ggml-medium.en.bin
-    └── ggml-silero-v5.1.2.bin   # optional VAD model
+    └── ggml-silero-v5.1.2.bin      # optional VAD model
 ```
 
-Typical environment variables:
+Optional environment variables to override paths:
 
 ```powershell
-setx HGR_WHISPER_CPP "C:\HGR App v1.0.0\whisper.cpp\build\bin\Release\whisper-cli.exe"
-setx HGR_WHISPER_CPP_MODEL "C:\HGR App v1.0.0\whisper.cpp\models\ggml-medium.en.bin"
-setx HGR_WHISPER_CPP_VAD_MODEL "C:\HGR App v1.0.0\whisper.cpp\models\ggml-silero-v5.1.2.bin"
+setx HGR_WHISPER_CPP        "C:\path\to\whisper-cli.exe"
+setx HGR_WHISPER_CPP_MODEL  "C:\path\to\ggml-medium.en.bin"
+setx HGR_WHISPER_CPP_VAD_MODEL "C:\path\to\ggml-silero-v5.1.2.bin"
 ```
 
-If you change those values, restart your terminal and the app so the new environment is picked up.
-
----
-
-## Development workflow
-
-A typical workflow for this repository is:
-
-1. Create/activate a virtual environment
-2. Install Python dependencies
-3. Launch the main app, debug window, or gesture test window
-4. Use the live view/debug tools to inspect recognition quality
-5. Run the tests after changes
-6. Iterate on controller logic, recognition thresholds, tutorial flow, or UI behavior
+Restart your terminal and Touchless after changing them.
 
 ---
 
 ## Testing
 
-The current uploaded test suite covers a broad range of behavior, including:
-- static gesture classification
-- dynamic gesture detection
-- backend stabilization
-- mouse mode tracking and clicks
-- volume pose behavior
-- Spotify controller and router behavior
-- Chrome controller and router behavior
-- desktop/file-opening behavior
-- voice command parsing and execution
-- voice training-data generation
-
-Depending on your environment, you can run tests with either:
+The tests cover gesture recognition, mouse tracking, volume pose behavior, Spotify/Chrome/YouTube controllers and routers, voice command parsing, dictation correction, and desktop/file-opening behavior.
 
 ```bash
 python -m pytest
 ```
 
-or
+or:
 
 ```bash
 python -m unittest discover
 ```
 
-If one runner does not match your current environment setup, use the other.
+---
+
+## Platform
+
+Touchless is **Windows-focused** today. A significant portion of the controller layer uses Windows-specific APIs (window focusing, volume control via pycaw, SendInput-based mouse/keyboard injection, ShellExecuteW launches, SAPI fallback for speech). The gesture recognition and voice pipelines themselves are OS-agnostic; cross-platform support would mean replacing the Windows-only controllers.
 
 ---
 
-## Current status
+## Packaging and distribution
 
-HGR App already has a strong project foundation:
-- modern Qt desktop shell
-- shared live runtime
-- gesture guide and tutorial
-- rich controller architecture
-- significant automated test coverage
-- ongoing work on dictation, overlay behavior, tutorial polish, and cross-app text insertion
+Touchless builds into a standalone Windows executable via PyInstaller (see [builder/windows/hgr_app.spec](builder/windows/hgr_app.spec)), which is then wrapped in an Inno Setup installer. The build bundles:
 
-The most stable parts of the project are the application shell, gesture routing structure, settings/tutorial flow, and the dedicated controller/test architecture. The most experimental area is still live cross-application dictation.
+- The main app executable.
+- The full `whisper.cpp/` runtime (CUDA, Vulkan, and CPU backends; VAD model included).
+- Gesture guide assets (PNGs, MP4s).
+- Application icons and styling.
 
----
-
-## Suggested next milestones
-
-- Finalize dictation as a dedicated, robust subsystem
-- Tighten gesture thresholds and recovery behavior
-- Stabilize tutorial/runtime parity
-- Improve packaging and installation docs
-- Add clearer dependency/bootstrap automation
-- Add screenshots/GIFs to this README
-- Separate legacy prototype scripts from the modern `src/hgr` application code
+**Code signing** is in progress via [SignPath Foundation](https://signpath.org), which signs open-source Windows releases for free. Once approved, installers will be signed with an Authenticode cert that chains to a publicly-trusted CA, so Windows Defender and mainstream antivirus engines accept the installer without flagging it. First-install SmartScreen reputation takes a few hundred downloads to build up; testers may see a one-click "More info → Run anyway" warning on the first release.
 
 ---
 
-## License / ownership
+## License
 
-Add your preferred license here if you plan to distribute the project publicly.
-
-If this repository is private or portfolio-only, you can replace this section with:
-- author
-- project intent
-- resume/portfolio usage
-- contact information
+MIT — see [LICENSE](LICENSE). You can use, modify, and redistribute Touchless freely, commercial or non-commercial, provided the copyright notice is preserved.
 
 ---
 
-## Summary
+## Status
 
-HGR App is a Windows desktop gesture-and-voice control application that combines:
-- real-time hand recognition
-- context-aware gesture routing
-- desktop automation controllers
-- voice command parsing
-- a polished Qt UI
-- a guided tutorial and gesture guide
-- a meaningful automated test suite
-
-It is both a product-style application and a strong systems integration project spanning UI, computer vision, input control, automation, speech handling, and test-driven iteration.
+Touchless is in active development. The stable parts include the app shell, gesture routing, volume / media / browser controllers, tutorial, and the phone-camera pipeline. Active work: code signing rollout, custom gesture creation, phone microphone support, and continuing tuning of whisper.cpp dictation under varied hardware.
