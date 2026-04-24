@@ -4870,10 +4870,15 @@ class GestureWorker(QObject):
             try:
                 if mode == "save_prompt":
                     transcript_mode = "save_prompt"
-                    listen_seconds = 6.2
+                    listen_seconds = 9.5
                 else:
                     transcript_mode = "playlist" if mode in {"add_playlist", "remove_playlist", "create_playlist"} else "command"
-                    listen_seconds = 4.2 if transcript_mode == "playlist" else 5.0
+                    # Budget = start-wait (5s) + utterance headroom (~4s)
+                    # + end-silence (3s) for commands. The old 5.0s was
+                    # a total cap too tight for any of those — the loop
+                    # ran out of blocks before the silence check could
+                    # fire, so recordings cut after ~2s of voice audio.
+                    listen_seconds = 8.5 if transcript_mode == "playlist" else 12.0
                 result = self.voice_listener.listen(
                     max_seconds=listen_seconds,
                     status_callback=_push_status,
