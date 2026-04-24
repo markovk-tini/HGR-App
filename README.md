@@ -229,7 +229,15 @@ Touchless builds into a standalone Windows executable via PyInstaller (see [buil
 
 ## License
 
-MIT — see [LICENSE](LICENSE). You can use, modify, and redistribute Touchless freely, commercial or non-commercial, provided the copyright notice is preserved.
+Touchless is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for the full text.
+
+In short:
+
+- You may use, study, modify, and redistribute Touchless freely, for personal or commercial purposes.
+- If you distribute a modified version, you **must release your source code** under GPL v3 as well. This "copyleft" rule prevents anyone from taking Touchless, making proprietary changes, and redistributing it as closed-source software.
+- Any work that links against or is based on Touchless's source is also subject to GPL v3 when distributed.
+
+© 2026 Konstantin Markov. Distributed without warranty per the GPL. If your use case needs a more permissive license for integration into a closed-source product, open an issue — dual-licensing inquiries are welcome.
 
 ---
 
