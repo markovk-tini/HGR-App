@@ -390,14 +390,16 @@ class VoiceCommandListener:
                 mono = np.squeeze(np.asarray(data, dtype=np.float32))
                 if mono.ndim == 0:
                     mono = np.asarray([float(mono)], dtype=np.float32)
-                # Phone audio is already boosted in the AudioWorklet on
-                # the phone side. Stacking the user's PC-side gain (which
-                # was calibrated for a local mic) on top causes heavy
-                # clipping — previous logs showed max_rms=4.9 (audio
-                # saturated). Whisper can't transcribe crushed waveforms,
-                # so the symptom is "not understood" despite a loud
-                # clean-sounding mic test. For external, skip PC gain.
-                gain = 1.0 if external is not None else self._input_gain
+                # Phone audio gets a modest 4x boost in the phone-side
+                # worklet (just enough to lift iOS's extremely quiet
+                # getUserMedia baseline). The user's PC-side gain then
+                # brings it to transcription-ready levels — typical
+                # settings of 5-8x give ~20-32x total, matching what
+                # the in-app mic test uses for clear phone playback.
+                # Mild clipping from the peak normalization step is
+                # fine; whisper handles it. Earlier clipping issues
+                # were from a 20x phone boost, not the PC gain.
+                gain = self._input_gain
                 if gain != 1.0:
                     mono = mono * gain
                 rms = float(np.sqrt(np.mean(np.square(mono))) + 1e-9)
@@ -405,31 +407,9 @@ class VoiceCommandListener:
                 if not voice_started and block_index < ambient_blocks:
                     ambient_levels.append(rms)
 
-                # External (phone) sources deliver a much lower float
-                # amplitude than a local sounddevice mic even after
-                # the phone-side boost — iOS Safari's getUserMedia
-                # path is extremely quiet regardless of
-                # autoGainControl. Compute a lower-bound noise floor
-                # and thresholds so real speech reliably crosses them
-                # on phone audio.
-                if external is not None:
-                    if ambient_levels:
-                        window = ambient_levels[-6:]
-                        raw_floor = float(np.median(np.asarray(window, dtype=np.float32)))
-                    else:
-                        raw_floor = 0.002
-                    noise_floor = max(0.002, raw_floor)
-                    # Post 4x phone-worklet boost, normal speech lands
-                    # at ~0.05-0.1 RMS. Set the trigger high enough to
-                    # ignore ambient room noise and gentle phone handling
-                    # sounds, but low enough that quiet speech still
-                    # fires. Silence threshold matches local defaults.
-                    trigger_threshold = max(noise_floor * 2.5, 0.015)
-                    silence_threshold = max(noise_floor * 1.5, 0.006)
-                else:
-                    noise_floor = self._estimate_noise_floor(ambient_levels)
-                    trigger_threshold = max(noise_floor * 2.0, 0.008)
-                    silence_threshold = max(noise_floor * 1.3, 0.005)
+                noise_floor = self._estimate_noise_floor(ambient_levels)
+                trigger_threshold = max(noise_floor * 2.0, 0.008)
+                silence_threshold = max(noise_floor * 1.3, 0.005)
                 final_noise_floor = noise_floor
                 final_trigger_threshold = trigger_threshold
                 if rms > max_rms_seen:

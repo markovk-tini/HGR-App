@@ -3275,12 +3275,18 @@ class MainWindow(QMainWindow):
             self.use_phone_camera_qr_checkbox.setEnabled(True)
             self.use_phone_camera_qr_checkbox.blockSignals(False)
         if hasattr(self, "use_phone_mic_checkbox"):
+            # Pairing the camera does NOT imply the user wants to route
+            # phone audio as well — keep the mic checkbox in whatever
+            # state the user left it, but guarantee it isn't auto-
+            # checked by this flow. The checkbox is an explicit opt-in.
             self.use_phone_mic_checkbox.setEnabled(True)
         if hasattr(self, "use_phone_mic_hint"):
             self.use_phone_mic_hint.setText(
                 "Also make sure the phone page's Mic dropdown is set to 'send to PC' — otherwise no audio "
                 "reaches Touchless and voice commands fall back to the local mic."
             )
+        if hasattr(self, "phone_camera_qr_button_mic"):
+            self.phone_camera_qr_button_mic.setText("Show QR Code")
         self.phone_camera_qr_status_label.setText(f"Paired — {server.info.url}")
         self.phone_camera_qr_disconnect_button.setVisible(True)
         self.phone_camera_qr_button.setText("Show QR Code")
@@ -3302,6 +3308,8 @@ class MainWindow(QMainWindow):
         self.phone_camera_qr_status_label.setText("Phone unpaired. The server is stopped.")
         self.phone_camera_qr_disconnect_button.setVisible(False)
         self.phone_camera_qr_button.setText("Connect Phone (QR)")
+        if hasattr(self, "phone_camera_qr_button_mic"):
+            self.phone_camera_qr_button_mic.setText("Connect Phone (QR)")
         if hasattr(self, "use_phone_camera_qr_checkbox"):
             self.use_phone_camera_qr_checkbox.blockSignals(True)
             self.use_phone_camera_qr_checkbox.setChecked(False)
@@ -3310,11 +3318,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "use_phone_mic_checkbox"):
             self.use_phone_mic_checkbox.blockSignals(True)
             self.use_phone_mic_checkbox.setChecked(False)
-            self.use_phone_mic_checkbox.setEnabled(False)
+            self.use_phone_mic_checkbox.setEnabled(True)
             self.use_phone_mic_checkbox.blockSignals(False)
         if hasattr(self, "use_phone_mic_hint"):
             self.use_phone_mic_hint.setText(
-                "Pair a phone first via Settings → Camera → Connect Phone (QR), then return here to enable this."
+                "Click 'Connect Phone (QR)' above to pair your phone, then tick the box to use its mic."
             )
         self._refresh_phone_mic_dependent_ui()
         # Ensure the voice pipeline drops the now-stopped audio source
@@ -3575,14 +3583,28 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(_section_header("Phone Microphone (QR)"))
 
         phone_mic_note = QLabel(
-            "If your phone is paired via Settings → Camera → Connect Phone (QR), you can route its "
-            "microphone into Touchless. Phone mics are usually cleaner than laptop webcam mics."
+            "Pair your phone via the QR button below (or from Settings → Camera) and then tick the box "
+            "to route its microphone into Touchless. Phone mics are usually cleaner than laptop webcam mics."
         )
         phone_mic_note.setObjectName("cameraNote")
         phone_mic_note.setWordWrap(True)
         box_layout.addWidget(phone_mic_note)
 
         already_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+
+        # QR pair / show button — same handler as the one in the Camera
+        # panel so users don't have to cross tabs to pair.
+        mic_qr_row = QHBoxLayout()
+        mic_qr_row.setContentsMargins(0, 0, 0, 0)
+        self.phone_camera_qr_button_mic = QPushButton(
+            "Show QR Code" if already_paired else "Connect Phone (QR)"
+        )
+        self.phone_camera_qr_button_mic.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.phone_camera_qr_button_mic.clicked.connect(self._on_phone_camera_qr_clicked)
+        mic_qr_row.addWidget(self.phone_camera_qr_button_mic)
+        mic_qr_row.addStretch(1)
+        box_layout.addLayout(mic_qr_row)
+
         self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) as source")
         self.use_phone_mic_checkbox.setObjectName("usePhoneMicCheckbox")
         self.use_phone_mic_checkbox.setStyleSheet(
@@ -3618,7 +3640,7 @@ class MainWindow(QMainWindow):
             "Also make sure the phone page's Mic dropdown is set to 'send to PC' — otherwise no audio "
             "reaches Touchless and voice commands fall back to the local mic."
             if already_paired
-            else "Pair a phone first via Settings → Camera → Connect Phone (QR), then return here to enable this."
+            else "Click 'Connect Phone (QR)' above to pair your phone, then tick the box to use its mic."
         )
         self.use_phone_mic_hint.setObjectName("cameraNote")
         self.use_phone_mic_hint.setWordWrap(True)
