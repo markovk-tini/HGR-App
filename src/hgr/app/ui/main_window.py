@@ -3382,15 +3382,14 @@ class MainWindow(QMainWindow):
             )
 
     def _refresh_phone_mic_dependent_ui(self) -> None:
-        """Grey the local-mic dropdown + save/clear buttons when phone
-        mic is the chosen source, so it's obvious which input Touchless
-        will actually use. The dropdown still reflects the saved
-        preference — flipping the checkbox off restores interactivity."""
+        """Visually de-emphasize the local-mic dropdown when phone mic
+        is the chosen source, but KEEP the save/clear buttons clickable
+        so the user can still save their fallback preference and see a
+        confirmation popup. Matches the Camera panel's priority-hint
+        pattern — we don't block the UI, we label it."""
         phone_active = bool(getattr(self.config, "phone_camera_qr_use_mic", False))
-        for attr in ("microphone_combo", "save_microphone_button", "clear_microphone_button"):
-            widget = getattr(self, attr, None)
-            if widget is not None:
-                widget.setEnabled(not phone_active)
+        if hasattr(self, "microphone_combo"):
+            self.microphone_combo.setEnabled(not phone_active)
 
     def _on_use_phone_camera_qr_toggled(self, checked: bool) -> None:
         """Switch which camera source the engine reads from.

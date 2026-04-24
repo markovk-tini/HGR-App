@@ -101,25 +101,19 @@ class PhoneAudioSource:
     # sounddevice.InputStream-shaped surface
     # ------------------------------------------------------------------
 
-    def read(self, frames: int, timeout: float = 4.0) -> Tuple[np.ndarray, bool]:
+    def read(self, frames: int, timeout: float = 1.0) -> Tuple[np.ndarray, bool]:
         """Block until `frames` samples are available; return (data, overflow).
 
         `data` is shape (frames, 1) float32 in [-1.0, 1.0], matching
         sd.InputStream's default dtype. `overflow` is always False
         (we drop samples on overflow silently in push).
 
-        Default timeout is 4s so a brief network hiccup between phone
-        POSTs doesn't inject zero-padded blocks into the voice
-        pipeline. Zero-padded blocks register as pure silence (RMS=0),
-        which falsely accumulates toward the 3-second silence-end
-        detection and ends recordings mid-utterance — the "cuts out
-        after a second" bug. Phone POSTs at ~100ms cadence, so 4s is
-        a generous buffer for realistic LAN jitter while still
-        bailing eventually if the phone drops off.
-
-        If the timeout IS hit (phone truly disconnected), we return a
-        small silence frame — but only enough to let the caller check
-        its stop_event, not enough to end a recording on its own.
+        Default timeout is 1s — long enough that normal phone POST
+        jitter (~100ms cadence) never times out during healthy
+        streaming, short enough that a disconnected-phone scenario
+        bails back to the voice pipeline's own start_timeout_blocks
+        logic promptly (otherwise "Listening..." hangs for minutes
+        when the phone's Mic dropdown is off).
         """
         frames = int(max(1, frames))
         deadline = time.monotonic() + max(0.001, float(timeout))
