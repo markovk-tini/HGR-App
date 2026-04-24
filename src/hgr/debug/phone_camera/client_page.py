@@ -253,14 +253,23 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   // (browser default) arrives as Float32, we clamp + convert to Int16, and
   // post the bytes back to the main thread. Main thread batches ~100ms
   // worth (9600 bytes at 48kHz mono Int16) then POSTs to /audio.
+  // PHONE_MIC_BOOST: iOS Safari's getUserMedia AGC pass delivers
+  // speech at extremely low float amplitude (RMS ~0.0013 on iPhone
+  // test devices — ~50x below a normal desktop mic at the same
+  // distance). The PC-side voice pipeline needs at least ~0.01 RMS
+  // to cross its activation threshold, so we amplify here before
+  // the Int16 clamp. Peaks past the [-1,1] range just clamp — the
+  // PC side re-normalizes the whole recording to 0.95 peak before
+  // whisper sees it, so mild clipping doesn't degrade recognition.
   const PCM_WORKLET_SRC =
+    "const BOOST = 8.0;" +
     "class PcmCapture extends AudioWorkletProcessor {" +
     "  process(inputs) {" +
     "    const ch = inputs[0] && inputs[0][0];" +
     "    if (!ch || !ch.length) return true;" +
     "    const out = new Int16Array(ch.length);" +
     "    for (let i = 0; i < ch.length; i++) {" +
-    "      let s = ch[i]; if (s > 1) s = 1; else if (s < -1) s = -1;" +
+    "      let s = ch[i] * BOOST; if (s > 1) s = 1; else if (s < -1) s = -1;" +
     "      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;" +
     "    }" +
     "    this.port.postMessage(out.buffer, [out.buffer]);" +
