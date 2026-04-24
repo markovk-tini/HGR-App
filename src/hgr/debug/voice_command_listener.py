@@ -395,15 +395,6 @@ class VoiceCommandListener:
                 if gain != 1.0:
                     mono = mono * gain
                 rms = float(np.sqrt(np.mean(np.square(mono))) + 1e-9)
-                # External-source blocks can be pure zeros for two
-                # reasons that both fake silence: (a) network buffer
-                # underrun between phone POSTs → zero-pad from
-                # PhoneAudioSource.read, (b) phone's aggressive noise
-                # gate zeroing between syllables. A local sounddevice
-                # input is always dithered by ambient noise so it
-                # never produces exact zeros. Flag it to skip silence
-                # accounting below.
-                is_padded_silence = external is not None and rms < 1e-6
 
                 if not voice_started and block_index < ambient_blocks:
                     ambient_levels.append(rms)
@@ -419,12 +410,7 @@ class VoiceCommandListener:
                 if voice_started:
                     chunks.append(mono.copy())
                     voice_blocks += 1
-                    if is_padded_silence:
-                        # Phone noise-gate or network underrun — do not
-                        # count toward end-of-utterance silence. Otherwise
-                        # gaps between syllables close the recording early.
-                        pass
-                    elif rms <= silence_threshold:
+                    if rms <= silence_threshold:
                         silence_blocks += 1
                     else:
                         silence_blocks = 0
