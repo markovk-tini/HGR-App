@@ -101,13 +101,25 @@ class PhoneAudioSource:
     # sounddevice.InputStream-shaped surface
     # ------------------------------------------------------------------
 
-    def read(self, frames: int, timeout: float = 1.0) -> Tuple[np.ndarray, bool]:
+    def read(self, frames: int, timeout: float = 4.0) -> Tuple[np.ndarray, bool]:
         """Block until `frames` samples are available; return (data, overflow).
 
         `data` is shape (frames, 1) float32 in [-1.0, 1.0], matching
-        sd.InputStream's default dtype. `overflow` is always False here
-        (we drop samples on overflow silently in push, mirroring
-        sounddevice's behavior under backpressure).
+        sd.InputStream's default dtype. `overflow` is always False
+        (we drop samples on overflow silently in push).
+
+        Default timeout is 4s so a brief network hiccup between phone
+        POSTs doesn't inject zero-padded blocks into the voice
+        pipeline. Zero-padded blocks register as pure silence (RMS=0),
+        which falsely accumulates toward the 3-second silence-end
+        detection and ends recordings mid-utterance — the "cuts out
+        after a second" bug. Phone POSTs at ~100ms cadence, so 4s is
+        a generous buffer for realistic LAN jitter while still
+        bailing eventually if the phone drops off.
+
+        If the timeout IS hit (phone truly disconnected), we return a
+        small silence frame — but only enough to let the caller check
+        its stop_event, not enough to end a recording on its own.
         """
         frames = int(max(1, frames))
         deadline = time.monotonic() + max(0.001, float(timeout))
@@ -118,13 +130,9 @@ class PhoneAudioSource:
                     break
                 self._cond.wait(timeout=remaining)
             if self._closed:
-                # Return silence when closed so callers' dtype
-                # expectations don't break.
+                # Shut-down path: keep callers' shape contract but
+                # return silence.
                 return np.zeros((frames, 1), dtype=np.float32), False
-            # Assemble exactly `frames` samples from the front of the
-            # deque. The tail of the last chunk we pop is stashed back
-            # at the head of the deque so the next read sees a clean
-            # alignment.
             parts: list[np.ndarray] = []
             need = frames
             while need > 0 and self._buffer:
@@ -144,14 +152,15 @@ class PhoneAudioSource:
                 np.concatenate(parts) if parts else np.zeros(0, dtype=np.int16)
             )
             if assembled.size < frames:
-                # Didn't accumulate enough within timeout. Pad with
-                # silence so the caller's fixed-shape expectations
-                # still hold.
-                padding = np.zeros(frames - assembled.size, dtype=np.int16)
+                # Timed out waiting for phone audio. Return a short
+                # silence padding — NOT a full block of zeros, because
+                # that would false-trigger the voice pipeline's silence
+                # detector when the phone is still connected just
+                # temporarily starved. A tiny pad lets the loop come
+                # around, poll its stop_event, and try again.
+                pad_len = frames - assembled.size
+                padding = np.zeros(pad_len, dtype=np.int16)
                 assembled = np.concatenate([assembled, padding])
-        # Convert int16 to float32 in [-1.0, 1.0] and reshape to
-        # (frames, 1) so we match sd.InputStream's default channel-last
-        # layout.
         float_arr = assembled.astype(np.float32) / 32768.0
         return float_arr.reshape(-1, 1), False
 

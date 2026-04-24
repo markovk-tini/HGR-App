@@ -3519,6 +3519,13 @@ class MainWindow(QMainWindow):
         )
 
         scroll_container = QWidget()
+        # Qt gives a naked QWidget a white system background unless we
+        # explicitly opt out — without this the Microphone panel
+        # viewport paints white behind our innerCard frames and
+        # everything becomes unreadable against the pale text.
+        scroll_container.setAutoFillBackground(False)
+        scroll_container.setAttribute(Qt.WA_StyledBackground, False)
+        scroll_container.setStyleSheet("background: transparent;")
         scroll_vbox = QVBoxLayout(scroll_container)
         scroll_vbox.setContentsMargins(0, 0, 0, 0)
         scroll_vbox.setSpacing(14)
@@ -4784,7 +4791,18 @@ class MainWindow(QMainWindow):
                 self.tutorial_window._voice_listener.set_input_device_name(selected_name)
             except Exception:
                 pass
-        if selected_name is None:
+        # If phone mic is the active source, the local dropdown choice
+        # is effectively bypassed — surface that in the confirmation
+        # text so the user doesn't think we ignored the phone setting.
+        using_phone_mic = bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+        if using_phone_mic:
+            self.last_action_label.setText("Last action: saved phone microphone as source")
+            confirmation = (
+                "Microphone preference saved.\n\nTouchless is currently using your phone's microphone (QR) "
+                "as the source. Any local device selected above is saved as a fallback for when the phone "
+                "mic is turned off."
+            )
+        elif selected_name is None:
             self.last_action_label.setText("Last action: microphone set to auto-select")
             confirmation = "Microphone preference saved. Voice commands will now use the default Windows microphone."
         else:
