@@ -64,19 +64,31 @@ def fetch_release(tag: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+_PROBE_HEADERS = {
+    # Cloudflare R2's public r2.dev domain rejects requests with the
+    # default urllib User-Agent ("Python-urllib/3.x") as bot traffic.
+    # A normal-looking UA gets through. The Accept header is just
+    # belt-and-suspenders; R2 accepts both with and without it.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Touchless-ReleaseValidator/1.0"
+    ),
+    "Accept": "*/*",
+}
+
+
 def head_check(url: str) -> tuple[bool, int, str]:
     """Returns (ok, status_code, message). Some CDNs reject HEAD, so
     we fall back to a 1-byte ranged GET if the HEAD is rejected."""
     try:
-        req = urllib.request.Request(url, method="HEAD")
+        req = urllib.request.Request(url, method="HEAD", headers=_PROBE_HEADERS)
         with urllib.request.urlopen(req, timeout=15.0) as resp:
             return (True, resp.status, "HEAD ok")
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 405):
             try:
-                req = urllib.request.Request(
-                    url, headers={"Range": "bytes=0-0"}, method="GET"
-                )
+                range_headers = dict(_PROBE_HEADERS, Range="bytes=0-0")
+                req = urllib.request.Request(url, headers=range_headers, method="GET")
                 with urllib.request.urlopen(req, timeout=15.0) as resp:
                     return (True, resp.status, "GET range ok")
             except Exception as inner:
