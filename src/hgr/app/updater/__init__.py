@@ -13,7 +13,18 @@ Three-piece flow:
      app. Inno Setup handles closing the running process and
      replacing files in place.
 """
-from .release_checker import ReleaseChecker, ReleaseInfo
+from .release_checker import (
+    ReleaseChecker,
+    ReleaseHistoryEntry,
+    ReleaseHistoryFetcher,
+    ReleaseInfo,
+)
 from .updater import Updater
 
-__all__ = ["ReleaseChecker", "ReleaseInfo", "Updater"]
+__all__ = [
+    "ReleaseChecker",
+    "ReleaseHistoryEntry",
+    "ReleaseHistoryFetcher",
+    "ReleaseInfo",
+    "Updater",
+]

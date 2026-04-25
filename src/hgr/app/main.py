@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication
 
 from ..config.app_config import APP_NAME, load_config, save_config
 from ..utils.runtime_paths import resource_path
+from .single_instance import acquire as acquire_single_instance
 from .ui.main_window import MainWindow
 from .ui.touchless_splash import TouchlessSplash
 
@@ -21,6 +22,13 @@ def _resolve_app_icon():
 
 
 def main() -> int:
+    # Bail before constructing the Qt app if another Touchless is
+    # already running — the existing instance gets focus, this
+    # process exits silently. Common case: user double-clicks the
+    # desktop shortcut while Touchless is minimized to tray.
+    if not acquire_single_instance():
+        return 0
+
     app = QApplication(sys.argv)
     app.setApplicationDisplayName(APP_NAME)
     app.setApplicationName(APP_NAME)

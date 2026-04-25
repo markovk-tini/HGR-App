@@ -88,6 +88,7 @@ SECTION_MICROPHONE = 4
 SECTION_SAVE_LOCATIONS = 5
 SECTION_COLORS = 6
 SECTION_TUTORIAL = 7
+SECTION_UPDATES = 8
 
 
 
@@ -229,6 +230,25 @@ class TitleBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(0)
+
+        # Small version tag in the title bar's left edge — gives
+        # users an at-a-glance view of which Touchless they're on
+        # without digging into Settings. Updated dynamically by
+        # MainWindow if the version ever changes mid-session
+        # (which it doesn't today, but the hook is here).
+        from ... import __version__ as _APP_VERSION
+        self.version_label = QLabel(f"v{_APP_VERSION}", self)
+        self.version_label.setObjectName("titleBarVersion")
+        self.version_label.setStyleSheet(
+            "QLabel#titleBarVersion {"
+            "  color: rgba(255,255,255,0.55);"
+            "  font-size: 11px;"
+            "  padding: 0 8px;"
+            "  background: transparent;"
+            "}"
+        )
+        self.version_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self.version_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addStretch(1)
 
         controls = QWidget(self)
@@ -2751,6 +2771,7 @@ class MainWindow(QMainWindow):
         save_locations_button = SettingsNavButton("Save Locations", SECTION_SAVE_LOCATIONS, self)
         colors_button = SettingsNavButton("Colors", SECTION_COLORS, self)
         tutorial_button = SettingsNavButton("Tutorial", SECTION_TUTORIAL, self)
+        updates_button = SettingsNavButton("Updates", SECTION_UPDATES, self)
         self._settings_nav_buttons = [
             instructions_button,
             gestures_button,
@@ -2760,6 +2781,7 @@ class MainWindow(QMainWindow):
             save_locations_button,
             colors_button,
             tutorial_button,
+            updates_button,
         ]
         self._settings_nav_search_keywords = {
             instructions_button: "instructions quick start help guide overview",
@@ -2770,6 +2792,7 @@ class MainWindow(QMainWindow):
             save_locations_button: "save locations folder path drawings screenshots recordings clips",
             colors_button: "colors theme accent overlay background",
             tutorial_button: "tutorial walkthrough practice guided onboarding",
+            updates_button: "updates version release changelog about check",
         }
         for button in self._settings_nav_buttons:
             left_layout.addWidget(button)
@@ -2790,6 +2813,7 @@ class MainWindow(QMainWindow):
         self.settings_content_stack.addWidget(self._build_save_locations_panel())
         self.settings_content_stack.addWidget(self._build_colors_panel())
         self.settings_content_stack.addWidget(self._build_tutorial_panel())
+        self.settings_content_stack.addWidget(self._build_updates_panel())
 
         layout.addWidget(left_panel)
         layout.addWidget(self.settings_content_stack, 1)
@@ -4201,6 +4225,204 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return panel
 
+    def _build_updates_panel(self) -> QWidget:
+        from .. import __version__ as APP_VERSION  # local import keeps top-of-module clean
+        panel, layout = self._make_content_panel(
+            "Updates",
+            "See what version of Touchless you're running, manually trigger an update check, and review what's changed in past releases.",
+        )
+
+        # ---- Current version + Check button ----
+        current_box = QFrame()
+        current_box.setObjectName("innerCard")
+        current_layout = QVBoxLayout(current_box)
+        current_layout.setContentsMargins(16, 16, 16, 16)
+        current_layout.setSpacing(10)
+
+        version_row = QHBoxLayout()
+        version_label = QLabel(f"<b>Current version:</b>  v{APP_VERSION}")
+        version_label.setStyleSheet("font-size: 14px;")
+        version_row.addWidget(version_label)
+        version_row.addStretch(1)
+
+        self._updates_check_button = QPushButton("Check for Updates")
+        self._updates_check_button.clicked.connect(self._on_updates_panel_check_clicked)
+        version_row.addWidget(self._updates_check_button)
+        current_layout.addLayout(version_row)
+
+        self._updates_status_label = QLabel("Click 'Check for Updates' to look for a newer version.")
+        self._updates_status_label.setWordWrap(True)
+        self._updates_status_label.setStyleSheet("color: rgba(255,255,255,0.7); font-size: 12px;")
+        current_layout.addWidget(self._updates_status_label)
+
+        layout.addWidget(current_box)
+
+        # ---- Release history ----
+        history_header = QLabel("Release History")
+        history_header.setStyleSheet("font-size: 13px; font-weight: 600; padding: 8px 0 4px 4px;")
+        layout.addWidget(history_header)
+
+        # The history is loaded lazily on first panel view to avoid
+        # an unconditional GitHub API call at startup.
+        from PySide6.QtWidgets import QScrollArea
+        self._updates_history_scroll = QScrollArea()
+        self._updates_history_scroll.setWidgetResizable(True)
+        self._updates_history_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        history_container = QWidget()
+        history_container.setStyleSheet("background: transparent;")
+        self._updates_history_layout = QVBoxLayout(history_container)
+        self._updates_history_layout.setContentsMargins(4, 4, 4, 4)
+        self._updates_history_layout.setSpacing(8)
+        self._updates_history_layout.addStretch(1)
+        self._updates_history_scroll.setWidget(history_container)
+        layout.addWidget(self._updates_history_scroll, 1)
+
+        self._updates_history_loaded = False
+        self._updates_history_fetcher = None
+
+        return panel
+
+    def _on_updates_panel_check_clicked(self) -> None:
+        """Manual update check from the Updates settings panel."""
+        from ..updater import ReleaseChecker
+        if hasattr(self, "_updates_check_button"):
+            self._updates_check_button.setEnabled(False)
+            self._updates_check_button.setText("Checking...")
+        self._updates_status_label.setText("Checking GitHub for the latest release...")
+        # Reuse the dialog flow from the auto-check path, so a found
+        # update presents the same Download/Later UI the user already
+        # knows from the startup notification.
+        checker = ReleaseChecker(parent=self)
+        checker.update_available.connect(self._on_update_available)
+        checker.update_available.connect(self._on_manual_update_found)
+        checker.no_update.connect(self._on_manual_no_update)
+        checker.check_failed.connect(self._on_manual_check_failed)
+        checker.start()
+        self._update_checker = checker  # keep alive
+
+    def _on_manual_update_found(self, info) -> None:
+        self._updates_check_button.setEnabled(True)
+        self._updates_check_button.setText("Check for Updates")
+        self._updates_status_label.setText(
+            f"Update available: Touchless {info.version}. The download dialog has opened."
+        )
+
+    def _on_manual_no_update(self) -> None:
+        self._updates_check_button.setEnabled(True)
+        self._updates_check_button.setText("Check for Updates")
+        self._updates_status_label.setText("You're already on the latest version. Nothing to update.")
+
+    def _on_manual_check_failed(self, reason: str) -> None:
+        self._updates_check_button.setEnabled(True)
+        self._updates_check_button.setText("Check for Updates")
+        self._updates_status_label.setText(
+            f"Couldn't reach GitHub: {reason}. Try again in a moment, or visit the Releases page manually."
+        )
+
+    def _ensure_updates_history_loaded(self) -> None:
+        if self._updates_history_loaded or self._updates_history_fetcher is not None:
+            return
+        from ..updater import ReleaseHistoryFetcher
+        self._updates_history_fetcher = ReleaseHistoryFetcher(parent=self)
+        self._updates_history_fetcher.history_loaded.connect(self._on_updates_history_loaded)
+        self._updates_history_fetcher.history_failed.connect(self._on_updates_history_failed)
+        # Show a placeholder while loading.
+        loading = QLabel("Loading release history from GitHub...")
+        loading.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; padding: 8px;")
+        loading.setObjectName("updatesHistoryPlaceholder")
+        self._updates_history_layout.insertWidget(0, loading)
+        self._updates_history_fetcher.start()
+
+    def _on_updates_history_loaded(self, entries: list) -> None:
+        self._updates_history_loaded = True
+        self._clear_updates_history_widgets()
+        if not entries:
+            empty = QLabel("No releases published yet.")
+            empty.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; padding: 8px;")
+            self._updates_history_layout.insertWidget(0, empty)
+            return
+        for entry in entries:
+            self._updates_history_layout.insertWidget(
+                self._updates_history_layout.count() - 1,
+                self._build_release_entry_widget(entry),
+            )
+
+    def _on_updates_history_failed(self, reason: str) -> None:
+        self._updates_history_loaded = False
+        self._clear_updates_history_widgets()
+        err = QLabel(
+            f"Couldn't load release history: {reason}.\n"
+            f"Check your internet connection or open the Releases page on GitHub directly."
+        )
+        err.setWordWrap(True)
+        err.setStyleSheet("color: rgba(255,140,140,0.85); font-size: 12px; padding: 8px;")
+        self._updates_history_layout.insertWidget(0, err)
+        # Clear the fetcher reference so a re-open of the panel
+        # triggers a fresh fetch (e.g. user reconnected to wifi).
+        self._updates_history_fetcher = None
+
+    def _clear_updates_history_widgets(self) -> None:
+        # Remove every widget except the trailing stretch spacer.
+        layout = self._updates_history_layout
+        for i in reversed(range(layout.count())):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _build_release_entry_widget(self, entry) -> QWidget:
+        # Inline import to avoid pushing more names into the
+        # module's already-large import block.
+        from PySide6.QtWidgets import QToolButton, QTextBrowser
+        box = QFrame()
+        box.setObjectName("innerCard")
+        box.setStyleSheet(
+            "QFrame#innerCard { background: rgba(255,255,255,0.04); "
+            "border-radius: 8px; padding: 8px; }"
+        )
+        v = QVBoxLayout(box)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(6)
+
+        head_row = QHBoxLayout()
+        head_row.setSpacing(8)
+        title_text = f"<b>v{entry.version}</b>"
+        if entry.is_current:
+            title_text += "  <span style='color:#1de9b6;'>(installed)</span>"
+        title = QLabel(title_text)
+        title.setStyleSheet("font-size: 13px;")
+        head_row.addWidget(title)
+
+        # Date — strip the time portion for readability.
+        date_str = (entry.published_at or "").split("T", 1)[0]
+        if date_str:
+            date_label = QLabel(date_str)
+            date_label.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
+            head_row.addWidget(date_label)
+        head_row.addStretch(1)
+        v.addLayout(head_row)
+
+        body_text = entry.body.strip() or "_No release notes provided._"
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        notes.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none; "
+            "color: rgba(255,255,255,0.85); font-size: 12px; }"
+        )
+        try:
+            notes.setMarkdown(body_text)
+        except Exception:
+            notes.setPlainText(body_text)
+        # Cap height so very long bodies don't blow out the panel.
+        notes.setMaximumHeight(180)
+        v.addWidget(notes)
+
+        return box
+
     def _create_color_row(self, parent_layout: QVBoxLayout, label_text: str, color: str, attribute_name: str) -> ColorPickerButton:
         row = QWidget()
         row_layout = QHBoxLayout(row)
@@ -4309,6 +4531,11 @@ class MainWindow(QMainWindow):
         self.settings_content_stack.setCurrentIndex(index)
         for i, button in enumerate(self._settings_nav_buttons):
             button.setChecked(i == index)
+        # Lazily fetch the release history the first time the user
+        # opens the Updates section, so we don't hit GitHub on every
+        # settings page entry.
+        if index == SECTION_UPDATES:
+            self._ensure_updates_history_loaded()
         # Force the newly-shown panel to recompute geometry. QStackedWidget
         # occasionally skips this for scroll-area children, leaving the viewport
         # at a stale size where wheel/click hit-testing silently misses.

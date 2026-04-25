@@ -192,6 +192,31 @@ class Updater(QObject):
             return self._apply_zip_and_exit(downloaded_path)
         return self.launch_installer_and_exit(downloaded_path)
 
+    @staticmethod
+    def is_install_dir_writable() -> bool:
+        """Check whether the running app's install directory is
+        writable by the current user without elevation. False for
+        legacy Program Files installs where Windows requires admin.
+
+        Used by ReleaseChecker BEFORE choosing the app-zip path —
+        if the user is in a non-writable dir (didn't migrate from
+        the old Program Files install), we force the full-installer
+        path even when a zip asset is present, so the update has a
+        chance of succeeding via UAC elevation rather than silently
+        failing in PowerShell Expand-Archive."""
+        if not getattr(sys, "frozen", False):
+            return True   # source-run; the check doesn't apply
+        try:
+            install_dir = Path(sys.executable).resolve().parent
+            probe = install_dir / ".touchless_write_probe"
+            probe.write_bytes(b"x")
+            probe.unlink(missing_ok=True)
+            return True
+        except (OSError, PermissionError):
+            return False
+        except Exception:
+            return False
+
     # Backwards-compat shim — main_window connects to ready_to_launch
     # and may have been wired before the kind-based router existed.
     def launch_installer_and_exit(self, installer_path: str) -> bool:

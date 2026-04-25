@@ -15,7 +15,14 @@ env/
 build/
 dist/
 release/
-installers/
+# Ignore the contents of installers/ EXCEPT the .iss source files.
+# The .iss carries install-time configuration (per-user vs Program
+# Files location, CloseApplications directives, version) that has
+# to live in the repo so every build produces a consistent installer.
+installers/*
+!installers/windows/
+installers/windows/*
+!installers/windows/*.iss
 *.spec.bak
 
 # PyInstaller distribution staging

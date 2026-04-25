@@ -33,6 +33,9 @@ from ... import __version__ as RUNNING_VERSION
 GITHUB_RELEASES_LATEST_URL = (
     "https://api.github.com/repos/markovk-tini/HGR-App/releases/latest"
 )
+GITHUB_RELEASES_LIST_URL = (
+    "https://api.github.com/repos/markovk-tini/HGR-App/releases?per_page=20"
+)
 # Full installer (~2.4 GB). Used for first-time installs and for any
 # release where the developer wants every user to do a clean
 # reinstall (e.g. PySide6 / OpenCV / whisper.cpp updates).
@@ -150,19 +153,36 @@ class _CheckWorker(QObject):
             self.finished.emit()
             return
 
-        # Prefer the small zip when it's present — the developer's
-        # decision to attach a zip means "this release is safe to
-        # apply as an app-only update" (i.e. no Python deps changed,
-        # no whisper.cpp churn, no breaking install layout shift).
-        # Fall back to the full installer if no zip exists.
-        if zip_url:
+        # Prefer the small zip when it's present AND the running
+        # app's install directory is user-writable. If the user is
+        # on a legacy Program Files install (admin required to
+        # write), the silent zip path can't succeed because the
+        # helper batch runs unelevated — so we force the full
+        # installer path, which can elevate via UAC. The user only
+        # sees the smaller download once they migrate to the
+        # per-user LocalAppData install location.
+        try:
+            from .updater import Updater
+            install_writable = Updater.is_install_dir_writable()
+        except Exception:
+            install_writable = True
+
+        if zip_url and install_writable:
             preferred_url = zip_url
             preferred_size = zip_size
             kind = "app-zip"
             fallback = installer_url
-        else:
+        elif installer_url:
             preferred_url = installer_url
             preferred_size = installer_size
+            kind = "full-exe"
+            fallback = zip_url   # (unused for full-exe path, but kept for symmetry)
+        else:
+            # Only zip exists but install isn't writable. Surface
+            # the zip URL anyway with full-exe kind disabled — the
+            # dialog will offer "Open release page" via html_url.
+            preferred_url = ""
+            preferred_size = 0
             kind = "full-exe"
             fallback = ""
 
@@ -206,6 +226,95 @@ class ReleaseChecker(QObject):
         self._worker.update_available.connect(self.update_available)
         self._worker.no_update.connect(self.no_update)
         self._worker.check_failed.connect(self.check_failed)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._cleanup)
+        self._thread.start()
+
+    def _cleanup(self) -> None:
+        thread = self._thread
+        self._thread = None
+        self._worker = None
+        if thread is not None:
+            thread.deleteLater()
+
+
+@dataclass(frozen=True)
+class ReleaseHistoryEntry:
+    """A single release for the Updates settings panel's history list."""
+    version: str       # tag with leading 'v' stripped
+    body: str          # markdown release notes
+    published_at: str  # ISO 8601 string from GitHub
+    html_url: str
+    is_current: bool   # True when this matches RUNNING_VERSION
+
+
+class _HistoryWorker(QObject):
+    finished = Signal()
+    history_loaded = Signal(list)        # list[ReleaseHistoryEntry]
+    history_failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            req = urllib.request.Request(
+                GITHUB_RELEASES_LIST_URL,
+                headers={
+                    "User-Agent": "Touchless-Updater/1.0",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            self.history_failed.emit(f"{type(exc).__name__}: {exc!s}")
+            self.finished.emit()
+            return
+        entries: list[ReleaseHistoryEntry] = []
+        try:
+            for item in data:
+                tag = str(item.get("tag_name") or "").strip()
+                if not tag:
+                    continue
+                version = re.sub(r"^v", "", tag, flags=re.IGNORECASE)
+                entries.append(
+                    ReleaseHistoryEntry(
+                        version=version,
+                        body=str(item.get("body") or "").strip(),
+                        published_at=str(item.get("published_at") or "").strip(),
+                        html_url=str(item.get("html_url") or "").strip(),
+                        is_current=(version == RUNNING_VERSION),
+                    )
+                )
+        except Exception as exc:
+            self.history_failed.emit(f"shape: {type(exc).__name__}")
+            self.finished.emit()
+            return
+        self.history_loaded.emit(entries)
+        self.finished.emit()
+
+
+class ReleaseHistoryFetcher(QObject):
+    """Fetches the full list of releases for the Updates settings
+    panel. Runs on a worker thread; emits `history_loaded(list)`
+    on success or `history_failed(str)` on any error."""
+
+    history_loaded = Signal(list)
+    history_failed = Signal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._thread: QThread | None = None
+        self._worker: _HistoryWorker | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = QThread(self)
+        self._worker = _HistoryWorker()
+        self._worker.moveToThread(self._thread)
+        self._worker.history_loaded.connect(self.history_loaded)
+        self._worker.history_failed.connect(self.history_failed)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
