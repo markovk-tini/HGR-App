@@ -4226,7 +4226,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_updates_panel(self) -> QWidget:
-        from .. import __version__ as APP_VERSION  # local import keeps top-of-module clean
+        from ... import __version__ as APP_VERSION  # local import keeps top-of-module clean
         panel, layout = self._make_content_panel(
             "Updates",
             "See what version of Touchless you're running, manually trigger an update check, and review what's changed in past releases.",
