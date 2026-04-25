@@ -2563,6 +2563,49 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         QTimer.singleShot(0, self._initial_camera_setup)
         QTimer.singleShot(0, lambda: self.refresh_microphone_inventory(update_status=True, notify=False))
+        # Auto-update check: defer 3s after launch so the app feels
+        # snappy on cold start and the user has the UI in front of
+        # them before any modal dialog appears. Failures (offline,
+        # GitHub rate-limited) are silently swallowed — no nagging.
+        self._update_checker = None
+        self._update_dialog = None
+        self._updater = None
+        QTimer.singleShot(3000, self._kick_off_update_check)
+
+    def _kick_off_update_check(self) -> None:
+        try:
+            from ..updater import ReleaseChecker
+        except Exception:
+            return
+        self._update_checker = ReleaseChecker(parent=self)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start()
+
+    def _on_update_available(self, info) -> None:
+        from ..updater.update_dialog import UpdateDialog
+        from ..updater import Updater
+        self._update_dialog = UpdateDialog(info, parent=self)
+        self._updater = Updater(parent=self)
+        self._update_dialog.download_requested.connect(self._updater.start_download)
+        self._updater.progress.connect(
+            lambda pct, msg: self._update_dialog.set_progress(pct, msg)
+            if self._update_dialog is not None else None
+        )
+        self._updater.failed.connect(
+            lambda reason: self._update_dialog.set_failure(reason)
+            if self._update_dialog is not None else None
+        )
+        self._updater.ready_to_launch.connect(self._on_installer_ready)
+        self._update_dialog.show()
+        self._update_dialog.raise_()
+        self._update_dialog.activateWindow()
+
+    def _on_installer_ready(self, path: str) -> None:
+        ok = self._updater.launch_installer_and_exit(path) if self._updater else False
+        if not ok and self._update_dialog is not None:
+            self._update_dialog.set_failure(
+                "Couldn't launch the installer. Try running it manually from your Downloads or temp folder."
+            )
 
     def _build_ui(self) -> None:
         outer = QWidget()
