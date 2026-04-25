@@ -92,10 +92,21 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo [3.5/3] Building app-only update zip (small download for incremental updates)...
+"%PYTHON%" "%ROOT%\builder\windows\build_app_update_zip.py"
+if errorlevel 1 (
+  echo [WARN] App-only zip build failed; full installer is still good.
+)
+
 echo.
 echo Build complete.
-echo Bundle:   %ROOT%\dist\Touchless
-echo Installer:%ROOT%\release\Touchless_Installer.exe
+echo Bundle:        %ROOT%\dist\Touchless
+echo Installer:     %ROOT%\release\Touchless_Installer.exe
+echo App update zip:%ROOT%\release\Touchless_App_Update_*.zip
+echo.
+echo Upload BOTH artifacts to the GitHub release for that version:
+echo   - Touchless_Installer.exe   (full install / first download / breaking change)
+echo   - Touchless_App_Update_*.zip (small auto-update for existing users)
 
 popd
 exit /b 0

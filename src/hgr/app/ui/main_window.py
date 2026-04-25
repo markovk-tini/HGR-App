@@ -2601,10 +2601,14 @@ class MainWindow(QMainWindow):
         self._update_dialog.activateWindow()
 
     def _on_installer_ready(self, path: str) -> None:
-        ok = self._updater.launch_installer_and_exit(path) if self._updater else False
+        # apply_update_and_exit dispatches based on the update kind
+        # (full installer vs app-only zip) the ReleaseChecker tagged
+        # on the ReleaseInfo. Both paths exit the app on success.
+        ok = self._updater.apply_update_and_exit(path) if self._updater else False
         if not ok and self._update_dialog is not None:
             self._update_dialog.set_failure(
-                "Couldn't launch the installer. Try running it manually from your Downloads or temp folder."
+                "Couldn't apply the update. Try running the installer manually "
+                "from your Downloads or temp folder."
             )
 
     def _build_ui(self) -> None:

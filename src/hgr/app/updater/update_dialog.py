@@ -62,7 +62,17 @@ class UpdateDialog(QDialog):
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         layout.addWidget(title)
 
-        subtitle = QLabel(f"You're currently running {RUNNING_VERSION}.")
+        subtitle_parts = [f"You're currently running {RUNNING_VERSION}."]
+        size_mb = self._info.size_bytes / (1024 * 1024) if self._info.size_bytes else 0.0
+        if self._info.update_kind == "app-zip":
+            if size_mb > 0:
+                subtitle_parts.append(f"App update — {size_mb:.0f} MB.")
+            else:
+                subtitle_parts.append("App update — small download.")
+        else:
+            if size_mb > 0:
+                subtitle_parts.append(f"Full update — {size_mb:.0f} MB.")
+        subtitle = QLabel(" ".join(subtitle_parts))
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: rgba(255,255,255,0.7); font-size: 12px;")
         layout.addWidget(subtitle)

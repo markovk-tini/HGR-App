@@ -33,7 +33,16 @@ from ... import __version__ as RUNNING_VERSION
 GITHUB_RELEASES_LATEST_URL = (
     "https://api.github.com/repos/markovk-tini/HGR-App/releases/latest"
 )
+# Full installer (~2.4 GB). Used for first-time installs and for any
+# release where the developer wants every user to do a clean
+# reinstall (e.g. PySide6 / OpenCV / whisper.cpp updates).
 INSTALLER_ASSET_NAME = "Touchless_Installer.exe"
+# App-only update package (~50-150 MB). Just Touchless.exe + small
+# project assets. Updater extracts it over the existing install
+# without running an installer, so no UAC is ever needed (provided
+# the install lives under %LOCALAPPDATA%\Programs\Touchless\, which
+# the per-user installer puts it in by default).
+APP_UPDATE_ZIP_PREFIX = "Touchless_App_Update"   # matches Touchless_App_Update_<ver>.zip
 HTTP_TIMEOUT_SECONDS = 8.0
 
 
@@ -41,9 +50,19 @@ HTTP_TIMEOUT_SECONDS = 8.0
 class ReleaseInfo:
     version: str            # e.g. "1.0.2" (tag with leading 'v' stripped)
     body: str               # Markdown release notes from GitHub
-    download_url: str       # Direct link to the .exe asset
+    download_url: str       # Preferred asset URL (zip if present, else exe)
     html_url: str           # GitHub release page (fallback)
-    size_bytes: int = 0     # Asset content-length, 0 if unknown
+    size_bytes: int = 0     # Preferred asset size, 0 if unknown
+    # update_kind == "app-zip" means download_url points to the small
+    # app-only zip and Updater should extract over the install dir;
+    # "full-exe" means it points to the .exe installer and Updater
+    # should launch it with silent flags. Defaults to "full-exe" so
+    # legacy releases (only .exe asset) keep working.
+    update_kind: str = "full-exe"
+    # If both assets are present, this carries the OTHER one as a
+    # fallback link in case the preferred asset fails to download or
+    # extract. Empty if no fallback.
+    fallback_url: str = ""
 
 
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
@@ -98,16 +117,24 @@ class _CheckWorker(QObject):
             body = str(data.get("body") or "").strip()
             html_url = str(data.get("html_url") or "").strip()
             assets = data.get("assets") or []
-            asset_url = ""
-            asset_size = 0
+            installer_url = ""
+            installer_size = 0
+            zip_url = ""
+            zip_size = 0
             for asset in assets:
-                if str(asset.get("name") or "").strip().lower() == INSTALLER_ASSET_NAME.lower():
-                    asset_url = str(asset.get("browser_download_url") or "").strip()
-                    try:
-                        asset_size = int(asset.get("size") or 0)
-                    except (TypeError, ValueError):
-                        asset_size = 0
-                    break
+                name = str(asset.get("name") or "").strip()
+                lname = name.lower()
+                url = str(asset.get("browser_download_url") or "").strip()
+                try:
+                    size = int(asset.get("size") or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                if lname == INSTALLER_ASSET_NAME.lower():
+                    installer_url = url
+                    installer_size = size
+                elif lname.startswith(APP_UPDATE_ZIP_PREFIX.lower()) and lname.endswith(".zip"):
+                    zip_url = url
+                    zip_size = size
         except Exception as exc:
             self.check_failed.emit(f"shape: {type(exc).__name__}")
             self.finished.emit()
@@ -123,16 +150,30 @@ class _CheckWorker(QObject):
             self.finished.emit()
             return
 
-        # Newer tag exists. If we have no installer asset URL, fall
-        # back to the html_url — the dialog can offer "Open release
-        # page" instead of an in-place download. We still treat
-        # this as an update_available signal.
+        # Prefer the small zip when it's present — the developer's
+        # decision to attach a zip means "this release is safe to
+        # apply as an app-only update" (i.e. no Python deps changed,
+        # no whisper.cpp churn, no breaking install layout shift).
+        # Fall back to the full installer if no zip exists.
+        if zip_url:
+            preferred_url = zip_url
+            preferred_size = zip_size
+            kind = "app-zip"
+            fallback = installer_url
+        else:
+            preferred_url = installer_url
+            preferred_size = installer_size
+            kind = "full-exe"
+            fallback = ""
+
         info = ReleaseInfo(
             version=re.sub(r"^v", "", tag, flags=re.IGNORECASE),
             body=body,
-            download_url=asset_url,
+            download_url=preferred_url,
             html_url=html_url,
-            size_bytes=asset_size,
+            size_bytes=preferred_size,
+            update_kind=kind,
+            fallback_url=fallback,
         )
         self.update_available.emit(info)
         self.finished.emit()
