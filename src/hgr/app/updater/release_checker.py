@@ -48,6 +48,60 @@ INSTALLER_ASSET_NAME = "Touchless_Installer.exe"
 APP_UPDATE_ZIP_PREFIX = "Touchless_App_Update"   # matches Touchless_App_Update_<ver>.zip
 HTTP_TIMEOUT_SECONDS = 8.0
 
+# When the full installer is too big for GitHub's 2GB asset limit,
+# the developer hosts it on Cloudflare (or any HTTPS host) and
+# embeds a marker in the release body for the updater to find.
+#
+# Conventions:
+#   <!-- full-installer-url: https://touchless.example.com/v1.0.6/Touchless_Installer.exe -->
+#   <!-- full-installer-size: 2576980378 -->         (optional, bytes)
+#
+# Both markers are HTML comments so they render invisibly in the
+# user-facing release notes on GitHub and in the in-app Updates
+# panel. The size is optional — if omitted, the dialog shows
+# "Full update available" without a MB figure.
+_FULL_INSTALLER_URL_RE = re.compile(
+    r"<!--\s*full-installer-url:\s*(https?://\S+?)\s*-->",
+    re.IGNORECASE,
+)
+_FULL_INSTALLER_SIZE_RE = re.compile(
+    r"<!--\s*full-installer-size:\s*(\d+)\s*-->",
+    re.IGNORECASE,
+)
+# Combined regex used to strip the markers from the body before
+# showing it to the user. Captures any <!-- full-installer-* ... -->
+# line, including its trailing newline if present.
+_FULL_INSTALLER_MARKER_RE = re.compile(
+    r"<!--\s*full-installer-(?:url|size):[^>]*-->\s*\n?",
+    re.IGNORECASE,
+)
+
+
+def _parse_external_full_installer(body: str) -> tuple[str, int]:
+    """Pull `(url, size_bytes)` out of the release body. Returns
+    `("", 0)` if no marker is present."""
+    if not body:
+        return ("", 0)
+    url_match = _FULL_INSTALLER_URL_RE.search(body)
+    if not url_match:
+        return ("", 0)
+    url = url_match.group(1).strip()
+    size = 0
+    size_match = _FULL_INSTALLER_SIZE_RE.search(body)
+    if size_match:
+        try:
+            size = int(size_match.group(1))
+        except ValueError:
+            size = 0
+    return (url, size)
+
+
+def _strip_installer_markers(body: str) -> str:
+    """Remove the marker comments from the body before display."""
+    if not body:
+        return body
+    return _FULL_INSTALLER_MARKER_RE.sub("", body).rstrip()
+
 
 @dataclass(frozen=True)
 class ReleaseInfo:
@@ -117,7 +171,7 @@ class _CheckWorker(QObject):
 
         try:
             tag = str(data.get("tag_name") or "").strip()
-            body = str(data.get("body") or "").strip()
+            body_raw = str(data.get("body") or "").strip()
             html_url = str(data.get("html_url") or "").strip()
             assets = data.get("assets") or []
             installer_url = ""
@@ -138,6 +192,23 @@ class _CheckWorker(QObject):
                 elif lname.startswith(APP_UPDATE_ZIP_PREFIX.lower()) and lname.endswith(".zip"):
                     zip_url = url
                     zip_size = size
+
+            # If GitHub doesn't carry the full installer (2GB asset
+            # limit blocks our 2.4GB .exe), look for a Cloudflare-
+            # or other-host URL embedded in the release body via
+            # the <!-- full-installer-url: ... --> marker. The
+            # developer adds this when uploading the .exe to their
+            # CDN; the auto-updater treats the external URL as
+            # equivalent to a GitHub-hosted asset.
+            if not installer_url:
+                ext_url, ext_size = _parse_external_full_installer(body_raw)
+                if ext_url:
+                    installer_url = ext_url
+                    installer_size = ext_size
+
+            # Hide the marker comments from the body shown to the
+            # user — they're metadata for us, not changelog content.
+            body = _strip_installer_markers(body_raw)
         except Exception as exc:
             self.check_failed.emit(f"shape: {type(exc).__name__}")
             self.finished.emit()
@@ -280,7 +351,7 @@ class _HistoryWorker(QObject):
                 entries.append(
                     ReleaseHistoryEntry(
                         version=version,
-                        body=str(item.get("body") or "").strip(),
+                        body=_strip_installer_markers(str(item.get("body") or "").strip()),
                         published_at=str(item.get("published_at") or "").strip(),
                         html_url=str(item.get("html_url") or "").strip(),
                         is_current=(version == RUNNING_VERSION),

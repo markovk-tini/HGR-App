@@ -72,6 +72,11 @@ class UpdateDialog(QDialog):
         else:
             if size_mb > 0:
                 subtitle_parts.append(f"Full update — {size_mb:.0f} MB.")
+            else:
+                # Full installer is hosted externally (Cloudflare etc.)
+                # and the developer didn't include a size marker.
+                # Don't fake a number — be honest about the unknown.
+                subtitle_parts.append("Full update — large download.")
         subtitle = QLabel(" ".join(subtitle_parts))
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: rgba(255,255,255,0.7); font-size: 12px;")
