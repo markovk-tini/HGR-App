@@ -5346,6 +5346,42 @@ class MainWindow(QMainWindow):
     def _on_command_detected(self, command: str) -> None:
         action_text = str(command or "").strip() or "none"
         self.last_action_label.setText(f"Last action: {action_text}")
+        # Push the same human-readable text to the phone via SSE so
+        # users get a live toast confirming the PC saw their gesture
+        # or voice command. Skipped silently if no phone is paired,
+        # the QR server isn't running, or no SSE clients are
+        # subscribed — publish_event is a no-op in any of those.
+        self._publish_phone_event_for_action(action_text)
+
+    def _publish_phone_event_for_action(self, action_text: str) -> None:
+        if not action_text or action_text == "none":
+            return
+        # Suppress noise: drawing intermediate states fire command_detected
+        # multiple times per stroke for UI feedback. The user already
+        # sees the drawing on screen — toasting every state change just
+        # spams the phone.
+        suppressed_prefixes = (
+            "drawing ",         # "drawing pen", "drawing eraser", etc. fire continuously
+        )
+        lower = action_text.lower()
+        if any(lower.startswith(p) for p in suppressed_prefixes):
+            return
+        server = self._current_phone_camera_qr_server()
+        if server is None:
+            return
+        try:
+            # When voice listening is active and we just got a result,
+            # tag as "voice" so the toast picks the warm-yellow border.
+            # Otherwise tag as "gesture" with the green-accent border.
+            voice_active = False
+            if self._worker is not None:
+                voice_active = bool(getattr(self._worker, "_voice_listening", False))
+            if voice_active:
+                server.publish_event("voice", text=action_text)
+            else:
+                server.publish_event("gesture", label=action_text, action_text=action_text)
+        except Exception:
+            pass
 
     def _on_action_history_changed(self, events: object) -> None:
         if not hasattr(self, "action_history_list"):

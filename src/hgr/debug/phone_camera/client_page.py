@@ -69,9 +69,41 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     body.mini .preview-wrap { min-height: 180px; }
     body.mini .controls { grid-template-columns: 1fr; }
     body.mini .ctl-row { padding: 6px 10px; }
+
+    /* Toast notifications pushed from the PC via SSE.
+       Sit fixed at the top of the viewport, slide-in/fade-out,
+       capped to the latest 3 so a flurry of gestures doesn't
+       fill the screen. */
+    .toast-stack { position: fixed; left: 50%; top: 8px;
+      transform: translateX(-50%); display: flex;
+      flex-direction: column; gap: 6px; align-items: center;
+      pointer-events: none; z-index: 1500; max-width: 92vw; }
+    body.fs-active .toast-stack { top: 18px; }
+    .toast { pointer-events: auto;
+      background: rgba(11, 61, 145, 0.92);
+      color: #E5F6FF;
+      border: 1px solid rgba(29, 233, 182, 0.35);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+      border-radius: 999px; padding: 10px 18px;
+      font-size: 14px; font-weight: 600; line-height: 1.2;
+      max-width: 100%;
+      animation: toastIn 220ms ease-out;
+      transition: opacity 280ms ease-out, transform 280ms ease-out; }
+    .toast.gesture { border-color: rgba(29, 233, 182, 0.55); }
+    .toast.voice   { border-color: rgba(255, 200, 80, 0.65); }
+    .toast .toast-kind { font-size: 11px; font-weight: 600;
+      opacity: 0.7; text-transform: uppercase;
+      letter-spacing: 0.06em; margin-right: 8px; }
+    .toast.fade-out { opacity: 0; transform: translateY(-6px); }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(-12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
   <h1>Touchless Phone Camera</h1>
   <div class="subtitle">Keep this tab open while you use Touchless.</div>
   <div id="status" class="status">Tap Start to share your camera.</div>
@@ -538,7 +570,96 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     if (!document.fullscreenElement) previewWrap.classList.remove("fs-active");
   });
 
-  window.addEventListener("beforeunload", stopLoop);
+  // ----- Toast notifications pushed FROM the PC via SSE -------------
+  //
+  // Touchless-on-PC publishes events when a gesture triggers an action
+  // ("Right swipe → Next track") or a voice command is recognized
+  // ("play Spotify"). We subscribe once on page load and render each
+  // event as a slide-in toast at the top of the screen, capped to the
+  // most recent 3 so a flurry of detections doesn't fill the viewport.
+  // ------------------------------------------------------------------
+
+  const toastStack = document.getElementById("toastStack");
+  const TOAST_MAX = 3;
+  const TOAST_LIFETIME_MS = 1700;
+
+  function showToast(kind, text, sublabel) {
+    if (!toastStack || !text) return;
+    const el = document.createElement("div");
+    el.className = "toast " + (kind || "");
+    if (sublabel) {
+      const k = document.createElement("span");
+      k.className = "toast-kind";
+      k.textContent = sublabel;
+      el.appendChild(k);
+    }
+    el.appendChild(document.createTextNode(text));
+    toastStack.appendChild(el);
+    while (toastStack.children.length > TOAST_MAX) {
+      toastStack.removeChild(toastStack.firstElementChild);
+    }
+    setTimeout(() => {
+      el.classList.add("fade-out");
+      setTimeout(() => {
+        if (el.parentElement) el.parentElement.removeChild(el);
+      }, 300);
+    }, TOAST_LIFETIME_MS);
+  }
+
+  let eventSource = null;
+  let sseRetryDelay = 1000;
+  function connectEventStream() {
+    try {
+      // Same-origin endpoint on this very server; no CORS, no auth
+      // shenanigans, the same TLS chain the page itself loaded over.
+      eventSource = new EventSource("/events");
+    } catch (_) {
+      eventSource = null;
+      return;
+    }
+    eventSource.addEventListener("hello", () => {
+      // Successful handshake — reset backoff so a long-lived connection
+      // that drops once falls back to fast reconnect.
+      sseRetryDelay = 1000;
+    });
+    eventSource.onmessage = (event) => {
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
+      if (!payload || typeof payload !== "object") return;
+      const kind = String(payload.kind || "");
+      if (kind === "gesture") {
+        const label = String(payload.action_text || payload.label || "Gesture");
+        showToast("gesture", label, "Gesture");
+      } else if (kind === "voice") {
+        const text = String(payload.text || "");
+        if (text) showToast("voice", text, "Heard");
+      } else if (kind === "status") {
+        const message = String(payload.message || "");
+        if (message) showToast("", message, "");
+      }
+    };
+    eventSource.onerror = () => {
+      // EventSource auto-reconnects on its own, but on iOS Safari that
+      // sometimes goes dormant. Force a fresh connect after a backoff.
+      try { eventSource.close(); } catch (_) {}
+      eventSource = null;
+      const delay = Math.min(sseRetryDelay, 10000);
+      sseRetryDelay = Math.min(sseRetryDelay * 1.6, 10000);
+      setTimeout(connectEventStream, delay);
+    };
+  }
+  connectEventStream();
+
+  window.addEventListener("beforeunload", () => {
+    stopLoop();
+    if (eventSource) {
+      try { eventSource.close(); } catch (_) {}
+    }
+  });
 })();
 </script>
 </body>

@@ -15,6 +15,7 @@ reuse keeps each subsequent POST cheap after the first one.
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 import sys
 import threading
@@ -67,6 +68,13 @@ class PhoneCameraServer:
         self._announced_audio = False
         self._info: Optional[PhoneCameraServerInfo] = None
         self._cert: Optional[PhoneCameraCertPaths] = None
+        # Set of asyncio.Queue objects, one per connected SSE client.
+        # publish_event() iterates over these and pushes a JSON-encoded
+        # event to each. The asyncio handler clears its queue from the
+        # set on disconnect. Lock guards add/remove so the publish-from-
+        # any-thread path doesn't race with the loop's removal.
+        self._event_queues: set[asyncio.Queue] = set()
+        self._event_queues_lock = threading.Lock()
 
     @property
     def capture(self) -> PhoneCameraCapture:
@@ -182,6 +190,12 @@ class PhoneCameraServer:
         app.router.add_get("/touchless-ca.cer", self._handle_cert)
         app.router.add_post("/frame", self._handle_frame)
         app.router.add_post("/audio", self._handle_audio)
+        # Server-Sent Events stream pushed FROM the PC TO the phone.
+        # Used to display gesture / voice toast notifications on the
+        # phone screen so the user gets live feedback that the PC
+        # actually saw what they did. iOS Safari supports EventSource
+        # over HTTPS without the WSS-cert pain WebSockets hit.
+        app.router.add_get("/events", self._handle_events)
 
         self._runner = web.AppRunner(app, handle_signals=False)
         try:
@@ -296,3 +310,119 @@ class PhoneCameraServer:
             self._on_status(event, data)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Server-Sent Events: PC → phone notifications
+    # ------------------------------------------------------------------
+
+    async def _handle_events(self, request: web.Request) -> web.StreamResponse:
+        """SSE endpoint. Each connected phone holds this open and reads
+        events streamed from the PC.
+
+        Wire format is the standard `text/event-stream`:
+            data: {"kind": "gesture", "label": "Right swipe"}\\n\\n
+
+        We send a heartbeat comment every 15s so iOS Safari's SSE
+        connection doesn't get garbage-collected during long quiet
+        stretches between events.
+        """
+        peer = self._peer(request)
+        _log(f"GET /events from {peer} — SSE subscribed")
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-store",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # belt-and-suspenders: defeat any reverse-proxy buffering
+            },
+        )
+        await response.prepare(request)
+
+        # Per-client queue of events. publish_event() pushes onto this
+        # via call_soon_threadsafe. We drain it and write SSE frames.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        with self._event_queues_lock:
+            self._event_queues.add(queue)
+        try:
+            # Initial hello — useful for debugging "did the phone connect?"
+            await response.write(b"event: hello\ndata: {}\n\n")
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Heartbeat: SSE-spec comment line. Some intermediaries
+                    # (and iOS in low-power mode) drop the connection if
+                    # nothing arrives for 30+ seconds.
+                    try:
+                        await response.write(b": heartbeat\n\n")
+                    except (ConnectionResetError, asyncio.CancelledError):
+                        break
+                    continue
+                if payload is None:
+                    break
+                try:
+                    await response.write(payload)
+                except (ConnectionResetError, asyncio.CancelledError):
+                    break
+        finally:
+            with self._event_queues_lock:
+                self._event_queues.discard(queue)
+            _log(f"SSE disconnect from {peer}")
+        return response
+
+    def publish_event(self, kind: str, **fields) -> None:
+        """Broadcast an event to all connected phone SSE clients.
+
+        Safe to call from any thread — we marshal onto the asyncio
+        loop. The phone's JS receives it as a JSON object on the
+        EventSource and renders a toast.
+
+        `kind` is one of:
+            - "gesture": fields {label, action_text?}
+            - "voice":   fields {text}
+            - "status":  fields {message}    (catch-all)
+
+        Fields are arbitrary JSON-serializable values; the phone's
+        toast renderer reads `label` for gestures, `text` for voice,
+        `message` for status.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        try:
+            payload_obj = {"kind": str(kind), **fields}
+            payload_json = json.dumps(payload_obj, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return
+        message = f"data: {payload_json}\n\n".encode("utf-8")
+        # Snapshot the queues under the lock, then dispatch. We do the
+        # actual put() via call_soon_threadsafe so we don't fight the
+        # event loop for queue access from a non-loop thread.
+        with self._event_queues_lock:
+            queues = list(self._event_queues)
+        if not queues:
+            return
+        for queue in queues:
+            try:
+                loop.call_soon_threadsafe(self._enqueue_event, queue, message)
+            except RuntimeError:
+                # Loop is closing — drop silently.
+                pass
+
+    @staticmethod
+    def _enqueue_event(queue: asyncio.Queue, message: bytes) -> None:
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            # Subscriber is too slow. Drop the oldest, push the new
+            # one — toasts are ephemeral, freshness > completeness.
+            try:
+                _ = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass
