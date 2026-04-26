@@ -923,7 +923,19 @@ class SpotifyController:
                 raw = response.read().decode("utf-8")
                 if not raw:
                     return response.status, None
-                return response.status, json.loads(raw)
+                # Spotify's PUT /me/player/play and /pause endpoints
+                # often respond 200 with a non-JSON body (sometimes
+                # an empty-string-with-trailing-whitespace, sometimes
+                # a short status line like "OK"). Treat that as a
+                # successful response with no parsed payload — the
+                # status code is what callers actually look at, and
+                # parsing failure here was bubbling up as
+                # JSONDecodeError → caught-as-Exception → returning
+                # (None, None) → toast incorrectly said "failed".
+                try:
+                    return response.status, json.loads(raw)
+                except json.JSONDecodeError:
+                    return response.status, None
         except urllib_error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="ignore")
             payload_value = None
