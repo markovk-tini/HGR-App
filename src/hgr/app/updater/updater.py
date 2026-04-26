@@ -334,6 +334,23 @@ class Updater(QObject):
         no Python interpreter outside the bundle, and we can't run
         the bundle while it's mid-replacement. cmd.exe + PowerShell
         Expand-Archive are universally available on Windows 10+.
+
+        The script:
+          1. Waits up to ~30s for Touchless.exe to be writable —
+             checking the file LOCK directly (rename-in-place trick),
+             not just the process list. After the .exe process exits,
+             Windows can hold file handles open for several extra
+             seconds, which used to silently break Expand-Archive.
+          2. Extracts the zip to a STAGING dir (not directly over the
+             install). If extraction fails partway, the user's
+             install dir stays consistent.
+          3. Robocopies staging → install_dir with retry semantics
+             (60 retries, 1s apart) so any lingering file lock on a
+             specific dependency DLL doesn't corrupt the install.
+          4. Verifies Touchless.exe exists post-copy before relaunch.
+          5. Logs every step to %TEMP%\\Touchless_Update\\
+             _apply_update.log so failures are diagnosable instead
+             of silent.
         """
         try:
             zip_dir = Path(zip_path).parent
@@ -341,35 +358,80 @@ class Updater(QObject):
             helper = zip_dir / "_apply_update.bat"
             content = (
                 "@echo off\r\n"
-                "setlocal\r\n"
+                "setlocal enabledelayedexpansion\r\n"
                 f"set \"INSTALL_DIR={install_dir}\"\r\n"
                 f"set \"UPDATE_ZIP={zip_path}\"\r\n"
-                "rem Wait up to 30s for Touchless.exe to exit before we touch its files.\r\n"
+                "set \"STAGING=%TEMP%\\Touchless_Update\\staging\"\r\n"
+                "set \"LOG=%TEMP%\\Touchless_Update\\_apply_update.log\"\r\n"
+                "echo [start] %DATE% %TIME% INSTALL_DIR=%INSTALL_DIR% > \"%LOG%\" 2>&1\r\n"
+                "\r\n"
+                "rem Initial settle window — gives Windows a chance to release\r\n"
+                "rem file handles after the Touchless process exited.\r\n"
+                "timeout /t 3 /nobreak >nul\r\n"
+                "\r\n"
+                "rem Loop: probe Touchless.exe writability by trying to rename\r\n"
+                "rem it in place. Rename succeeds only when no process holds\r\n"
+                "rem an exclusive handle. If it fails, sleep 1s and retry.\r\n"
                 "set /a count=0\r\n"
-                ":waitloop\r\n"
-                "tasklist /FI \"IMAGENAME eq Touchless.exe\" 2>nul | find /I \"Touchless.exe\" >nul\r\n"
-                "if errorlevel 1 goto extract\r\n"
-                "if %count% geq 30 goto extract\r\n"
+                ":waitlock\r\n"
+                "if not exist \"%INSTALL_DIR%\\Touchless.exe\" goto extract\r\n"
+                "ren \"%INSTALL_DIR%\\Touchless.exe\" \"Touchless.exe\" >>\"%LOG%\" 2>&1\r\n"
+                "if not errorlevel 1 goto extract\r\n"
+                "if !count! geq 30 (\r\n"
+                "  echo [warn] Touchless.exe still locked after 30s, attempting extract anyway >> \"%LOG%\"\r\n"
+                "  goto extract\r\n"
+                ")\r\n"
                 "timeout /t 1 /nobreak >nul\r\n"
                 "set /a count+=1\r\n"
-                "goto waitloop\r\n"
+                "goto waitlock\r\n"
                 "\r\n"
                 ":extract\r\n"
+                "echo [info] extracting to staging dir %STAGING% >> \"%LOG%\"\r\n"
+                "if exist \"%STAGING%\" rmdir /s /q \"%STAGING%\" >>\"%LOG%\" 2>&1\r\n"
+                "mkdir \"%STAGING%\" >>\"%LOG%\" 2>&1\r\n"
                 "powershell -NoProfile -ExecutionPolicy Bypass -Command "
-                "\"Expand-Archive -LiteralPath '%UPDATE_ZIP%' -DestinationPath '%INSTALL_DIR%' -Force\"\r\n"
+                "\"Expand-Archive -LiteralPath '%UPDATE_ZIP%' -DestinationPath '%STAGING%' -Force\""
+                " >>\"%LOG%\" 2>&1\r\n"
                 "if errorlevel 1 (\r\n"
-                "  echo [Touchless Update] Extraction failed. Run the installer manually if needed.\r\n"
-                "  pause\r\n"
-                "  exit /b 1\r\n"
+                "  echo [error] Expand-Archive failed (errorlevel %errorlevel%) >> \"%LOG%\"\r\n"
+                "  goto fail\r\n"
+                ")\r\n"
+                "if not exist \"%STAGING%\\Touchless.exe\" (\r\n"
+                "  echo [error] staged Touchless.exe missing after extract >> \"%LOG%\"\r\n"
+                "  goto fail\r\n"
                 ")\r\n"
                 "\r\n"
-                "rem Relaunch the new Touchless.exe.\r\n"
+                "echo [info] robocopying staging into install dir >> \"%LOG%\"\r\n"
+                "robocopy \"%STAGING%\" \"%INSTALL_DIR%\" /E /R:60 /W:1 /NFL /NDL /NJH /NJS"
+                " >>\"%LOG%\" 2>&1\r\n"
+                "rem robocopy uses bitmask exit codes; >=8 means failure.\r\n"
+                "if !errorlevel! geq 8 (\r\n"
+                "  echo [error] robocopy failed (errorlevel !errorlevel!) >> \"%LOG%\"\r\n"
+                "  goto fail\r\n"
+                ")\r\n"
+                "\r\n"
+                "if not exist \"%INSTALL_DIR%\\Touchless.exe\" (\r\n"
+                "  echo [error] post-copy Touchless.exe missing >> \"%LOG%\"\r\n"
+                "  goto fail\r\n"
+                ")\r\n"
+                "\r\n"
+                "echo [success] update applied, relaunching >> \"%LOG%\"\r\n"
                 "start \"\" \"%INSTALL_DIR%\\Touchless.exe\"\r\n"
                 "\r\n"
-                "rem Best-effort cleanup. The downloaded zip is small;\r\n"
-                "rem if delete fails (rare) the OS will reclaim on reboot.\r\n"
-                "del \"%UPDATE_ZIP%\" 2>nul\r\n"
+                "rmdir /s /q \"%STAGING%\" >nul 2>&1\r\n"
+                "del \"%UPDATE_ZIP%\" >nul 2>&1\r\n"
                 "endlocal\r\n"
+                "exit /b 0\r\n"
+                "\r\n"
+                ":fail\r\n"
+                "echo [fail] update aborted at %DATE% %TIME% >> \"%LOG%\"\r\n"
+                "rem Don't pause — there's no console window. Just exit.\r\n"
+                "rem Relaunch the OLD Touchless.exe so the user isn't left\r\n"
+                "rem without an app. They'll see the update prompt again on\r\n"
+                "rem next launch and can retry.\r\n"
+                "if exist \"%INSTALL_DIR%\\Touchless.exe\" start \"\" \"%INSTALL_DIR%\\Touchless.exe\"\r\n"
+                "endlocal\r\n"
+                "exit /b 1\r\n"
             )
             helper.write_text(content, encoding="cp1252")
             return helper
