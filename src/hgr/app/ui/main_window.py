@@ -5024,14 +5024,48 @@ class MainWindow(QMainWindow):
 
     def save_camera_preference_from_settings(self) -> None:
         selected_index = self.camera_combo.currentData()
+        # Capture the friendly name from the combo BEFORE we lose
+        # easy access to it, so the confirmation popup tells the user
+        # exactly which camera is now their saved choice.
+        selected_name = ""
+        try:
+            selected_name = str(self.camera_combo.currentText() or "").strip()
+        except Exception:
+            selected_name = ""
+        # Phone-camera state — overrides the local dropdown when on.
+        phone_qr_active = bool(getattr(self.config, "phone_camera_qr_active", False)) and self._current_phone_camera_qr_server() is not None
+        phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
+
         self.config.preferred_camera_index = selected_index
         save_config(self.config)
         self._refresh_camera_labels()
-        if selected_index is None:
+
+        if phone_qr_active:
+            self.last_action_label.setText("Last action: saved phone camera (QR) as source")
+            confirmation = (
+                "Camera preference saved.\n\nTouchless is currently using your phone's camera (QR) "
+                "as the source. The local device above is saved as a fallback for when the phone "
+                "camera is turned off."
+            )
+        elif phone_url_active:
+            url = str(getattr(self.config, "phone_camera_url", "") or "").strip()
+            self.last_action_label.setText("Last action: saved phone camera (URL) as source")
+            confirmation = (
+                f"Camera preference saved.\n\nTouchless is currently using your phone's camera over "
+                f"the URL stream ({url}). The local device above is saved as a fallback."
+            )
+        elif selected_index is None:
             self.last_action_label.setText("Last action: camera set to auto-select")
+            confirmation = (
+                "Camera preference saved. Touchless will pick the best available camera at startup."
+            )
         else:
-            self.last_action_label.setText(f"Last action: saved camera {selected_index}")
-        QMessageBox.information(self, "Touchless", "Camera preference saved.")
+            label = selected_name if selected_name else f"index {selected_index}"
+            self.last_action_label.setText(f"Last action: saved camera {label}")
+            confirmation = (
+                f"Camera preference saved. Touchless will now use:\n\n{label}"
+            )
+        QMessageBox.information(self, "Camera Saved", confirmation)
 
     def clear_camera_preference(self) -> None:
         self.config.preferred_camera_index = None
@@ -5380,6 +5414,71 @@ class MainWindow(QMainWindow):
                 server.publish_event("voice", text=action_text)
             else:
                 server.publish_event("gesture", label=action_text, action_text=action_text)
+        except Exception:
+            pass
+
+    # Map of stable_label codes from the gesture engine to friendly
+    # labels we show on the phone toast. Anything not in the map
+    # falls through to a Title-cased version of the code itself.
+    _PHONE_POSE_FRIENDLY: dict = {
+        "neutral": "",
+        "open_hand": "Open hand",
+        "open_palm": "Open palm",
+        "fist": "Fist",
+        "two": "Two",
+        "three": "Three",
+        "four": "Four",
+        "five": "Five",
+        "wheel_pose": "Wheel pose",
+        "volume_pose": "Volume pose",
+        "swipe_left": "Swipe left",
+        "swipe_right": "Swipe right",
+        "thumbs_up": "Thumbs up",
+        "thumbs_down": "Thumbs down",
+        "ok": "OK",
+        "point": "Point",
+        "pinch": "Pinch",
+    }
+
+    def _publish_phone_gesture_pose_change(self, info: dict) -> None:
+        """Fire a 'gesture detected' toast on the phone the moment a
+        new stable pose lands, so users get realtime feedback rather
+        than waiting until the action they triggered completes (which
+        for held gestures like volume_pose can be many seconds later).
+
+        Debouncing rules:
+          - Only fire on transitions to a NEW non-neutral pose; ignore
+            transitions to neutral and same-pose ticks.
+          - Mute the toast firehose when there's no phone server
+            connected anyway — the engine still emits these every
+            frame regardless.
+        """
+        server = self._current_phone_camera_qr_server()
+        if server is None:
+            return
+        try:
+            stable_label = str(info.get("stable_label") or "neutral").strip()
+            dynamic_label = str(info.get("dynamic_label") or "").strip()
+        except Exception:
+            return
+        # Prefer dynamic gestures (e.g. swipe_right) when present —
+        # those represent the most-recent kinetic event, more
+        # interesting than the static pose currently held.
+        primary_label = dynamic_label if dynamic_label and dynamic_label != "neutral" else stable_label
+        if not primary_label or primary_label == "neutral":
+            self._last_phone_pose_emitted = "neutral"
+            return
+        prev = getattr(self, "_last_phone_pose_emitted", None)
+        if prev == primary_label:
+            return
+        self._last_phone_pose_emitted = primary_label
+        friendly = self._PHONE_POSE_FRIENDLY.get(primary_label)
+        if friendly is None:
+            friendly = primary_label.replace("_", " ").title()
+        if not friendly:
+            return
+        try:
+            server.publish_event("gesture", label=friendly, action_text=friendly)
         except Exception:
             pass
 
@@ -7533,6 +7632,15 @@ class MainWindow(QMainWindow):
     def _on_worker_debug_frame(self, frame, info) -> None:
         if not isinstance(info, dict):
             return
+        # Push a phone toast as soon as a gesture pose is recognized,
+        # not only when it executes an action. The `stable_label`
+        # value is already debounced by the engine — it represents a
+        # pose held long enough to count, so a change here corresponds
+        # to "the user just settled into a new pose".
+        try:
+            self._publish_phone_gesture_pose_change(info)
+        except Exception:
+            pass
         drawing_target = str(info.get("drawing_render_target", self._drawing_render_target) or self._drawing_render_target)
         self._set_drawing_render_target(drawing_target)
         request_token = int(info.get("drawing_request_token", 0) or 0)

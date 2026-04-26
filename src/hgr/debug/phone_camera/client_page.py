@@ -73,12 +73,19 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     /* Toast notifications pushed from the PC via SSE.
        Sit fixed at the top of the viewport, slide-in/fade-out,
        capped to the latest 3 so a flurry of gestures doesn't
-       fill the screen. */
-    .toast-stack { position: fixed; left: 50%; top: 8px;
+       fill the screen. The z-index sits above the CSS-fullscreen
+       preview overlay (.fs-active uses 999), and the .toast-stack
+       gets a state hook (`.fs-mode`) we toggle from JS so the
+       offset matches the safe-area in fullscreen mode (iOS
+       notch / Dynamic Island clearance). The stack is also
+       reparented under the preview-wrap when CSS-fullscreen is
+       active so it survives the browser's native-fullscreen API
+       (which clips out-of-tree fixed-position elements). */
+    .toast-stack { position: fixed; left: 50%; top: max(8px, env(safe-area-inset-top, 8px));
       transform: translateX(-50%); display: flex;
       flex-direction: column; gap: 6px; align-items: center;
-      pointer-events: none; z-index: 1500; max-width: 92vw; }
-    body.fs-active .toast-stack { top: 18px; }
+      pointer-events: none; z-index: 2147483646; max-width: 92vw; }
+    .toast-stack.fs-mode { top: max(18px, env(safe-area-inset-top, 18px)); }
     .toast { pointer-events: auto;
       background: rgba(11, 61, 145, 0.92);
       color: #E5F6FF;
@@ -522,6 +529,7 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     // and strips UI — so for iOS we fall back to our CSS-positioned
     // .fs-active layout that at least fills the viewport.
     previewWrap.classList.add("fs-active");
+    moveToastStackToFullscreen();
     const req = previewWrap.requestFullscreen || previewWrap.webkitRequestFullscreen;
     if (typeof req === "function") {
       try { req.call(previewWrap); } catch (_) {}
@@ -530,10 +538,35 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   function exitFullscreen() {
     previewWrap.classList.remove("fs-active");
+    moveToastStackToBody();
     const exit = document.exitFullscreen || document.webkitExitFullscreen;
     if (typeof exit === "function") {
       try { exit.call(document); } catch (_) {}
     }
+  }
+
+  // Reparent the toast container into / out of the fullscreen
+  // element. The browser's native Fullscreen API hides every DOM
+  // node that isn't a descendant of the fullscreened element, so
+  // a body-level fixed-position stack disappears when the user
+  // hits the system fullscreen mode. Moving the toast-stack inside
+  // previewWrap keeps it visible in both the CSS-fallback and
+  // native-fullscreen paths.
+  function moveToastStackToFullscreen() {
+    const stack = document.getElementById("toastStack");
+    if (!stack || !previewWrap) return;
+    if (stack.parentElement !== previewWrap) {
+      previewWrap.appendChild(stack);
+    }
+    stack.classList.add("fs-mode");
+  }
+  function moveToastStackToBody() {
+    const stack = document.getElementById("toastStack");
+    if (!stack) return;
+    if (stack.parentElement !== document.body) {
+      document.body.insertBefore(stack, document.body.firstChild);
+    }
+    stack.classList.remove("fs-mode");
   }
 
   async function restartStreamOnSettingsChange() {
@@ -567,7 +600,10 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   // ESC / back-gesture to exit fullscreen
   document.addEventListener("fullscreenchange", () => {
-    if (!document.fullscreenElement) previewWrap.classList.remove("fs-active");
+    if (!document.fullscreenElement) {
+      previewWrap.classList.remove("fs-active");
+      moveToastStackToBody();
+    }
   });
 
   // ----- Toast notifications pushed FROM the PC via SSE -------------

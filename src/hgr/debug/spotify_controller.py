@@ -211,7 +211,11 @@ class SpotifyController:
         if not self.ensure_ready(open_if_needed=True):
             return False
         status, _ = self._request_json("PUT", "/me/player/play")
-        if status in {202, 204}:
+        # Spotify can answer with 200 (with playback-state body) when
+        # the request lands on the desktop client, in addition to the
+        # documented 202/204. Treat all three as success so the
+        # toast on the phone doesn't lie about a working action.
+        if status in {200, 202, 204}:
             self._message = "spotify play"
             return True
         self._message = "spotify play failed"
@@ -221,7 +225,7 @@ class SpotifyController:
         if not self.ensure_ready(open_if_needed=False):
             return False
         status, _ = self._request_json("PUT", "/me/player/pause")
-        if status in {202, 204}:
+        if status in {200, 202, 204}:
             self._message = "spotify pause"
             return True
         self._message = "spotify pause failed"
@@ -231,7 +235,7 @@ class SpotifyController:
         if not self.ensure_ready(open_if_needed=True):
             return False
         status, _ = self._request_json("POST", "/me/player/next")
-        if status in {202, 204}:
+        if status in {200, 202, 204}:
             self._message = "spotify next track"
             return True
         self._message = "spotify next failed"
@@ -241,7 +245,7 @@ class SpotifyController:
         if not self.ensure_ready(open_if_needed=True):
             return False
         status, _ = self._request_json("POST", "/me/player/previous")
-        if status in {202, 204}:
+        if status in {200, 202, 204}:
             self._message = "spotify previous track"
             return True
         self._message = "spotify previous failed"
