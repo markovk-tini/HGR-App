@@ -199,10 +199,14 @@ class Updater(QObject):
 
     def _on_download_complete(self, path: str) -> None:
         self.progress.emit(-1, "Launching installer...")
-        # Tiny delay so the user sees "Launching..." before the
-        # window vanishes. Without this the app can disappear so
-        # fast the user thinks the click did nothing.
-        QTimer.singleShot(400, lambda p=path: self.ready_to_launch.emit(p))
+        # Emit immediately. The previous QTimer.singleShot(400, ...)
+        # cosmetic delay was failing to fire on some Windows configs
+        # — the lambda capturing `self` would get garbage-collected
+        # before the timer's deadline, leaving the dialog frozen on
+        # 'Launching installer...' indefinitely. Direct emit
+        # guarantees the apply path runs synchronously on the GUI
+        # thread that just received the download_finished signal.
+        self.ready_to_launch.emit(path)
 
     def apply_update_and_exit(self, downloaded_path: str) -> bool:
         """Route to the appropriate handler based on the update kind
