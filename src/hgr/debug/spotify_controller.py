@@ -935,8 +935,25 @@ class SpotifyController:
             if exc.code == 401 and allow_refresh and self._refresh_access_token():
                 return self._request_json(method, path, params=params, payload=payload, allow_refresh=False)
             return exc.code, payload_value
-        except Exception:
-            self._message = "spotify request failed"
+        except Exception as exc:
+            # Diagnostic: surface what actually went wrong instead of
+            # collapsing every error to (None, None). Common cases:
+            # urllib_error.URLError (DNS / connect refused), socket.timeout,
+            # ssl.SSLError. The action may have succeeded server-side
+            # (Spotify is fast enough that our timeout fires after the
+            # server already executed the action), so we want to
+            # distinguish "client gave up reading the response" from
+            # "Spotify rejected it".
+            try:
+                import sys as _sys
+                _sys.stderr.write(
+                    f"[spotify] request {method} {path} raised "
+                    f"{type(exc).__name__}: {exc!s}\n"
+                )
+                _sys.stderr.flush()
+            except Exception:
+                pass
+            self._message = f"spotify request failed: {type(exc).__name__}"
             return None, None
 
     def _get_devices(self) -> list[dict[str, Any]]:

@@ -5040,6 +5040,19 @@ class MainWindow(QMainWindow):
         save_config(self.config)
         self._refresh_camera_labels()
 
+        # Hot-swap: if the engine is currently running, restart the
+        # worker against the new camera so the user doesn't have to
+        # End then Start manually. The 1-3 second blip during the
+        # restart is acceptable per the requested behavior.
+        engine_was_running = self._worker is not None
+        if engine_was_running:
+            try:
+                self.start_engine(skip_tutorial_prompt=True)
+            except Exception:
+                # If restart fails for any reason, fall back to the
+                # old behavior (user can manually restart).
+                pass
+
         if phone_qr_active:
             self.last_action_label.setText("Last action: saved phone camera (QR) as source")
             confirmation = (
@@ -5065,6 +5078,8 @@ class MainWindow(QMainWindow):
             confirmation = (
                 f"Camera preference saved. Touchless will now use:\n\n{label}"
             )
+        if engine_was_running:
+            confirmation += "\n\nThe camera is being switched live — gestures may pause for 1-3 seconds while the new camera initializes."
         QMessageBox.information(self, "Camera Saved", confirmation)
 
     def clear_camera_preference(self) -> None:
