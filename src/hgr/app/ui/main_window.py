@@ -5300,10 +5300,13 @@ class MainWindow(QMainWindow):
                     old_worker.action_history_changed.disconnect()
                 except Exception:
                     pass
-                if self.mini_live_viewer is not None:
-                    self.mini_live_viewer.detach_from_worker()
-                if self.live_view_window is not None:
-                    self.live_view_window.detach_from_worker()
+                # NOTE: don't call detach_from_worker on the viewers
+                # here — that blanks the display to "Press START to
+                # begin..." idle text, which is misleading mid-session.
+                # The viewer's attach_to_worker further down handles
+                # the disconnect-old + connect-new transition without
+                # blanking, keeping the previous frame visible until
+                # the new camera produces one.
                 old_worker.stop()
 
             # A phone camera source must override the dropdown-selected
