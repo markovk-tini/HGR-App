@@ -281,14 +281,33 @@ class Updater(QObject):
         Programs\\Touchless\\) is fully user-writable. The helper
         runs at the same privilege level as the launching app.
         """
+        # Python-side log alongside the bat's log so we know whether
+        # this method was even reached and which step (if any) bailed.
+        # Useful to disambiguate "bat didn't run" from "bat-writer
+        # crashed silently". Build round 5 marker.
+        py_log = Path(tempfile.gettempdir()) / "Touchless_Update" / "_python_apply.log"
+        def _plog(msg: str) -> None:
+            try:
+                py_log.parent.mkdir(parents=True, exist_ok=True)
+                with open(py_log, "a", encoding="utf-8") as fh:
+                    fh.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+            except Exception:
+                pass
+
+        _plog(f"_apply_zip_and_exit ENTERED zip_path={zip_path}")
         if not os.path.exists(zip_path):
+            _plog("FAIL: zip_path does not exist on disk")
             return False
         install_dir = self._resolve_install_dir()
+        _plog(f"install_dir={install_dir}")
         if install_dir is None:
+            _plog("FAIL: install_dir resolved to None (likely source-run, not frozen)")
             return False
 
         helper_path = self._write_apply_helper(zip_path, install_dir)
+        _plog(f"helper_path={helper_path}")
         if helper_path is None:
+            _plog("FAIL: _write_apply_helper returned None")
             return False
 
         try:
@@ -307,11 +326,14 @@ class Updater(QObject):
             # closing anyway and the visible feedback is actually
             # useful (the user sees that *something* is happening
             # rather than the app silently disappearing).
-            import os
+            _plog(f"calling os.startfile({helper_path})")
             os.startfile(str(helper_path))
-        except Exception:
+            _plog("os.startfile returned successfully")
+        except Exception as exc:
+            _plog(f"FAIL: os.startfile raised {type(exc).__name__}: {exc!s}")
             return False
 
+        _plog("scheduling _quit_app")
         QTimer.singleShot(0, self._quit_app)
         return True
 
@@ -358,6 +380,7 @@ class Updater(QObject):
             helper = zip_dir / "_apply_update.bat"
             content = (
                 "@echo off\r\n"
+                "rem [BUILD-MARKER: v1.0.6-round-5 with bat-rewrite + os.startfile + python-log]\r\n"
                 "setlocal enabledelayedexpansion\r\n"
                 f"set \"INSTALL_DIR={install_dir}\"\r\n"
                 f"set \"UPDATE_ZIP={zip_path}\"\r\n"
