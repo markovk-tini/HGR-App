@@ -292,23 +292,23 @@ class Updater(QObject):
             return False
 
         try:
-            # Spawn the bat detached from our process so it survives
-            # our exit. CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS
-            # ensure it's not a child of our (about-to-die) process.
-            CREATE_NEW_PROCESS_GROUP = 0x00000200
-            DETACHED_PROCESS = 0x00000008
-            CREATE_NO_WINDOW = 0x08000000
-            import subprocess
-            subprocess.Popen(
-                ["cmd.exe", "/c", str(helper_path)],
-                creationflags=(
-                    CREATE_NEW_PROCESS_GROUP
-                    | DETACHED_PROCESS
-                    | CREATE_NO_WINDOW
-                ),
-                close_fds=True,
-                cwd=str(Path(helper_path).parent),
-            )
+            # Use ShellExecuteW (via os.startfile) instead of
+            # subprocess.Popen with custom creationflags. The
+            # DETACHED_PROCESS | CREATE_NO_WINDOW combo we used
+            # before silently failed to actually run the bat on the
+            # tester's Windows config — Touchless exited cleanly,
+            # the process appeared to be spawned, but the bat never
+            # executed (zip never extracted, app never relaunched).
+            #
+            # ShellExecuteW is the same mechanism Windows Explorer
+            # uses when the user double-clicks the .bat — we verified
+            # that path works, so route through it. The brief console
+            # window that flashes is acceptable since the app is
+            # closing anyway and the visible feedback is actually
+            # useful (the user sees that *something* is happening
+            # rather than the app silently disappearing).
+            import os
+            os.startfile(str(helper_path))
         except Exception:
             return False
 
