@@ -2750,11 +2750,29 @@ class GestureWorker(QObject):
         monotonic_now = time.monotonic()
         result = self._normalize_result_right_primary(result)
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None
+        # Only treat a hand as "left" when BOTH hands are visible —
+        # one labeled Left and one labeled Right. MediaPipe will
+        # confidently label a single visible right hand as "Left"
+        # in some poses (the model only sees the hand silhouette,
+        # not the user's body), which used to trigger voice
+        # listening unexpectedly while doing right-hand-only
+        # gestures. Requiring two distinct hands eliminates the
+        # ambiguity at the cost of users who actually want to use
+        # the voice trigger one-handed (rare; they can keep their
+        # other hand in the frame).
         left_prediction = None
-        if result.found:
+        secondary = getattr(result, "secondary_tracked_hand", None)
+        sec_handedness = secondary.handedness if secondary is not None else None
+        both_hands_visible = (
+            result.found
+            and hand_handedness in {"Left", "Right"}
+            and sec_handedness in {"Left", "Right"}
+            and hand_handedness != sec_handedness
+        )
+        if both_hands_visible:
             if hand_handedness == "Left":
                 left_prediction = result.prediction
-            elif getattr(result, "secondary_tracked_hand", None) is not None and result.secondary_tracked_hand.handedness == "Left":
+            else:
                 left_prediction = getattr(result, "secondary_prediction", None)
         self._left_hand_prediction = left_prediction
         if self._gestures_enabled:

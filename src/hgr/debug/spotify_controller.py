@@ -273,10 +273,13 @@ class SpotifyController:
         current_mode = (player or {}).get("repeat_state")
         target_mode = "off" if current_mode == "track" else "track"
         status, _ = self._request_json("PUT", "/me/player/repeat", params={"state": target_mode})
-        if status == 204:
+        # Same Spotify quirk as play/pause/next/prev: status can come
+        # back as 200 (with non-JSON body) when the request lands on
+        # the desktop client, even though the docs only mention 204.
+        if status in {200, 202, 204}:
             self._message = f"spotify repeat {target_mode}"
             return True
-        self._message = "spotify repeat failed"
+        self._message = f"spotify repeat failed (status {status})"
         return False
 
     def toggle_shuffle(self) -> bool:
@@ -290,10 +293,10 @@ class SpotifyController:
             "/me/player/shuffle",
             params={"state": "true" if target_state else "false"},
         )
-        if status == 204:
+        if status in {200, 202, 204}:
             self._message = f"spotify shuffle {'on' if target_state else 'off'}"
             return True
-        self._message = "spotify shuffle failed"
+        self._message = f"spotify shuffle failed (status {status})"
         return False
 
     def get_volume(self) -> int | None:
