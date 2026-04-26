@@ -269,7 +269,14 @@ class LiveViewWindow(QMainWindow):
     def attach_to_worker(self, worker: Optional[object]) -> None:
         if self._worker is worker:
             return
-        self.detach_from_worker()
+        # Hold the last visible frame across worker transitions
+        # (camera hot-swap). detach_from_worker would blank to the
+        # "Press START" idle text mid-session, which surprises users.
+        if self._worker is not None:
+            try:
+                self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
+            except Exception:
+                pass
         self._worker = worker
         if self._worker is None:
             self._set_idle_state()

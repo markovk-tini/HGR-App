@@ -207,11 +207,24 @@ class SpotifyController:
             return self.pause()
         return self.play()
 
+    def _device_params(self) -> dict[str, Any] | None:
+        """Build a `?device_id=...` param dict from the device we
+        activated during ensure_ready. Spotify Web API returns 404
+        NO_ACTIVE_DEVICE on /me/player/play and friends when no
+        device is currently 'active' from Spotify's perspective —
+        which can happen for a few seconds after transferring
+        playback to a freshly-launched desktop client. Routing the
+        command explicitly to the device_id we set up bypasses
+        that race entirely."""
+        if not self._device_id:
+            return None
+        return {"device_id": self._device_id}
+
     def play(self) -> bool:
         if not self.ensure_ready(open_if_needed=True):
             self._message = "spotify play failed (not ready)"
             return False
-        status, body = self._request_json("PUT", "/me/player/play")
+        status, body = self._request_json("PUT", "/me/player/play", params=self._device_params())
         # Spotify can answer with 200 (with playback-state body) when
         # the request lands on the desktop client, in addition to the
         # documented 202/204. Treat all three as success so the
@@ -235,7 +248,7 @@ class SpotifyController:
         if not self.ensure_ready(open_if_needed=False):
             self._message = "spotify pause failed (not ready)"
             return False
-        status, body = self._request_json("PUT", "/me/player/pause")
+        status, body = self._request_json("PUT", "/me/player/pause", params=self._device_params())
         if status in {200, 202, 204}:
             self._message = "spotify pause"
             return True
@@ -251,28 +264,33 @@ class SpotifyController:
     def next_track(self) -> bool:
         if not self.ensure_ready(open_if_needed=True):
             return False
-        status, _ = self._request_json("POST", "/me/player/next")
+        status, _ = self._request_json("POST", "/me/player/next", params=self._device_params())
         if status in {200, 202, 204}:
             self._message = "spotify next track"
             return True
-        self._message = "spotify next failed"
+        self._message = f"spotify next failed (status {status})"
         return False
 
     def previous_track(self) -> bool:
         if not self.ensure_ready(open_if_needed=True):
             return False
-        status, _ = self._request_json("POST", "/me/player/previous")
+        status, _ = self._request_json("POST", "/me/player/previous", params=self._device_params())
         if status in {200, 202, 204}:
             self._message = "spotify previous track"
             return True
-        self._message = "spotify previous failed"
+        self._message = f"spotify previous failed (status {status})"
         return False
 
     def toggle_repeat_track(self) -> bool:
         player = self.get_player_state()
         current_mode = (player or {}).get("repeat_state")
         target_mode = "off" if current_mode == "track" else "track"
-        status, _ = self._request_json("PUT", "/me/player/repeat", params={"state": target_mode})
+        # Merge state with device_id so the request both targets the
+        # right device and avoids NO_ACTIVE_DEVICE 404s.
+        params = {"state": target_mode}
+        if self._device_id:
+            params["device_id"] = self._device_id
+        status, _ = self._request_json("PUT", "/me/player/repeat", params=params)
         # Same Spotify quirk as play/pause/next/prev: status can come
         # back as 200 (with non-JSON body) when the request lands on
         # the desktop client, even though the docs only mention 204.
@@ -288,11 +306,10 @@ class SpotifyController:
             return False
         current_state = bool((player or {}).get("shuffle_state"))
         target_state = not current_state
-        status, _ = self._request_json(
-            "PUT",
-            "/me/player/shuffle",
-            params={"state": "true" if target_state else "false"},
-        )
+        params = {"state": "true" if target_state else "false"}
+        if self._device_id:
+            params["device_id"] = self._device_id
+        status, _ = self._request_json("PUT", "/me/player/shuffle", params=params)
         if status in {200, 202, 204}:
             self._message = f"spotify shuffle {'on' if target_state else 'off'}"
             return True

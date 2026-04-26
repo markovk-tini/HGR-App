@@ -5389,7 +5389,15 @@ class MainWindow(QMainWindow):
 
     def open_debugger(self) -> None:
             self._hide_mini_live_viewer()
-            if self._worker is not None and self._worker.is_running:
+            # Prefer the LiveViewWindow whenever a worker exists at all.
+            # Previously this required `worker.is_running` to be True,
+            # but during a hot-swap there's a 1-3s window after start()
+            # while the camera opens where the flag is still False —
+            # clicking enlarge in that gap fell into the standalone-
+            # debugger fallback (which has its own camera + Restart
+            # Camera button), surprising users who'd just saved a
+            # camera change and expected the normal live view.
+            if self._worker is not None:
                 self._ensure_live_view_window()
                 if self.live_view_window is None:
                     return

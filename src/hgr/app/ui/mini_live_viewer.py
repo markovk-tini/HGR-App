@@ -152,7 +152,16 @@ class MiniLiveViewer(QWidget):
     def attach_to_worker(self, worker: Optional[object]) -> None:
         if self._worker is worker:
             return
-        self.detach_from_worker()
+        # When transitioning between workers (camera hot-swap), keep
+        # the previous frame on screen until the new worker emits one.
+        # Calling detach_from_worker here would blank to the "Press
+        # START" idle text, which is misleading mid-session — the user
+        # just saved a camera change, didn't ask to start over.
+        if self._worker is not None:
+            try:
+                self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
+            except Exception:
+                pass
         self._worker = worker
         if self._worker is None:
             self._set_idle_state()
