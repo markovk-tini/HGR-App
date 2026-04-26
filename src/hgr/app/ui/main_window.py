@@ -2413,6 +2413,37 @@ class _RefreshingCameraCombo(QComboBox):
         super().showPopup()
 
 
+class _CameraInventoryThread(QThread):
+    """Enumerates available cameras off the GUI thread.
+
+    OpenCV's cv2.VideoCapture(idx) probe takes ~150-500ms per slot
+    on Windows (longer when virtual webcam drivers are installed),
+    so a synchronous scan of 8 slots can lock up the UI for several
+    seconds. This worker runs the scan in the background and emits
+    one signal with the resulting list — caller can use the cached
+    list to populate the dropdown immediately and replace it when
+    the fresh list arrives.
+    """
+
+    finished_with_inventory = Signal(object)   # list[CameraInfo]
+
+    def __init__(self, scan_limit: int, parent=None) -> None:
+        super().__init__(parent)
+        self._scan_limit = int(scan_limit)
+
+    def run(self) -> None:
+        try:
+            from ..camera.camera_utils import list_available_cameras
+        except Exception:
+            self.finished_with_inventory.emit([])
+            return
+        try:
+            cams = list_available_cameras(self._scan_limit)
+        except Exception:
+            cams = []
+        self.finished_with_inventory.emit(list(cams))
+
+
 class _PhoneCameraTestThread(QThread):
     """Background probe for the "Use phone camera" Test button.
 
@@ -3053,10 +3084,15 @@ class MainWindow(QMainWindow):
         self.camera_combo.setObjectName("settingsCameraCombo")
         # Refresh the device list right before the user sees the list —
         # plugging in a new webcam between app-launch and opening Settings
-        # shouldn't require a separate "Search Devices" click.
-        self.camera_combo.popup_about_to_show.connect(
-            lambda: self.refresh_camera_inventory(update_status=True, notify=False)
-        )
+        # shouldn't require a separate "Search Devices" click. Runs on a
+        # background thread (cv2.VideoCapture probes are 150-500ms each
+        # and would freeze the UI for ~2-4s with the default scan limit
+        # of 8). The dropdown shows the existing cached list immediately;
+        # when the fresh scan finishes, the combo gets repopulated in
+        # place. If a scan is already in flight, additional popups
+        # don't kick off duplicate scans.
+        self._camera_inventory_thread: _CameraInventoryThread | None = None
+        self.camera_combo.popup_about_to_show.connect(self._kick_off_async_camera_refresh)
         box_layout.addWidget(self.camera_combo)
 
         note = QLabel(
@@ -4943,6 +4979,33 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Touchless", "No available cameras were found.")
         return self._discovered_cameras
 
+    def _kick_off_async_camera_refresh(self) -> None:
+        """Start a background camera enumeration. Called when the user
+        opens the camera dropdown — keeps the UI responsive while
+        OpenCV probes each device slot (which can take 1-3 seconds in
+        total when virtual webcam drivers are installed).
+
+        If a scan is already running, this is a no-op so a fast user
+        opening the dropdown twice doesn't queue duplicate threads."""
+        if self._camera_inventory_thread is not None and self._camera_inventory_thread.isRunning():
+            return
+        scan_limit = int(getattr(self.config, "camera_scan_limit", 8))
+        thread = _CameraInventoryThread(scan_limit, parent=self)
+        thread.finished_with_inventory.connect(self._on_async_camera_refresh_done)
+        thread.finished.connect(thread.deleteLater)
+        self._camera_inventory_thread = thread
+        thread.start()
+
+    def _on_async_camera_refresh_done(self, cameras_obj: object) -> None:
+        try:
+            cameras = list(cameras_obj or [])
+        except TypeError:
+            cameras = []
+        self._discovered_cameras = cameras
+        self._rebuild_camera_combo()
+        self._refresh_camera_labels()
+        self._camera_inventory_thread = None
+
     def _rebuild_camera_combo(self) -> None:
         if not hasattr(self, "camera_combo"):
             return
@@ -5193,7 +5256,55 @@ class MainWindow(QMainWindow):
                 return
 
             if self._worker is not None:
-                self._worker.stop()
+                # Disconnect every signal from the old worker BEFORE
+                # stopping it. Without this, when the old worker's
+                # thread finally exits and emits `running_state_changed
+                # (False)`, our `_cleanup_thread_if_stopped` handler
+                # fires — but by then we've already swapped in a new
+                # worker, so the cleanup detaches the mini viewer from
+                # the NEW (running) worker. User-visible bug: after a
+                # camera hot-swap, the mini viewer keeps showing the
+                # last frame from the old camera until they enlarge
+                # to the debugger and back. Disconnecting first avoids
+                # the lingering-emit race entirely.
+                old_worker = self._worker
+                try:
+                    old_worker.status_changed.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.command_detected.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.camera_selected.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.error_occurred.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.running_state_changed.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.debug_frame_ready.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.save_prompt_completed.disconnect()
+                except Exception:
+                    pass
+                try:
+                    old_worker.action_history_changed.disconnect()
+                except Exception:
+                    pass
+                if self.mini_live_viewer is not None:
+                    self.mini_live_viewer.detach_from_worker()
+                if self.live_view_window is not None:
+                    self.live_view_window.detach_from_worker()
+                old_worker.stop()
 
             # A phone camera source must override the dropdown-selected
             # local device. GestureWorker treats a non-None
