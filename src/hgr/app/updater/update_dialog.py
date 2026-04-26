@@ -50,6 +50,62 @@ class UpdateDialog(QDialog):
         self.setWindowTitle("Touchless Update Available")
         self.setMinimumWidth(460)
         self.setSizeGripEnabled(False)
+        # Apply the Touchless dark-blue theme to the dialog itself so
+        # the light/white text the rest of the build uses stays
+        # legible. Without this, the dialog inherits the Windows
+        # system palette (light grey/white background) and the white
+        # subtitle/title text becomes nearly invisible.
+        self.setStyleSheet(
+            "QDialog {"
+            "  background: #0B3D91;"
+            "  color: #E5F6FF;"
+            "}"
+            "QLabel {"
+            "  color: #E5F6FF;"
+            "}"
+            "QPushButton {"
+            "  background: #1DE9B6;"
+            "  color: #003d2a;"
+            "  border: none;"
+            "  border-radius: 8px;"
+            "  padding: 8px 14px;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "  background: #29f0c1;"
+            "}"
+            "QPushButton:disabled {"
+            "  background: rgba(255,255,255,0.18);"
+            "  color: rgba(255,255,255,0.55);"
+            "}"
+            "QPushButton:flat, QPushButton[flat=\"true\"] {"
+            "  background: transparent;"
+            "  color: rgba(255,255,255,0.78);"
+            "}"
+            "QPushButton:flat:hover, QPushButton[flat=\"true\"]:hover {"
+            "  background: transparent;"
+            "  color: white;"
+            "}"
+            "QTextBrowser {"
+            "  background: rgba(0,0,0,0.20);"
+            "  color: #E5F6FF;"
+            "  border: 1px solid rgba(255,255,255,0.12);"
+            "  border-radius: 6px;"
+            "  padding: 8px;"
+            "}"
+            "QProgressBar {"
+            "  background: rgba(0,0,0,0.30);"
+            "  color: #E5F6FF;"
+            "  border: 1px solid rgba(255,255,255,0.18);"
+            "  border-radius: 6px;"
+            "  height: 14px;"
+            "  text-align: center;"
+            "}"
+            "QProgressBar::chunk {"
+            "  background-color: #1DE9B6;"
+            "  border-radius: 5px;"
+            "}"
+        )
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -97,12 +153,24 @@ class UpdateDialog(QDialog):
 
         # Click-to-show changelog toggle. Hidden by default per the
         # spec: dialog stays compact until the user opts to read.
+        # objectName-targeted stylesheet so the global QPushButton
+        # rule doesn't cascade and turn this into a teal action button.
         self.toggle_button = QPushButton("Click to show what's new ▾")
+        self.toggle_button.setObjectName("toggleChangelog")
         self.toggle_button.setFlat(True)
+        self.toggle_button.setCursor(Qt.PointingHandCursor)
         self.toggle_button.setStyleSheet(
-            "QPushButton { color: rgba(255,255,255,0.75); font-size: 12px; "
-            "background: transparent; border: none; padding: 4px; } "
-            "QPushButton:hover { color: white; }"
+            "QPushButton#toggleChangelog {"
+            "  color: rgba(255,255,255,0.78);"
+            "  font-size: 12px;"
+            "  background: transparent;"
+            "  border: none;"
+            "  padding: 4px 8px;"
+            "}"
+            "QPushButton#toggleChangelog:hover {"
+            "  color: white;"
+            "  background: transparent;"
+            "}"
         )
         self.toggle_button.clicked.connect(self._on_toggle_changelog)
         toggle_row = QHBoxLayout()
@@ -137,11 +205,26 @@ class UpdateDialog(QDialog):
         self.status_label.setVisible(False)
         layout.addWidget(self.status_label)
 
-        # Later button on the bottom right per the user spec.
+        # Later button on the bottom right per the user spec. Styled
+        # as a secondary action so it doesn't compete visually with
+        # the primary teal Download button.
         bottom_row = QHBoxLayout()
         bottom_row.addStretch(1)
         self.later_button = QPushButton("Later")
-        self.later_button.setStyleSheet("padding: 6px 14px;")
+        self.later_button.setObjectName("laterButton")
+        self.later_button.setStyleSheet(
+            "QPushButton#laterButton {"
+            "  background: rgba(255,255,255,0.14);"
+            "  color: #E5F6FF;"
+            "  border: 1px solid rgba(255,255,255,0.28);"
+            "  border-radius: 8px;"
+            "  padding: 6px 14px;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton#laterButton:hover {"
+            "  background: rgba(255,255,255,0.22);"
+            "}"
+        )
         self.later_button.clicked.connect(self._on_later_clicked)
         bottom_row.addWidget(self.later_button)
         layout.addLayout(bottom_row)

@@ -122,12 +122,17 @@ class Updater(QObject):
     progress = Signal(int, str)        # percent (or -1), status text
     failed = Signal(str)
     ready_to_launch = Signal(str)      # path to downloaded installer
+    # Internal signal emitted by the worker thread when download
+    # completes. Connected to _on_download_complete so the slot runs
+    # on the GUI thread via Qt's automatic queued connection.
+    _download_finished = Signal(str)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._worker: _DownloadWorker | None = None
         self._target_path: Path | None = None
         self._info: Optional[ReleaseInfo] = None
+        self._download_finished.connect(self._on_download_complete)
 
     def start_download(self, info: ReleaseInfo) -> None:
         if not info.download_url:
@@ -155,16 +160,33 @@ class Updater(QObject):
                 pct = -1
                 mb_done = downloaded / (1024 * 1024)
                 msg = f"Downloading... {mb_done:.1f} MB"
-            QTimer.singleShot(0, lambda p=pct, m=msg: self.progress.emit(p, m))
+            # Emit the signal directly. Qt automatically uses a queued
+            # connection when the emitter and the receiver live on
+            # different threads, so the slot fires on the GUI thread.
+            # The previous QTimer.singleShot(0, ...) approach silently
+            # no-op'd because singleShot needs a running Qt event loop
+            # in the calling thread — which a plain threading.Thread
+            # doesn't have. Result: download never reported progress
+            # and stayed stuck on "Starting download...".
+            try:
+                self.progress.emit(pct, msg)
+            except Exception:
+                pass
 
         def done_cb(path: Path) -> None:
-            QTimer.singleShot(
-                0,
-                lambda p=str(path): self._on_download_complete(p),
-            )
+            # Emitting the internal signal from the worker thread
+            # automatically queues delivery onto the GUI thread (Qt's
+            # AutoConnection picks QueuedConnection across threads).
+            try:
+                self._download_finished.emit(str(path))
+            except Exception:
+                pass
 
         def failed_cb(reason: str) -> None:
-            QTimer.singleShot(0, lambda r=reason: self.failed.emit(r))
+            try:
+                self.failed.emit(reason)
+            except Exception:
+                pass
 
         self._worker = _DownloadWorker(
             url=info.download_url,
