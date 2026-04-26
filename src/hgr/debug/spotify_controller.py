@@ -209,8 +209,9 @@ class SpotifyController:
 
     def play(self) -> bool:
         if not self.ensure_ready(open_if_needed=True):
+            self._message = "spotify play failed (not ready)"
             return False
-        status, _ = self._request_json("PUT", "/me/player/play")
+        status, body = self._request_json("PUT", "/me/player/play")
         # Spotify can answer with 200 (with playback-state body) when
         # the request lands on the desktop client, in addition to the
         # documented 202/204. Treat all three as success so the
@@ -218,17 +219,33 @@ class SpotifyController:
         if status in {200, 202, 204}:
             self._message = "spotify play"
             return True
-        self._message = "spotify play failed"
+        # Diagnostic: record the actual status so we can see in the
+        # console what unexpected code came back. User-visible message
+        # stays terse so the toast doesn't blow out.
+        try:
+            import sys as _sys
+            _sys.stderr.write(f"[spotify] play got HTTP {status} body={body!r}\n")
+            _sys.stderr.flush()
+        except Exception:
+            pass
+        self._message = f"spotify play failed (status {status})"
         return False
 
     def pause(self) -> bool:
         if not self.ensure_ready(open_if_needed=False):
+            self._message = "spotify pause failed (not ready)"
             return False
-        status, _ = self._request_json("PUT", "/me/player/pause")
+        status, body = self._request_json("PUT", "/me/player/pause")
         if status in {200, 202, 204}:
             self._message = "spotify pause"
             return True
-        self._message = "spotify pause failed"
+        try:
+            import sys as _sys
+            _sys.stderr.write(f"[spotify] pause got HTTP {status} body={body!r}\n")
+            _sys.stderr.flush()
+        except Exception:
+            pass
+        self._message = f"spotify pause failed (status {status})"
         return False
 
     def next_track(self) -> bool:
