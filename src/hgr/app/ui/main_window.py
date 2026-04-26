@@ -3528,39 +3528,33 @@ class MainWindow(QMainWindow):
     def _restart_camera_for_phone_toggle(self) -> None:
         """Stop and re-start the engine so the new camera source is picked up.
 
-        The engine evaluates phone_camera_enabled / phone_camera_url inside
-        `_open_camera()`, which only runs during `start()`. Calling start()
-        while already running is a no-op, so we must stop first.
+        Routes through start_engine(skip_tutorial_prompt=True) so the
+        full hot-swap path (signal-disconnect-before-stop, viewer
+        continuity, proper worker replacement) is used. The previous
+        implementation called worker.stop() + worker.start() on the
+        same instance, which fired running_state_changed(False) and
+        triggered _cleanup_thread_if_stopped, blanking the mini and
+        live viewers to 'Press START to begin' idle text mid-swap.
         """
         worker = getattr(self, "_worker", None)
         if worker is None:
             return
-        stop_fn = getattr(worker, "stop", None)
-        start_fn = getattr(worker, "start", None)
-        set_phone = getattr(worker, "set_phone_camera_capture", None)
-        if callable(set_phone):
-            # Always inform the engine of the current phone-camera-QR
-            # capture (or None), BEFORE start() so _open_camera() sees it.
-            qr_server = self._current_phone_camera_qr_server()
-            qr_capture = qr_server.capture if qr_server is not None else None
-            if not bool(getattr(self.config, "phone_camera_qr_active", False)):
-                qr_capture = None
-            try:
-                set_phone(qr_capture)
-            except Exception:
-                pass
-        # Similarly sync the phone-microphone source for the voice pipeline.
-        self._apply_phone_mic_preference()
-        if callable(stop_fn):
-            try:
-                stop_fn()
-            except Exception:
-                pass
-        if callable(start_fn):
-            try:
-                start_fn()
-            except Exception:
-                pass
+        try:
+            self.start_engine(skip_tutorial_prompt=True)
+        except Exception:
+            # Fall back to the old behavior if anything goes wrong.
+            stop_fn = getattr(worker, "stop", None)
+            start_fn = getattr(worker, "start", None)
+            if callable(stop_fn):
+                try:
+                    stop_fn()
+                except Exception:
+                    pass
+            if callable(start_fn):
+                try:
+                    start_fn()
+                except Exception:
+                    pass
 
     def _refresh_low_fps_button_label(self) -> None:
         if not hasattr(self, "low_fps_button"):
