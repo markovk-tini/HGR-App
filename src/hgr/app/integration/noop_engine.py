@@ -490,6 +490,7 @@ class GestureWorker(QObject):
         self._voice_latched_label: str | None = None
         self._voice_one_two_triggered_at: float = 0.0
         self._left_hand_prediction = None
+        self._left_hand_streak_since = 0.0
         self._voice_queue: queue.Queue[tuple[int, object]] = queue.Queue()
         self._voice_thread: threading.Thread | None = None
         self._voice_request_id = 0
@@ -2750,16 +2751,16 @@ class GestureWorker(QObject):
         monotonic_now = time.monotonic()
         result = self._normalize_result_right_primary(result)
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None
-        # Only treat a hand as "left" when BOTH hands are visible —
-        # one labeled Left and one labeled Right. MediaPipe will
-        # confidently label a single visible right hand as "Left"
-        # in some poses (the model only sees the hand silhouette,
-        # not the user's body), which used to trigger voice
-        # listening unexpectedly while doing right-hand-only
-        # gestures. Requiring two distinct hands eliminates the
-        # ambiguity at the cost of users who actually want to use
-        # the voice trigger one-handed (rare; they can keep their
-        # other hand in the frame).
+        # MediaPipe occasionally labels a single visible right hand
+        # as "Left" when only one hand is in frame and the silhouette
+        # could go either way. Two protections layered here:
+        #   - When both hands are visible (one Left, one Right),
+        #     trust the labels immediately — that's unambiguous.
+        #   - For single-hand-Left, require ~0.3s of stable Left
+        #     labeling before treating it as the user's actual left
+        #     hand. A glitchy single-frame misidentification during
+        #     a right-hand gesture won't survive 0.3s of consistent
+        #     re-labeling, so voice doesn't fire spuriously.
         left_prediction = None
         secondary = getattr(result, "secondary_tracked_hand", None)
         sec_handedness = secondary.handedness if secondary is not None else None
@@ -2769,11 +2770,25 @@ class GestureWorker(QObject):
             and sec_handedness in {"Left", "Right"}
             and hand_handedness != sec_handedness
         )
+        candidate_left_prediction = None
         if both_hands_visible:
             if hand_handedness == "Left":
-                left_prediction = result.prediction
+                candidate_left_prediction = result.prediction
             else:
-                left_prediction = getattr(result, "secondary_prediction", None)
+                candidate_left_prediction = getattr(result, "secondary_prediction", None)
+        elif result.found and hand_handedness == "Left":
+            candidate_left_prediction = result.prediction
+
+        if candidate_left_prediction is not None:
+            if self._left_hand_streak_since <= 0.0:
+                self._left_hand_streak_since = monotonic_now
+            # Two-hand cases are unambiguous so skip the stability
+            # gate. Single-hand cases need ~0.3s of stable Left
+            # labeling before we act on them.
+            if both_hands_visible or (monotonic_now - self._left_hand_streak_since) >= 0.30:
+                left_prediction = candidate_left_prediction
+        else:
+            self._left_hand_streak_since = 0.0
         self._left_hand_prediction = left_prediction
         if self._gestures_enabled:
             if self._drawing_mode_enabled:
