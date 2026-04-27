@@ -315,26 +315,33 @@ class Updater(QObject):
             return False
 
         try:
-            # Use ShellExecuteW (via os.startfile) instead of
-            # subprocess.Popen with custom creationflags. The
-            # DETACHED_PROCESS | CREATE_NO_WINDOW combo we used
-            # before silently failed to actually run the bat on the
-            # tester's Windows config — Touchless exited cleanly,
-            # the process appeared to be spawned, but the bat never
-            # executed (zip never extracted, app never relaunched).
+            # Use ShellExecuteW directly (not os.startfile) so we can
+            # pass SW_HIDE — that hides the console window the .bat
+            # would normally flash up. Same launch mechanism Windows
+            # Explorer uses for a double-clicked file (which we
+            # verified works), but invisible.
             #
-            # ShellExecuteW is the same mechanism Windows Explorer
-            # uses when the user double-clicks the .bat — we verified
-            # that path works, so route through it. The brief console
-            # window that flashes is acceptable since the app is
-            # closing anyway and the visible feedback is actually
-            # useful (the user sees that *something* is happening
-            # rather than the app silently disappearing).
-            _plog(f"calling os.startfile({helper_path})")
-            os.startfile(str(helper_path))
-            _plog("os.startfile returned successfully")
+            # Explicit invocation as `cmd.exe /c <bat>` so SW_HIDE
+            # applies to the cmd console hosting the bat. (If we
+            # passed the .bat directly to ShellExecuteW with SW_HIDE,
+            # cmd.exe would still allocate its own visible console
+            # because that's what the .bat shell association does.)
+            _plog(f"calling ShellExecuteW with SW_HIDE for {helper_path}")
+            params = f'/c "{helper_path}"'
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None,           # hwnd
+                "open",         # verb
+                "cmd.exe",      # file
+                params,         # parameters
+                None,           # working dir (None = inherit)
+                0,              # SW_HIDE
+            )
+            _plog(f"ShellExecuteW returned {ret} (>32 means success)")
+            if ret <= 32:
+                _plog(f"FAIL: ShellExecuteW returned {ret}, treating as failure")
+                return False
         except Exception as exc:
-            _plog(f"FAIL: os.startfile raised {type(exc).__name__}: {exc!s}")
+            _plog(f"FAIL: ShellExecuteW raised {type(exc).__name__}: {exc!s}")
             return False
 
         _plog("scheduling _quit_app")
@@ -420,7 +427,7 @@ class Updater(QObject):
                 "\"Expand-Archive -LiteralPath '%UPDATE_ZIP%' -DestinationPath '%STAGING%' -Force\""
                 " >>\"%LOG%\" 2>&1\r\n"
                 "if errorlevel 1 (\r\n"
-                "  echo [error] Expand-Archive failed (errorlevel %errorlevel%) >> \"%LOG%\"\r\n"
+                "  echo [error] Expand-Archive failed errorlevel=!errorlevel! >> \"%LOG%\"\r\n"
                 "  goto fail\r\n"
                 ")\r\n"
                 "if not exist \"%STAGING%\\Touchless.exe\" (\r\n"
@@ -433,7 +440,7 @@ class Updater(QObject):
                 " >>\"%LOG%\" 2>&1\r\n"
                 "rem robocopy uses bitmask exit codes; >=8 means failure.\r\n"
                 "if !errorlevel! geq 8 (\r\n"
-                "  echo [error] robocopy failed (errorlevel !errorlevel!) >> \"%LOG%\"\r\n"
+                "  echo [error] robocopy failed errorlevel=!errorlevel! >> \"%LOG%\"\r\n"
                 "  goto fail\r\n"
                 ")\r\n"
                 "\r\n"
