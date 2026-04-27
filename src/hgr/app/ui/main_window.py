@@ -2559,6 +2559,57 @@ class TouchlessNotice(QDialog):
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API name)
+        super().showEvent(event)
+        # Color the OS title bar to match the Touchless app theme so
+        # the popup looks like a native Touchless window. Uses
+        # DwmSetWindowAttribute with DWMWA_CAPTION_COLOR (added in
+        # Windows 11 build 22000) — silently no-ops on Windows 10
+        # which is acceptable since the dialog body is themed
+        # regardless and the system title bar is just a small accent.
+        try:
+            self._apply_dwm_caption_color()
+        except Exception:
+            pass
+
+    def _apply_dwm_caption_color(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return
+        hwnd = int(self.winId())
+        if not hwnd:
+            return
+        # DWMWA_CAPTION_COLOR = 35, DWMWA_TEXT_COLOR = 36
+        # Color is COLORREF (0x00BBGGRR). Touchless primary blue is
+        # #0B3D91 → R=0x0B, G=0x3D, B=0x91 → COLORREF=0x00913D0B.
+        # Text color = #E5F6FF → 0x00FFF6E5.
+        DWMWA_CAPTION_COLOR = 35
+        DWMWA_TEXT_COLOR = 36
+        caption = ctypes.c_uint32(0x00913D0B)
+        text = ctypes.c_uint32(0x00FFF6E5)
+        try:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint32(DWMWA_CAPTION_COLOR),
+                ctypes.byref(caption),
+                ctypes.sizeof(caption),
+            )
+        except Exception:
+            pass
+        try:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint32(DWMWA_TEXT_COLOR),
+                ctypes.byref(text),
+                ctypes.sizeof(text),
+            )
+        except Exception:
+            pass
+
     @staticmethod
     def show_info(parent, title: str, message: str) -> None:
         dlg = TouchlessNotice(parent, title, message, kind="info")
@@ -5312,13 +5363,14 @@ class MainWindow(QMainWindow):
                 f"Camera preference saved.\n\nTouchless is currently using your phone's camera over "
                 f"the URL stream ({url}). The local device above is saved as a fallback."
             )
-        elif selected_index is None:
+        elif selected_data is None:
             self.last_action_label.setText("Last action: camera set to auto-select")
             confirmation = (
                 "Camera preference saved. Touchless will pick the best available camera at startup."
             )
         else:
-            label = selected_name if selected_name else f"index {selected_index}"
+            # selected_data here is an int (local camera index).
+            label = selected_name if selected_name else f"index {selected_data}"
             self.last_action_label.setText(f"Last action: saved camera {label}")
             confirmation = (
                 f"Camera preference saved. Touchless will now use:\n\n{label}"
