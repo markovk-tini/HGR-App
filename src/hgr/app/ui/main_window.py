@@ -891,8 +891,157 @@ class GestureGuideCard(QFrame):
         layout.addLayout(text_layout, 1)
 
 
+class VoiceCommandCard(QFrame):
+    """Text-only card describing a voice command pattern. Sits in the
+    Control Guide alongside GestureGuideCard but renders without
+    media — voice commands don't have a visual demo, so we show the
+    phrase pattern, what it does, and a list of recognized
+    variations the user can say."""
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        action: str,
+        examples: list[str],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("innerCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("gestureCardTitle")
+        title_label.setWordWrap(True)
+        layout.addWidget(title_label)
+
+        action_label = QLabel(f"Action: {action}")
+        action_label.setObjectName("gestureCardSubtitle")
+        action_label.setWordWrap(True)
+        layout.addWidget(action_label)
+
+        examples_header = QLabel("Examples (any of these phrases work)")
+        examples_header.setObjectName("gestureCardSubtitle")
+        layout.addWidget(examples_header)
+
+        for ex in examples:
+            bullet = QLabel(f"• “{ex}”")
+            bullet.setObjectName("gestureCardBody")
+            bullet.setWordWrap(True)
+            layout.addWidget(bullet)
+
+
+def _build_voice_command_cards() -> list[VoiceCommandCard]:
+    """Catalog of recognized voice-command patterns shown in the
+    Control Guide. Each card lists alternative phrasings the
+    voice processor accepts so users discover variations they can
+    say without trial-and-error.
+
+    Keep this list aligned with the actual recognition rules in
+    `voice/command_processor.py` — if we add a new verb or app
+    alias there, also update the example list here so the guide
+    stays accurate."""
+    return [
+        VoiceCommandCard(
+            title="Open / focus an app",
+            action="Launches the named app, or brings it to focus if already running.",
+            examples=[
+                "open spotify",
+                "launch chrome",
+                "fire up discord",
+                "boot up steam",
+                "show me settings",
+                "bring up file explorer",
+                "switch to outlook",
+                "go to chatgpt",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Play music on Spotify",
+            action="Plays a song / artist / playlist on Spotify (opens it first if needed).",
+            examples=[
+                "play master of puppets",
+                "play master of puppets by metallica",
+                "play feel-good playlist on spotify",
+                "put on some lo-fi",
+                "queue up daft punk",
+                "play random",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Spotify track / shuffle / repeat",
+            action="Skip, go back, or toggle shuffle/repeat on the current Spotify session.",
+            examples=[
+                "next song",
+                "skip this track",
+                "previous song",
+                "go back",
+                "shuffle on",
+                "shuffle off",
+                "repeat this track",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Add / remove from Spotify playlist",
+            action="Manage the currently-playing track against a named playlist or your library.",
+            examples=[
+                "add this to my workout playlist",
+                "remove this song from my playlist",
+                "save this track",
+                "add to queue",
+                "remove from queue",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Volume control",
+            action="Set system or app volume by amount or percentage.",
+            examples=[
+                "volume up",
+                "volume down",
+                "volume to 50 percent",
+                "set volume to 30",
+                "mute",
+                "unmute",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Search / open content",
+            action="Searches the web or opens the named site.",
+            examples=[
+                "search for python tutorials",
+                "look up best pizza nearby",
+                "go to github",
+                "navigate to gmail",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Dictation mode",
+            action="Triggered by holding LEFT-hand two; not a voice command per se. Speak naturally; pauses become spaces. Spoken punctuation: 'comma', 'period', 'question mark', 'new line', 'new paragraph'.",
+            examples=[
+                "Hey there comma how's it going question mark",
+                "Final report period new paragraph First section colon",
+                "Stopped by left-hand fist or another left-hand two.",
+            ],
+        ),
+        VoiceCommandCard(
+            title="Triggering a voice command",
+            action="Hold LEFT-hand one for ~0.5s. Touchless will say 'Listening', record up to 12 seconds, transcribe, and execute. Cancel any time with LEFT-hand fist.",
+            examples=[
+                "(no phrase — this card describes how to start the listener)",
+            ],
+        ),
+    ]
+
+
 class GestureGuideSection(QFrame):
-    def __init__(self, title: str, cards: list[GestureGuideCard], parent=None):
+    """Collapsible section in the Control Guide. Originally just for
+    GestureGuideCard rows, now also accepts VoiceCommandCard rows
+    via the same `cards` list (any QWidget works since we just
+    stack them in a QVBoxLayout)."""
+
+    def __init__(self, title: str, cards: list, parent=None):
         super().__init__(parent)
         self.setObjectName("gestureGuideSection")
         outer = QVBoxLayout(self)
@@ -1247,6 +1396,7 @@ def build_gesture_guide_content_widget(parent=None) -> QWidget:
 
     sections_layout.addWidget(GestureGuideSection("Static Gestures", _build_gesture_guide_static_cards()))
     sections_layout.addWidget(GestureGuideSection("Dynamic Gestures", _build_gesture_guide_dynamic_cards()))
+    sections_layout.addWidget(GestureGuideSection("Voice Commands", _build_voice_command_cards()))
     sections_layout.addStretch(1)
     return container
 
@@ -2956,7 +3106,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._settings_search_input)
 
         instructions_button = SettingsNavButton("Instructions", SECTION_INSTRUCTIONS, self)
-        gestures_button = SettingsNavButton("Gesture Guide", SECTION_GESTURES, self)
+        gestures_button = SettingsNavButton("Control Guide", SECTION_GESTURES, self)
         custom_gesture_button = SettingsNavButton("Custom Gesture", SECTION_CUSTOM_GESTURE, self)
         camera_button = SettingsNavButton("Camera", SECTION_CAMERA, self)
         microphone_button = SettingsNavButton("Microphone", SECTION_MICROPHONE, self)
@@ -2977,7 +3127,7 @@ class MainWindow(QMainWindow):
         ]
         self._settings_nav_search_keywords = {
             instructions_button: "instructions quick start help guide overview",
-            gestures_button: "gesture guide swipe wheel mouse volume drawing spotify chrome youtube",
+            gestures_button: "control guide gesture voice command swipe wheel mouse volume drawing spotify chrome youtube dictation open launch play next previous",
             custom_gesture_button: "custom gesture create record new",
             camera_button: "camera webcam device fps resolution auto-select low-fps",
             microphone_button: "microphone mic input gain audio voice whisper sapi",
@@ -3044,7 +3194,7 @@ class MainWindow(QMainWindow):
     def _build_instructions_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Instructions",
-            "Touchless lets you control Spotify, Chrome, mouse input, volume, and voice features from a live camera feed. Use this page as the quick start, Gesture Guide for the full control map, and Tutorial for the guided walkthrough.",
+            "Touchless lets you control Spotify, Chrome, mouse input, volume, and voice features from a live camera feed. Use this page as the quick start, Control Guide for the full gesture + voice command map, and Tutorial for the guided walkthrough.",
         )
         info_box = QFrame()
         info_box.setObjectName("innerCard")
@@ -3069,8 +3219,10 @@ class MainWindow(QMainWindow):
 
     def _build_gesture_guide_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
-            "Gesture Guide",
-            "Open a section below to view each gesture and how to perform it.",
+            "Control Guide",
+            "Open a section below to view each control and how to use it. "
+            "Static gestures are held poses; dynamic gestures are motion-based; "
+            "voice commands are spoken phrases recognized after the listener trigger.",
         )
 
         info_box = QFrame()
@@ -3079,7 +3231,9 @@ class MainWindow(QMainWindow):
         info_layout.setContentsMargins(14, 12, 14, 12)
         info_layout.setSpacing(4)
         note = QLabel(
-            "Static gestures are held poses. Dynamic gestures are moving gestures or motion-based controls."
+            "Static gestures = held hand poses. "
+            "Dynamic gestures = motion-based (swipes, circles, slides). "
+            "Voice commands = phrases spoken after holding LEFT-hand 'one' to start the listener."
         )
         note.setWordWrap(True)
         info_layout.addWidget(note)
