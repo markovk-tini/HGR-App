@@ -2633,11 +2633,27 @@ class MainWindow(QMainWindow):
         self._update_checker.start()
 
     def _on_update_available(self, info) -> None:
+        # Skip-this-version: if the user clicked Later on this same
+        # release (or one strictly newer that they later dismissed),
+        # don't pester them on every launch. Re-prompt only when
+        # GitHub ships a newer version than the dismissed one.
+        try:
+            from ..updater.release_checker import _parse_version_tuple
+            dismissed = str(getattr(self.config, "last_dismissed_update_version", "") or "").strip()
+            if dismissed:
+                if _parse_version_tuple(info.version) <= _parse_version_tuple(dismissed):
+                    return
+        except Exception:
+            pass
+
         from ..updater.update_dialog import UpdateDialog
         from ..updater import Updater
         self._update_dialog = UpdateDialog(info, parent=self)
         self._updater = Updater(parent=self)
         self._update_dialog.download_requested.connect(self._updater.start_download)
+        self._update_dialog.dismissed.connect(
+            lambda v=info.version: self._on_update_dismissed(v)
+        )
         self._updater.progress.connect(
             lambda pct, msg: self._update_dialog.set_progress(pct, msg)
             if self._update_dialog is not None else None
@@ -2650,6 +2666,16 @@ class MainWindow(QMainWindow):
         self._update_dialog.show()
         self._update_dialog.raise_()
         self._update_dialog.activateWindow()
+
+    def _on_update_dismissed(self, version: str) -> None:
+        """User clicked Later. Persist the dismissed version so the
+        next launch doesn't re-prompt for the same release. A newer
+        release will still trigger the dialog."""
+        try:
+            self.config.last_dismissed_update_version = str(version or "")
+            save_config(self.config)
+        except Exception:
+            pass
 
     def _on_installer_ready(self, path: str) -> None:
         # apply_update_and_exit dispatches based on the update kind
@@ -3186,6 +3212,11 @@ class MainWindow(QMainWindow):
         qr_row.addStretch(1)
         box_layout.addLayout(qr_row)
 
+        # Legacy checkbox kept hidden — the camera dropdown is now
+        # the single source-of-truth control (a "Phone Camera (QR)"
+        # entry appears in it when paired). The hidden widget keeps
+        # existing toggle-handler code paths from breaking until we
+        # do a full cleanup pass.
         self.use_phone_camera_qr_checkbox = QCheckBox("Use phone camera (QR) as source")
         self.use_phone_camera_qr_checkbox.setObjectName("usePhoneQrCheckbox")
         self.use_phone_camera_qr_checkbox.setStyleSheet(
@@ -3194,6 +3225,7 @@ class MainWindow(QMainWindow):
         self.use_phone_camera_qr_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_active", False)))
         self.use_phone_camera_qr_checkbox.setEnabled(already_paired)
         self.use_phone_camera_qr_checkbox.toggled.connect(self._on_use_phone_camera_qr_toggled)
+        self.use_phone_camera_qr_checkbox.setVisible(False)
         box_layout.addWidget(self.use_phone_camera_qr_checkbox)
 
         self.phone_camera_qr_status_label = QLabel(
@@ -3397,6 +3429,11 @@ class MainWindow(QMainWindow):
         self.phone_camera_qr_status_label.setText(f"Paired — {server.info.url}")
         self.phone_camera_qr_disconnect_button.setVisible(True)
         self.phone_camera_qr_button.setText("Show QR Code")
+        # Rebuild camera dropdown so the new "Phone Camera (QR)"
+        # entry appears, then select it (since this pair flow sets
+        # phone_camera_qr_active=True above).
+        self._rebuild_camera_combo()
+        self._refresh_camera_combo_selection(self._PHONE_CAMERA_DROPDOWN_VALUE)
         self._restart_camera_for_phone_toggle()
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText("Last action: phone camera paired via QR")
@@ -3438,6 +3475,11 @@ class MainWindow(QMainWindow):
         self.config.phone_camera_qr_use_mic = False
         save_config(self.config)
         self._apply_phone_mic_preference()
+        # Rebuild camera dropdown to drop the now-stale "Phone Camera
+        # (QR)" entry and snap selection back to whatever local
+        # preference was saved.
+        self._rebuild_camera_combo()
+        self._refresh_camera_combo_selection(self.config.preferred_camera_index)
         self._restart_camera_for_phone_toggle()
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText("Last action: phone camera (QR) unpaired")
@@ -4447,8 +4489,15 @@ class MainWindow(QMainWindow):
             notes.setMarkdown(body_text)
         except Exception:
             notes.setPlainText(body_text)
-        # Cap height so very long bodies don't blow out the panel.
-        notes.setMaximumHeight(180)
+        # Show more of each release at a glance — the previous
+        # 180px cap clipped most release bodies after about two
+        # bullet points. 360px fits ~10-12 lines comfortably; long
+        # bodies still scroll inside the QTextBrowser, but most
+        # users will see the whole changelog without needing to.
+        # The minimum keeps short releases from looking cramped
+        # next to fuller ones.
+        notes.setMinimumHeight(140)
+        notes.setMaximumHeight(360)
         v.addWidget(notes)
 
         return box
@@ -5000,6 +5049,12 @@ class MainWindow(QMainWindow):
         self._refresh_camera_labels()
         self._camera_inventory_thread = None
 
+    # Special data value the camera_combo carries for the "Phone
+    # Camera (QR)" entry. Any string here that won't collide with an
+    # int camera index. The save handler dispatches on type: int =
+    # local camera, "phone_qr" = phone QR source, None = auto-select.
+    _PHONE_CAMERA_DROPDOWN_VALUE = "phone_qr"
+
     def _rebuild_camera_combo(self) -> None:
         if not hasattr(self, "camera_combo"):
             return
@@ -5010,11 +5065,40 @@ class MainWindow(QMainWindow):
         for camera in self._discovered_cameras:
             self._camera_combo_lookup[camera.index] = self.camera_combo.count()
             self.camera_combo.addItem(camera.display_name, camera.index)
-        self._refresh_camera_combo_selection(self.config.preferred_camera_index)
+        # Phone camera (QR) is treated as just another camera source
+        # in this dropdown — only listed once a phone has been paired
+        # via the Connect Phone (QR) button. Selecting it and clicking
+        # Save sets phone_camera_qr_active=True; selecting a local
+        # device or Auto-select sets it back to False. This replaces
+        # the older "Use phone camera (QR) as source" checkbox so
+        # there's only one canonical "which camera am I using" control.
+        if bool(getattr(self.config, "phone_camera_qr_paired", False)):
+            self.camera_combo.addItem("Phone Camera (QR)", self._PHONE_CAMERA_DROPDOWN_VALUE)
+        # Honor an active phone selection when rebuilding (e.g. on
+        # combo refresh after the user just paired). If phone is
+        # active, select that entry; otherwise show preferred local
+        # index (or auto).
+        if (
+            bool(getattr(self.config, "phone_camera_qr_active", False))
+            and bool(getattr(self.config, "phone_camera_qr_paired", False))
+        ):
+            self._refresh_camera_combo_selection(self._PHONE_CAMERA_DROPDOWN_VALUE)
+        else:
+            self._refresh_camera_combo_selection(self.config.preferred_camera_index)
         self.camera_combo.blockSignals(False)
 
-    def _refresh_camera_combo_selection(self, camera_index: Optional[int]) -> None:
+    def _refresh_camera_combo_selection(self, camera_index) -> None:
+        """Move the combo cursor to the entry whose data matches
+        camera_index. Accepts an int local index, the
+        _PHONE_CAMERA_DROPDOWN_VALUE sentinel, or None for auto."""
         if not hasattr(self, "camera_combo"):
+            return
+        if isinstance(camera_index, str) and camera_index == self._PHONE_CAMERA_DROPDOWN_VALUE:
+            for i in range(self.camera_combo.count()):
+                if self.camera_combo.itemData(i) == self._PHONE_CAMERA_DROPDOWN_VALUE:
+                    self.camera_combo.setCurrentIndex(i)
+                    return
+            self.camera_combo.setCurrentIndex(0)
             return
         combo_index = 0 if camera_index is None else self._camera_combo_lookup.get(camera_index, 0)
         self.camera_combo.setCurrentIndex(combo_index)
@@ -5080,7 +5164,7 @@ class MainWindow(QMainWindow):
         return selected_index
 
     def save_camera_preference_from_settings(self) -> None:
-        selected_index = self.camera_combo.currentData()
+        selected_data = self.camera_combo.currentData()
         # Capture the friendly name from the combo BEFORE we lose
         # easy access to it, so the confirmation popup tells the user
         # exactly which camera is now their saved choice.
@@ -5089,13 +5173,39 @@ class MainWindow(QMainWindow):
             selected_name = str(self.camera_combo.currentText() or "").strip()
         except Exception:
             selected_name = ""
-        # Phone-camera state — overrides the local dropdown when on.
-        phone_qr_active = bool(getattr(self.config, "phone_camera_qr_active", False)) and self._current_phone_camera_qr_server() is not None
+
+        # Dispatch on combo data type:
+        #   string == _PHONE_CAMERA_DROPDOWN_VALUE → phone QR source
+        #   int                                    → local camera index
+        #   None                                   → auto-select
+        # Setting phone_camera_qr_active here is the new canonical
+        # control replacing the old "Use phone camera (QR) as
+        # source" checkbox.
+        chose_phone_qr = (
+            isinstance(selected_data, str)
+            and selected_data == self._PHONE_CAMERA_DROPDOWN_VALUE
+        )
+        if chose_phone_qr:
+            self.config.phone_camera_qr_active = True
+            # Leave preferred_camera_index unchanged so it can serve
+            # as fallback if the phone is turned off / unpaired.
+        else:
+            self.config.phone_camera_qr_active = False
+            self.config.preferred_camera_index = selected_data if isinstance(selected_data, int) else None
+
+        # Cache for confirmation popup wording.
+        phone_qr_active = chose_phone_qr and self._current_phone_camera_qr_server() is not None
         phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
 
-        self.config.preferred_camera_index = selected_index
         save_config(self.config)
         self._refresh_camera_labels()
+        # Sync the legacy checkbox UI to whatever we just decided so
+        # both controls stay coherent until we remove the checkbox
+        # in a future cleanup pass.
+        if hasattr(self, "use_phone_camera_qr_checkbox"):
+            self.use_phone_camera_qr_checkbox.blockSignals(True)
+            self.use_phone_camera_qr_checkbox.setChecked(chose_phone_qr)
+            self.use_phone_camera_qr_checkbox.blockSignals(False)
 
         # Hot-swap: if the engine is currently running, restart the
         # worker against the new camera so the user doesn't have to

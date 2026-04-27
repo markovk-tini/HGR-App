@@ -178,6 +178,13 @@ class AppConfig:
     # actually arrive.
     phone_camera_qr_use_mic: bool = False
     camera_source_is_mirrored: bool = False
+    # The last update version the user dismissed via "Later". Set when
+    # they click Later on the in-app update prompt. The next launch
+    # only re-shows the prompt if a STRICTLY NEWER release is on
+    # GitHub — clicking Later on v1.0.7 means "don't nag me about
+    # this version", but v1.0.8 still gets a prompt the moment it
+    # ships. Empty string = no version dismissed yet.
+    last_dismissed_update_version: str = ""
 
 
 DEFAULT_CONFIG = AppConfig()

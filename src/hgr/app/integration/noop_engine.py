@@ -4449,6 +4449,65 @@ class GestureWorker(QObject):
             return value
         return "..." + value[-(max_chars - 3):]
 
+    # Verbs in a parsed voice intent that map to "the user is asking
+    # us to OPEN something" (vs. play music, search, etc). Headline
+    # text for these flips from generic "Executing command" to
+    # "Launching <pretty app name>" so users see specifically what
+    # is being launched instead of a generic acknowledgment.
+    _LAUNCH_INTENT_ACTIONS = {
+        "open", "launch", "start", "run", "show", "boot",
+        "fire_up", "boot_up", "pull_up", "bring_up", "switch_to",
+        "focus", "go_to", "navigate", "navigate_to", "load",
+    }
+    # Pretty-display map for known app keys. Anything not in here
+    # falls through to a Title-Cased version of the key (e.g.
+    # "spotify" → "Spotify"). Keep these keys aligned with the
+    # APP_ALIASES dict in voice/command_processor.py.
+    _LAUNCH_APP_FRIENDLY = {
+        "spotify": "Spotify",
+        "chrome": "Chrome",
+        "edge": "Edge",
+        "firefox": "Firefox",
+        "youtube": "YouTube",
+        "discord": "Discord",
+        "steam": "Steam",
+        "outlook": "Outlook",
+        "settings": "Settings",
+        "file_explorer": "File Explorer",
+        "files": "File Explorer",
+        "notepad": "Notepad",
+        "word": "Word",
+        "excel": "Excel",
+        "powerpoint": "PowerPoint",
+        "visual_studio": "Visual Studio",
+        "visual_studio_code": "VS Code",
+        "github": "GitHub",
+        "gmail": "Gmail",
+        "chatgpt": "ChatGPT",
+        "reddit": "Reddit",
+    }
+
+    def _build_launch_overlay_headline(self, payload: dict) -> str:
+        """Pick the headline shown in the voice-status overlay when a
+        voice command succeeds. For open/launch-style intents on a
+        known app, returns 'Launching Spotify' / 'Launching Chrome'
+        etc. Falls back to the generic 'Executing command' for
+        actions like 'play <song>' or commands without a clean
+        app intent."""
+        try:
+            action = str(payload.get("intent_action") or "").strip().lower()
+            app_name = str(payload.get("intent_app_name") or "").strip().lower()
+        except Exception:
+            return "Executing command"
+        if not app_name or not action:
+            return "Executing command"
+        if action not in self._LAUNCH_INTENT_ACTIONS:
+            return "Executing command"
+        friendly = self._LAUNCH_APP_FRIENDLY.get(app_name)
+        if friendly is None:
+            friendly = app_name.replace("_", " ").title()
+        return f"Launching {friendly}"
+
     def _start_voice_command(self) -> None:
         chrome_mode_voice = self._chrome_mode_enabled and self.chrome_controller.is_window_open()
         self._start_voice_capture(mode="general", preferred_app="chrome" if chrome_mode_voice else None)
@@ -4936,6 +4995,20 @@ class GestureWorker(QObject):
                             "display_text": result.heard_text,
                         }
                     else:
+                        # Propagate the parsed intent's app_name + action
+                        # so the result-handling code can show a more
+                        # specific overlay (e.g. "Launching Spotify"
+                        # instead of generic "Executing command") when
+                        # the user just said something like "open spotify".
+                        intent_app_name = ""
+                        intent_action = ""
+                        try:
+                            if execution.intent is not None:
+                                intent_app_name = str(execution.intent.app_name or "")
+                                intent_action = str(execution.intent.action or "")
+                        except Exception:
+                            intent_app_name = ""
+                            intent_action = ""
                         payload = {
                             "event": "result",
                             "mode": mode,
@@ -4945,6 +5018,8 @@ class GestureWorker(QObject):
                             "control_text": execution.control_text,
                             "info_text": execution.info_text,
                             "display_text": getattr(execution, "display_text", execution.heard_text),
+                            "intent_app_name": intent_app_name,
+                            "intent_action": intent_action,
                         }
                 else:
                     payload = {
@@ -5133,8 +5208,16 @@ class GestureWorker(QObject):
                     self.voice_status_overlay.show_selection(title, items, instruction, status_text="")
                     continue
                 self.command_detected.emit(self._voice_control_text)
+                # Customize the overlay headline based on the intent
+                # the voice processor parsed. For 'open'/'launch'-style
+                # commands targeted at a known app, say "Launching X"
+                # instead of the generic "Executing command".
+                if payload.get("success"):
+                    headline = self._build_launch_overlay_headline(payload)
+                else:
+                    headline = "Command not understood"
                 self.voice_status_overlay.show_result(
-                    "Executing command" if payload.get("success") else "Command not understood",
+                    headline,
                     command_text=self._voice_display_text if self._voice_display_text != "-" else "",
                     duration=2.0,
                 )
