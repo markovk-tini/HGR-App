@@ -148,10 +148,34 @@ class SpotifyController:
         return True
 
     def launch_spotify(self, *, hidden: bool) -> bool:
+        # Prefer ShellExecuteW (via launch_external) FIRST. The
+        # Microsoft Store install of Spotify lives behind 0-byte
+        # App Execution Alias stubs at:
+        #   %LOCALAPPDATA%\Microsoft\WindowsApps\Spotify.exe
+        #   %LOCALAPPDATA%\Microsoft\WindowsApps\<package>\Spotify.exe
+        # subprocess.Popen() on those stubs looks successful (no
+        # exception, returns a Popen object) but doesn't actually
+        # launch Spotify — the redirect only fires when the binary
+        # is invoked through ShellExecuteW. Tried Popen first with
+        # the stubs, the function reports "launching spotify"
+        # success, focus_or_open_window then waits for window
+        # handles that never appear, ultimately reports "spotify
+        # window not found", and the user sees no Spotify.
+        for target in ("spotify:", "spotify"):
+            if launch_external(target):
+                self._message = "launching spotify"
+                return True
+        # Fallback: classic non-store install at
+        # ~\AppData\Roaming\Spotify\Spotify.exe. Skip any 0-byte
+        # stub files we encounter so we don't fake-success on them.
         for candidate in self._executable_paths:
-            if not candidate.exists():
-                continue
             try:
+                if not candidate.exists():
+                    continue
+                if candidate.stat().st_size < 1024:
+                    # WindowsApps redirect stub — Popen-launching
+                    # this doesn't actually open Spotify. Skip.
+                    continue
                 startupinfo = None
                 if hidden and hasattr(subprocess, "STARTUPINFO"):
                     startupinfo = subprocess.STARTUPINFO()
@@ -162,12 +186,6 @@ class SpotifyController:
                 return True
             except Exception:
                 continue
-        # ShellExecuteW via URI handler / App Paths, avoids the
-        # `cmd /c start` dropper pattern Norton flags.
-        for target in ("spotify:", "spotify"):
-            if launch_external(target):
-                self._message = "launching spotify"
-                return True
         self._message = "spotify launch path not found"
         return False
 
