@@ -159,8 +159,20 @@ class SpotifyGestureRouter:
         self._control_text = controller.message
 
     def _can_control_without_focus(self, controller: SpotifyController) -> bool:
-        return (
-            controller.is_active_device_available()
-            or controller.is_running()
-            or controller.is_window_active()
-        )
+        # Stricter than the old is_running() catch-all: a Spotify
+        # protocol handler / helper process leaves is_running() True
+        # even when there's no real Spotify to control, so fist
+        # (toggle play/pause) used to attempt action and silently
+        # auto-launch the app via play() → ensure_ready(open_if_needed=True).
+        # Now we require either an active Web API device OR an
+        # actual Spotify window. Right-hand 'two' and the voice
+        # 'open spotify' command remain the ONLY paths that may
+        # launch Spotify when it isn't running.
+        if controller.is_active_device_available():
+            return True
+        is_window_open = getattr(controller, "is_window_open", None)
+        if callable(is_window_open) and is_window_open():
+            return True
+        if controller.is_window_active():
+            return True
+        return False

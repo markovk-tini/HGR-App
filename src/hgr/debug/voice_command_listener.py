@@ -424,6 +424,18 @@ class VoiceCommandListener:
                         silence_blocks = 0
                     active_seconds = voice_blocks * self._block_duration
                     required_silence = self._adaptive_end_silence_seconds(active_seconds, transcript_mode=transcript_mode)
+                    # Local sounddevice mic: tighter end-silence
+                    # window — 3s of dead air after a command felt
+                    # too long to users. Phone source keeps the
+                    # default longer window because phone's noise
+                    # gate produces aggressive zeros between words
+                    # and a tighter cutoff would chop sentences
+                    # mid-phrase. Heuristic: external sources keep
+                    # configured end_silence_seconds (3.0); local
+                    # sources cut it ~33% to ~2.0s for command
+                    # mode and similarly for save_prompt.
+                    if external is None and transcript_mode in {"command", "save_prompt"}:
+                        required_silence = min(required_silence, 2.0)
                     if (
                         active_seconds >= min_active_seconds
                         and silence_blocks * self._block_duration >= required_silence

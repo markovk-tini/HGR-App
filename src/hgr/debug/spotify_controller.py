@@ -199,6 +199,17 @@ class SpotifyController:
             return False
         return False
 
+    def is_window_open(self) -> bool:
+        """Stricter than is_running(): True only when Spotify has at
+        least one visible top-level window. Used by wheel/fist gates
+        so Spotify protocol handlers, web helpers, or update services
+        running in the background don't count as 'Spotify is running'
+        for control purposes — only a real interactive Spotify
+        window counts. is_running() is kept as-is for places that
+        care about ANY spotify process (e.g. avoiding redundant
+        launches in focus_or_open_window)."""
+        return bool(self._spotify_window_handles())
+
     def get_playback_state(self) -> bool | None:
         player = self.get_player_state()
         if not player:
@@ -509,13 +520,19 @@ class SpotifyController:
         return True
 
     def is_active_for_wheel(self) -> bool:
+        # Wheel only engages when Spotify is genuinely available for
+        # control: either it has a visible window the user can
+        # interact with, or the Spotify Web API confirms an active
+        # device (might be playing on the user's phone). Stricter
+        # than the previous is_running() check, which considered
+        # Spotify protocol-handler / helper processes as "running"
+        # and surfaced wheel slices that did nothing useful.
+        if self.is_window_open():
+            return True
         player = self.get_player_state()
         if player is not None:
             return True
-        if self.is_window_active() or self.is_running():
-            self._message = "spotify running"
-            return True
-        self._message = "spotify inactive on device"
+        self._message = "spotify not running"
         return False
 
     def add_current_track_to_queue(self) -> bool:
@@ -1280,7 +1297,14 @@ class SpotifyController:
         self._handles_cache_until = now + 1.0
         return handles
 
-    def _wait_for_window_handles(self, timeout_seconds: float = 4.0) -> list[int]:
+    def _wait_for_window_handles(self, timeout_seconds: float = 10.0) -> list[int]:
+        # 10s default is generous enough for Microsoft Store cold
+        # launches (the ShellExecuteW path that resolves the App
+        # Execution Alias stub then spins up the appcontainer can
+        # take 5-8s on first launch of a session). Previous 4s
+        # default reliably timed out and surfaced "spotify window
+        # not found" when the user said "open spotify" or did the
+        # right-hand 'two' gesture.
         deadline = time.monotonic() + timeout_seconds
         handles = self._spotify_window_handles()
         while not handles and time.monotonic() < deadline:

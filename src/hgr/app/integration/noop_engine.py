@@ -5215,7 +5215,19 @@ class GestureWorker(QObject):
                 if payload.get("success"):
                     headline = self._build_launch_overlay_headline(payload)
                 else:
-                    headline = "Command not understood"
+                    # Failed but had a parsed intent: surface the
+                    # controller's actual message (e.g. "spotify
+                    # window not found", "spotify launch path not
+                    # found") instead of the misleading generic
+                    # "Command not understood" — which conflated a
+                    # transcription failure with an execution
+                    # failure on a perfectly-recognized command.
+                    intent_app = str(payload.get("intent_app_name") or "").strip()
+                    control_text = str(payload.get("control_text") or "").strip()
+                    if intent_app and control_text:
+                        headline = control_text
+                    else:
+                        headline = "Command not understood"
                 self.voice_status_overlay.show_result(
                     headline,
                     command_text=self._voice_display_text if self._voice_display_text != "-" else "",

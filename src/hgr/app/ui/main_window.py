@@ -995,18 +995,6 @@ def _build_voice_command_cards() -> list[VoiceCommandCard]:
             ],
         ),
         VoiceCommandCard(
-            title="Volume control",
-            action="Set system or app volume by amount or percentage.",
-            examples=[
-                "volume up",
-                "volume down",
-                "volume to 50 percent",
-                "set volume to 30",
-                "mute",
-                "unmute",
-            ],
-        ),
-        VoiceCommandCard(
             title="Search / open content",
             action="Searches the web or opens the named site.",
             examples=[
