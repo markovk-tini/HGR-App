@@ -2492,6 +2492,84 @@ class _PhoneCameraTestThread(QThread):
         self.finished_with_result.emit(True, f"connected — frame {width}x{height}.")
 
 
+class TouchlessNotice(QDialog):
+    """Touchless-themed information popup. Replacement for
+    QMessageBox.information / .warning that uses the OS native
+    look — that pulled focus away with a separate taskbar window
+    and clashed with the rest of the dark-blue Touchless theme.
+
+    Looks like a small modal Touchless panel: dark blue surface,
+    light text, single primary OK button. Frameless + no taskbar
+    entry (Qt.Tool flag) so it stays attached to its parent
+    window in the taskbar. Word-wraps long messages.
+    """
+
+    def __init__(self, parent, title: str, message: str, *, kind: str = "info") -> None:
+        super().__init__(parent)
+        self._kind = kind
+        self.setWindowTitle(title)
+        # Tool window: still has a close button, won't show its own
+        # entry in the taskbar, stays on top of the parent.
+        self.setWindowFlag(Qt.Tool, True)
+        self.setMinimumWidth(360)
+        self.setSizeGripEnabled(False)
+        self.setStyleSheet(
+            "QDialog {"
+            "  background: #0B3D91;"
+            "  color: #E5F6FF;"
+            "}"
+            "QLabel {"
+            "  color: #E5F6FF;"
+            "}"
+            "QPushButton#touchlessNoticeOk {"
+            "  background: #1DE9B6;"
+            "  color: #003d2a;"
+            "  border: none;"
+            "  border-radius: 8px;"
+            "  padding: 8px 22px;"
+            "  font-weight: 600;"
+            "  min-width: 90px;"
+            "}"
+            "QPushButton#touchlessNoticeOk:hover {"
+            "  background: #29f0c1;"
+            "}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        title_label = QLabel(title)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        layout.addWidget(title_label)
+
+        body_label = QLabel(message)
+        body_label.setWordWrap(True)
+        body_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        body_label.setStyleSheet("font-size: 13px; line-height: 1.4;")
+        layout.addWidget(body_label, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        ok_button = QPushButton("OK")
+        ok_button.setObjectName("touchlessNoticeOk")
+        ok_button.setDefault(True)
+        ok_button.clicked.connect(self.accept)
+        button_row.addWidget(ok_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+    @staticmethod
+    def show_info(parent, title: str, message: str) -> None:
+        dlg = TouchlessNotice(parent, title, message, kind="info")
+        dlg.exec()
+
+    @staticmethod
+    def show_warn(parent, title: str, message: str) -> None:
+        dlg = TouchlessNotice(parent, title, message, kind="warn")
+        dlg.exec()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__()
@@ -5247,7 +5325,7 @@ class MainWindow(QMainWindow):
             )
         if engine_was_running:
             confirmation += "\n\nThe camera is being switched live — gestures may pause for 1-3 seconds while the new camera initializes."
-        QMessageBox.information(self, "Camera Saved", confirmation)
+        TouchlessNotice.show_info(self, "Camera Saved", confirmation)
 
     def clear_camera_preference(self) -> None:
         self.config.preferred_camera_index = None
@@ -5321,7 +5399,7 @@ class MainWindow(QMainWindow):
             confirmation = (
                 f"Microphone preference saved. Voice commands and dictation will now use:\n\n{selected_name}"
             )
-        QMessageBox.information(self, "Microphone Saved", confirmation)
+        TouchlessNotice.show_info(self, "Microphone Saved", confirmation)
 
     def clear_microphone_preference(self) -> None:
         self.config.preferred_microphone_name = None
