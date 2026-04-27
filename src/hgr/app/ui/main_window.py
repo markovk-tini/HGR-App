@@ -2513,9 +2513,15 @@ class TouchlessNotice(QDialog):
         self.setWindowFlag(Qt.Tool, True)
         self.setMinimumWidth(360)
         self.setSizeGripEnabled(False)
+        # Match the app's body surface (#0F172A — the dark navy
+        # behind the START/END/SETTINGS row), not the brighter
+        # primary blue (#0B3D91) which is reserved for the title
+        # bar accent. The OS caption is colored to #0B3D91 in
+        # showEvent below so the popup looks like a small
+        # detached Touchless window: blue title bar + navy body.
         self.setStyleSheet(
             "QDialog {"
-            "  background: #0B3D91;"
+            "  background: #0F172A;"
             "  color: #E5F6FF;"
             "}"
             "QLabel {"
