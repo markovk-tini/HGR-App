@@ -3590,7 +3590,48 @@ class MainWindow(QMainWindow):
         self._refresh_lite_mode_button_label()
 
         # ============================================================
-        # 6. SAVE CAMERA SELECTION (at the bottom)
+        # 6. GPU MODE  (preview — full GPU inference lands in v1.0.10+)
+        # ============================================================
+        box_layout.addWidget(_section_header("GPU Mode (Preview)"))
+
+        gpu_mode_note = QLabel(
+            "GPU Mode is the foundation for hardware-accelerated hand tracking. "
+            "When the toggle is on, Touchless tries the GPU inference path and "
+            "transparently falls back to CPU MediaPipe if no GPU path is reachable "
+            "on your machine — gesture recognition keeps working either way. "
+            "The full GPU runtime is being rolled out incrementally; for now the "
+            "toggle wires the plumbing without yet swapping the inference itself."
+        )
+        gpu_mode_note.setObjectName("cameraNote")
+        gpu_mode_note.setWordWrap(True)
+        box_layout.addWidget(gpu_mode_note)
+
+        gpu_mode_row = QHBoxLayout()
+        self.gpu_mode_button = QPushButton()
+        self.gpu_mode_button.setCheckable(True)
+        self.gpu_mode_button.setChecked(bool(getattr(self.config, "gpu_mode", False)))
+        self.gpu_mode_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.gpu_mode_button.clicked.connect(self._on_gpu_mode_button_toggled)
+        gpu_mode_row.addWidget(self.gpu_mode_button)
+        gpu_mode_row.addStretch(1)
+        box_layout.addLayout(gpu_mode_row)
+        # Probe what GPU paths are reachable so we can disable the
+        # toggle with an explanatory tooltip on machines that have
+        # nothing to accelerate against.
+        try:
+            from ...gesture.tracking.gpu_probe import probe_gpu_paths
+            probe = probe_gpu_paths()
+            if probe.has_any_gpu_path:
+                self.gpu_mode_button.setToolTip(probe.path_summary())
+            else:
+                self.gpu_mode_button.setEnabled(False)
+                self.gpu_mode_button.setToolTip(probe.path_summary())
+        except Exception:
+            pass
+        self._refresh_gpu_mode_button_label()
+
+        # ============================================================
+        # 7. SAVE CAMERA SELECTION (at the bottom)
         # ============================================================
         box_layout.addWidget(_section_header("Save Camera Selection"))
 
@@ -3974,6 +4015,28 @@ class MainWindow(QMainWindow):
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
                 "Last action: Lite Mode on" if self.config.lite_mode else "Last action: Lite Mode off"
+            )
+
+    def _refresh_gpu_mode_button_label(self) -> None:
+        if not hasattr(self, "gpu_mode_button"):
+            return
+        on = bool(getattr(self.config, "gpu_mode", False))
+        self.gpu_mode_button.setText("GPU Mode: ON" if on else "GPU Mode")
+        self.gpu_mode_button.setChecked(on)
+
+    def _on_gpu_mode_button_toggled(self, checked: bool) -> None:
+        self.config.gpu_mode = bool(checked)
+        save_config(self.config)
+        self._refresh_gpu_mode_button_label()
+        worker = getattr(self, "_worker", None)
+        if worker is not None and hasattr(worker, "set_gpu_mode"):
+            try:
+                worker.set_gpu_mode(self.config.gpu_mode)
+            except Exception:
+                pass
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText(
+                "Last action: GPU Mode on" if self.config.gpu_mode else "Last action: GPU Mode off"
             )
 
 

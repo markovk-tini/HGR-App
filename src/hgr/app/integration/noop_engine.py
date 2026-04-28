@@ -2420,6 +2420,12 @@ class GestureWorker(QObject):
     def _build_engine_for_fps_mode(self) -> GestureRecognitionEngine:
         self._low_fps_active = bool(getattr(self.config, "low_fps_mode", False)) or self._low_fps_auto_engaged
         lite_active = bool(getattr(self.config, "lite_mode", False))
+        # GPU Mode threads through to every detector flavour. The
+        # runtime loader honours it best-effort and falls back to
+        # CPU MediaPipe when no GPU path is reachable, so toggling
+        # it on can never break gesture recognition — it just won't
+        # speed anything up if the GPU path can't engage.
+        prefer_gpu = bool(getattr(self.config, "gpu_mode", False))
         if self._low_fps_active:
             # Low-FPS already implies lite landmark model — keep its
             # tuned thresholds; lite_mode would be redundant here.
@@ -2431,6 +2437,7 @@ class GestureWorker(QObject):
                 max_process_width=self._LOW_FPS_PROCESS_WIDTH,
                 smoother=AdaptiveLandmarkSmoother(alpha=0.66, min_alpha=0.24, max_alpha=0.88),
                 secondary_smoother=AdaptiveLandmarkSmoother(alpha=0.66, min_alpha=0.24, max_alpha=0.88),
+                prefer_gpu=prefer_gpu,
             )
             stable_frames = 1
         elif lite_active:
@@ -2441,10 +2448,14 @@ class GestureWorker(QObject):
             detector = HandDetector(
                 model_complexity=0,
                 max_process_width=self._LITE_MODE_PROCESS_WIDTH,
+                prefer_gpu=prefer_gpu,
             )
             stable_frames = max(2, self.config.stable_frames_required // 2)
         else:
-            detector = HandDetector(max_process_width=self._NORMAL_PROCESS_WIDTH)
+            detector = HandDetector(
+                max_process_width=self._NORMAL_PROCESS_WIDTH,
+                prefer_gpu=prefer_gpu,
+            )
             stable_frames = max(2, self.config.stable_frames_required // 2)
         return GestureRecognitionEngine(
             detector=detector,
@@ -2553,6 +2564,25 @@ class GestureWorker(QObject):
             recovered = open_camera_by_index(int(index), max_index=self.config.camera_scan_limit)
             if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
                 self._cap = recovered[1]
+
+    def set_gpu_mode(self, enabled: bool) -> None:
+        # User-driven GPU-acceleration toggle. Rebuilds the engine
+        # with prefer_gpu set so the runtime loader either lights up
+        # the GPU inference path or transparently falls back to CPU
+        # MediaPipe when no GPU path is reachable on this machine.
+        # Mid-session toggling matches set_lite_mode's pattern: we
+        # rebuild HandDetector on the fly without restarting the
+        # camera or losing the live preview frame.
+        self.config.gpu_mode = bool(enabled)
+        if not self._running:
+            return
+        if self.engine is not None:
+            try:
+                self.engine.close()
+            except Exception:
+                pass
+        self.engine = self._build_engine_for_fps_mode()
+        self._fps = 0.0
 
     def set_force_ten_fps_test_mode(self, enabled: bool) -> None:
         self.config.force_ten_fps_test_mode = bool(enabled)

@@ -196,6 +196,19 @@ class AppConfig:
     # user-driven uniform speedup that keeps the rest of the
     # pipeline at normal sensitivity.
     lite_mode: bool = False
+    # GPU Mode: opt-in flag for the GPU-accelerated inference path.
+    # When False, the gesture pipeline runs on CPU via MediaPipe's
+    # default solutions.hands runtime (the same code path Touchless
+    # has always used). When True, the runtime loader tries the
+    # MediaPipe Tasks API HandLandmarker with its GPU delegate; if
+    # that path can't actually reach the GPU on this machine
+    # (Windows OpenGL ES / Vulkan delegate flakiness, missing
+    # provider DLLs, etc.), the loader logs a fallback and quietly
+    # uses CPU — gesture recognition keeps working either way.
+    # The Settings → Camera toggle reads gesture/tracking/gpu_probe
+    # to disable itself with a tooltip when no GPU path is reachable
+    # so the user isn't toggling a no-op.
+    gpu_mode: bool = False
 
 
 DEFAULT_CONFIG = AppConfig()

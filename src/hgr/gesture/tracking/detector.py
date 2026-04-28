@@ -31,8 +31,16 @@ class HandDetector:
         max_process_width: int = 0,
         smoother: AdaptiveLandmarkSmoother | None = None,
         secondary_smoother: AdaptiveLandmarkSmoother | None = None,
+        prefer_gpu: bool = False,
     ) -> None:
-        self.runtime: HandRuntime = load_hand_runtime()
+        # prefer_gpu plumbs the user's GPU Mode toggle through to
+        # the runtime loader; the loader honours it best-effort and
+        # falls back to CPU MediaPipe if no GPU path is reachable.
+        # Keeping this as a constructor arg (not a global state read)
+        # so the engine builder in noop_engine can rebuild the
+        # detector cleanly when the user toggles GPU Mode mid-session,
+        # same way it already does for low_fps_mode + lite_mode.
+        self.runtime: HandRuntime = load_hand_runtime(prefer_gpu=prefer_gpu)
         self.model_complexity = int(model_complexity)
         self.miss_tolerance_seconds = max(0.0, float(miss_tolerance_seconds))
         self.max_process_width = max(0, int(max_process_width))
