@@ -90,10 +90,18 @@ def probe_gpu_paths() -> GpuProbeResult:
     providers."""
     errors: list[str] = []
 
-    # 1. MediaPipe Tasks API path: import the module + check that
-    # the GPU delegate enum value exists. Doesn't actually
-    # construct a HandLandmarker — that's the runtime loader's
-    # job, lazily.
+    # 1. MediaPipe Tasks API path. Two-stage check:
+    #    (a) the `vision` module + `Delegate.GPU` enum import
+    #        cleanly. The enum has shipped in mediapipe for a
+    #        while, so this passes on Windows even though the
+    #        underlying delegate isn't supported.
+    #    (b) try to actually serialize a BaseOptions(delegate=GPU)
+    #        to its protobuf. The mediapipe Windows wheel raises
+    #        `NotImplementedError("GPU Delegate is not yet
+    #        supported for Windows")` here — which is what tells
+    #        us the runtime can't actually use the delegate.
+    # Without (b) the probe falsely reports "GPU available" on
+    # Windows and the Settings toggle confuses the user.
     mp_tasks_importable = False
     tasks_gpu_present = False
     try:
@@ -101,11 +109,31 @@ def probe_gpu_paths() -> GpuProbeResult:
         from mediapipe.tasks.python.core.base_options import BaseOptions
 
         mp_tasks_importable = True
-        # BaseOptions.Delegate is an IntEnum. Touch the GPU member;
-        # AttributeError → not present in this mediapipe build.
         delegate_attr = getattr(BaseOptions, "Delegate", None)
-        if delegate_attr is not None and getattr(delegate_attr, "GPU", None) is not None:
-            tasks_gpu_present = True
+        delegate_gpu = getattr(delegate_attr, "GPU", None) if delegate_attr is not None else None
+        if delegate_gpu is not None:
+            try:
+                # Construction-time validation of GPU delegate
+                # support. We pass a deliberately bogus model
+                # path because all we want is the to_pb2() call
+                # to fire — that's the line that raises on
+                # Windows. If it raises NotImplementedError, the
+                # delegate isn't usable; if it raises any other
+                # error (file not found etc.) the delegate IS
+                # supported and we'd just hit the path-not-found
+                # later, which is the OK case.
+                opts = BaseOptions(model_asset_path="__probe__", delegate=delegate_gpu)
+                opts.to_pb2()
+                tasks_gpu_present = True
+            except NotImplementedError as exc:
+                errors.append(f"mediapipe.tasks GPU: {exc!s}"[:160])
+            except Exception:
+                # Any other exception means the delegate
+                # serialised; the failure was downstream
+                # (model_asset_path doesn't exist etc.) which is
+                # fine for the probe — we only care whether the
+                # delegate itself is supported.
+                tasks_gpu_present = True
     except Exception as exc:
         errors.append(f"mediapipe.tasks: {type(exc).__name__}: {exc!s}"[:160])
 

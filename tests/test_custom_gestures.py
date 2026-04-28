@@ -31,6 +31,12 @@ if str(_SRC) not in sys.path:
 
 from hgr.custom_gestures.action import Action, describe  # noqa: E402
 from hgr.custom_gestures.classifier import GestureClassifier  # noqa: E402
+from hgr.custom_gestures.description import (  # noqa: E402
+    CategoricalRange,
+    format_gesture_summary,
+    live_signature,
+    pose_signature,
+)
 from hgr.custom_gestures.recorder import (  # noqa: E402
     GestureRecorder,
     augment_sample,
@@ -94,7 +100,8 @@ def test_normalize_rejects_wrong_shape():
 def test_landmarks_to_sample_has_correct_length():
     lm = _synthetic_landmarks(seed=4)
     sample = landmarks_to_sample(lm)
-    assert len(sample.features) == 81  # 63 landmarks + 3 spacing + 5 extension + 10 joint
+    # 63 landmarks + 3 spacing + 5 extension + 10 joint + 5 curl + 1 spread
+    assert len(sample.features) == 87
 
 
 def test_spacing_extension_and_joint_features_trail_landmarks():
@@ -169,7 +176,7 @@ def test_legacy_63dim_sample_loads_with_migration(tmp_path):
     loaded = reg.get("legacy_g")
     assert loaded is not None
     assert len(loaded.samples) == 1
-    assert len(loaded.samples[0].features) == 81
+    assert len(loaded.samples[0].features) == 87
 
 
 def test_legacy_66dim_sample_loads_with_migration(tmp_path):
@@ -205,7 +212,7 @@ def test_legacy_66dim_sample_loads_with_migration(tmp_path):
     reg.load()
     loaded = reg.get("legacy_g66")
     assert loaded is not None
-    assert len(loaded.samples[0].features) == 81
+    assert len(loaded.samples[0].features) == 87
 
 
 def test_legacy_71dim_sample_loads_with_migration(tmp_path):
@@ -241,7 +248,7 @@ def test_legacy_71dim_sample_loads_with_migration(tmp_path):
     reg.load()
     loaded = reg.get("legacy_g71")
     assert loaded is not None
-    assert len(loaded.samples[0].features) == 81
+    assert len(loaded.samples[0].features) == 87
 
 
 # ------------------------- GestureRecorder -------------------------
@@ -277,7 +284,7 @@ def test_registry_roundtrip(tmp_path: Path):
     path = tmp_path / "gestures.json"
     reg = GestureRegistry(path=path)
     reg.load()
-    sample = GestureSample(features=[0.0] * 81)
+    sample = GestureSample(features=[0.0] * 87)
     reg.add(
         name="test_thumb",
         samples=[sample],
@@ -301,7 +308,7 @@ def test_registry_roundtrip(tmp_path: Path):
 def test_registry_rejects_duplicate_without_overwrite(tmp_path: Path):
     reg = GestureRegistry(path=tmp_path / "gestures.json")
     reg.load()
-    sample = GestureSample(features=[0.0] * 81)
+    sample = GestureSample(features=[0.0] * 87)
     reg.add("dup", [sample], Action(kind="noop"))
     with pytest.raises(ValueError):
         reg.add("dup", [sample], Action(kind="noop"))
@@ -312,7 +319,7 @@ def test_registry_rejects_duplicate_without_overwrite(tmp_path: Path):
 def test_registry_remove(tmp_path: Path):
     reg = GestureRegistry(path=tmp_path / "gestures.json")
     reg.load()
-    reg.add("g1", [GestureSample(features=[0.0] * 81)], Action(kind="noop"))
+    reg.add("g1", [GestureSample(features=[0.0] * 87)], Action(kind="noop"))
     assert reg.remove("g1") is True
     assert reg.remove("g1") is False
     assert reg.list() == []
@@ -354,7 +361,15 @@ def test_classifier_tolerates_small_noise(tmp_path: Path):
     reg = GestureRegistry(path=tmp_path / "gestures.json")
     reg.load()
     lm = _synthetic_landmarks(seed=7)
-    reg.add("pose_b", [landmarks_to_sample(lm)], Action(kind="noop"))
+    # Use augmented samples like the trainer does — single un-augmented
+    # sample is brittle near categorical-feature boundaries because hard
+    # bucketing can flip a class with tiny noise. Real recordings always
+    # have augmentation variants stored, which absorb that.
+    reg.add(
+        "pose_b",
+        augment_samples([landmarks_to_sample(lm)]),
+        Action(kind="noop"),
+    )
 
     clf = GestureClassifier(reg, threshold=0.90)
     clf.reload()
@@ -448,9 +463,9 @@ def test_augment_sample_expands_variants():
     # + 2 per-finger jitter
     # = 22 total
     assert len(variants) == 22
-    # All variants must be valid 81-dim feature vectors.
+    # All variants must be valid 87-dim feature vectors.
     for v in variants:
-        assert len(v.features) == 81
+        assert len(v.features) == 87
     # Variants must differ from original (except the original itself).
     original = variants[0].features
     differing = [v for v in variants[1:] if v.features != original]
@@ -489,12 +504,12 @@ def test_augment_makes_rotated_pose_matchable(tmp_path):
         dtype=np.float32,
     )
     tilted_lm = upright_lm @ R.T
-    # Rebuild the 81-dim feature vector: rotated landmarks + spacing +
-    # extension + joint-angle features. Rotation preserves Euclidean
-    # distances AND angles between segments, so the trailing 18 features
-    # carry over unchanged.
+    # Rebuild the 87-dim feature vector: rotated landmarks + all derived
+    # structural features. Rotation preserves Euclidean distances and
+    # the categorical labels derived from them, so the trailing 24
+    # features carry over unchanged.
     tilted_feats = np.concatenate(
-        [tilted_lm.reshape(63), upright_feats_full[63:81]]
+        [tilted_lm.reshape(63), upright_feats_full[63:87]]
     )
 
     # Plain: stored only the upright sample.
@@ -517,6 +532,111 @@ def test_augment_makes_rotated_pose_matchable(tmp_path):
     # Augmentation should score the tilted pose at least as well as plain.
     if plain_match is not None:
         assert aug_match.score >= plain_match.score
+
+
+def test_curl_and_spread_classes_in_feature_vector():
+    """Last 6 floats are 5 curl classes + 1 spread class, all integer
+    ordinals in [0, 4] / [0, 3]."""
+    lm = _synthetic_landmarks(seed=21)
+    sample = landmarks_to_sample(lm)
+    feats = np.asarray(sample.features, dtype=np.float32)
+    curl_classes = feats[81:86]
+    spread_class = feats[86]
+    assert len(curl_classes) == 5
+    for c in curl_classes:
+        assert 0.0 <= float(c) <= 4.0
+    assert 0.0 <= float(spread_class) <= 3.0
+
+
+def test_legacy_81dim_sample_loads_with_migration(tmp_path):
+    """81-float samples (landmarks + spacing + extension + joint angles)
+    must gain the 6 categorical features on load."""
+    import json
+    lm = _synthetic_landmarks(seed=34)
+    sample = landmarks_to_sample(lm)
+    feats_full = np.asarray(sample.features, dtype=np.float32)
+    legacy_feats = feats_full[:81].tolist()
+    legacy_blob = {
+        "schema_version": 1,
+        "gestures": [{
+            "name": "legacy_g81",
+            "description": "",
+            "created_at": "2026-04-23T00:00:00+00:00",
+            "action": {"kind": "noop", "payload": {}},
+            "samples": [{"features": legacy_feats}],
+        }],
+    }
+    path = tmp_path / "legacy81.json"
+    path.write_text(json.dumps(legacy_blob), encoding="utf-8")
+    reg = GestureRegistry(path=path)
+    reg.load()
+    loaded = reg.get("legacy_g81")
+    assert loaded is not None
+    assert len(loaded.samples[0].features) == 87
+
+
+def test_pose_signature_returns_ranges(tmp_path):
+    lm = _synthetic_landmarks(seed=60)
+    s1 = landmarks_to_sample(lm)
+    g = CustomGesture(
+        name="stable",
+        samples=[s1, s1, s1],
+        action=Action(kind="noop"),
+        created_at="2026-04-23T00:00:00+00:00",
+    )
+    sig = pose_signature(g)
+    for key in ("thumb_curl", "index_curl", "middle_curl",
+                "ring_curl", "pinky_curl", "spread"):
+        assert isinstance(sig[key], CategoricalRange)
+        assert sig[key].min_class == sig[key].max_class
+
+
+def test_live_signature_extracts_finger_states():
+    lm = _synthetic_landmarks(seed=80)
+    feats = normalize_landmarks(lm)
+    sig = live_signature(feats)
+    for key in ("thumb_curl", "index_curl", "middle_curl",
+                "ring_curl", "pinky_curl"):
+        assert key in sig
+        assert 0 <= sig[key] <= 4
+    assert "spread" in sig
+    assert 0 <= sig["spread"] <= 3
+
+
+def test_format_gesture_summary_renders():
+    lm = _synthetic_landmarks(seed=70)
+    sample = landmarks_to_sample(lm)
+    g = CustomGesture(
+        name="show_me",
+        samples=[sample],
+        action=Action(kind="noop"),
+        created_at="2026-04-23T00:00:00+00:00",
+        description="example",
+    )
+    summary = format_gesture_summary(g)
+    assert "How to do 'show_me'" in summary
+    assert "Hand pose:" in summary
+    assert "Thumb" in summary
+    assert "Spread:" in summary
+
+
+def test_classifier_hysteresis_extends_match_window(tmp_path):
+    """sticky_name lowers the threshold for the named gesture so a
+    score that would be rejected normally still matches."""
+    reg = GestureRegistry(path=tmp_path / "gestures.json")
+    reg.load()
+    reg.add(
+        "steady",
+        [landmarks_to_sample(_synthetic_landmarks(seed=51))],
+        Action(kind="noop"),
+    )
+    # Strict threshold rejects a noisy query without sticky_name.
+    clf = GestureClassifier(reg, threshold=0.85, hysteresis=0.10)
+    clf.reload()
+    noisy = _synthetic_landmarks(seed=51, noise=0.005)
+    if clf.classify(noisy) is None:
+        # With sticky_name, threshold drops by hysteresis and matches.
+        assert clf.classify(noisy, sticky_name="steady") is not None
 
 
 def test_action_describe_covers_all_kinds():

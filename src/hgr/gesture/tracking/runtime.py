@@ -46,24 +46,8 @@ def _load_mediapipe_cpu_runtime() -> HandRuntime:
 
 def _try_load_gpu_runtime() -> HandRuntime | None:
     """Attempt the GPU-accelerated path. Returns None if GPU isn't
-    reachable on this machine (the caller falls back to CPU). The
-    actual Tasks-API HandLandmarker construction is intentionally
-    NOT implemented in this session — Touchless v1.0.9 ships the
-    GPU foundation (this seam, the gpu_probe, the Settings toggle)
-    so v1.0.10 can drop in `mediapipe.tasks.vision.HandLandmarker`
-    with `BaseOptions(delegate=Delegate.GPU)` here without touching
-    any other file. Right now this function logs a one-time notice
-    that GPU was requested and returns None so we transparently use
-    CPU.
-
-    The Tasks-API wrapper (next session) will need to:
-      - resolve the path to the bundled hand_landmarker.task asset
-      - construct HandLandmarker with VIDEO running mode and GPU delegate
-      - return a HandRuntime where `hands_module` is a small adapter
-        whose .Hands(...) constructor returns a duck-typed object
-        whose .process(rgb) yields multi_hand_landmarks /
-        multi_handedness shaped results matching solutions.hands
-    """
+    reachable on this machine — the caller falls back to CPU
+    MediaPipe transparently."""
     from .gpu_probe import probe_gpu_paths
 
     probe = probe_gpu_paths()
@@ -79,25 +63,48 @@ def _try_load_gpu_runtime() -> HandRuntime | None:
             pass
         return None
 
-    # Path 1 — MediaPipe Tasks API GPU delegate. STUB for now; we
-    # validated the imports + delegate enum exist (probe), but the
-    # real HandLandmarker construction is parked for the next
-    # session along with .task asset bundling.
+    # Path 1 — MediaPipe Tasks API HandLandmarker with GPU delegate.
+    # Same models as solutions.hands so accuracy is identical;
+    # speedup comes from MediaPipe's Vulkan / OpenGL ES delegate
+    # when reachable. Construction failure (delegate can't reach a
+    # GPU context, .task asset missing, etc.) → return None and
+    # let the caller fall back to CPU MediaPipe.
     if probe.mediapipe_tasks_importable and probe.tasks_gpu_delegate_present:
         try:
-            sys.stderr.write(
-                "[hand_runtime] gpu_mode requested. MediaPipe Tasks GPU delegate detected, "
-                "but the GPU runtime adapter isn't wired up in this build yet. "
-                "Falling back to MediaPipe CPU until v1.0.10.\n"
-            )
-            sys.stderr.flush()
-        except Exception:
-            pass
-        return None
+            from .tasks_runtime import build_tasks_gpu_runtime
 
-    # Path 2 — onnxruntime-directml. Not installed by default in
-    # the v1.0.9 wheel set; full ONNX port is the v1.0.10+ escalation
-    # only if Tasks-API GPU silently falls back on too many users.
+            hands_module = build_tasks_gpu_runtime()
+            if hands_module is not None:
+                try:
+                    sys.stderr.write(
+                        "[hand_runtime] gpu_mode active: MediaPipe Tasks GPU delegate "
+                        "selected. Inference accuracy matches CPU MediaPipe; speedup "
+                        "depends on whether the delegate can reach a GPU context on "
+                        "this machine (it transparently runs on CPU otherwise).\n"
+                    )
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                hand_connections = getattr(hands_module, "HAND_CONNECTIONS", None)
+                return HandRuntime(
+                    hands_module=hands_module,
+                    drawing_utils=None,
+                    hand_connections=hand_connections,
+                    backend="mediapipe-tasks-gpu",
+                )
+        except Exception as exc:
+            try:
+                sys.stderr.write(
+                    f"[hand_runtime] Tasks-API GPU path construction failed: "
+                    f"{type(exc).__name__}: {exc!s}. Falling back to MediaPipe CPU.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+    # Path 2 — onnxruntime-directml on a custom palm-detect +
+    # landmark pipeline. Reserved for future release if too many
+    # users report Tasks-API GPU silently running on CPU.
     return None
 
 

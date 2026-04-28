@@ -9,7 +9,18 @@ from .registry import GestureSample
 
 _LANDMARK_COUNT = 21
 _LANDMARK_DIM = _LANDMARK_COUNT * 3  # 63 — x, y, z per landmark
-_FEATURE_DIM = 81  # 63 landmark coords + 3 spacing + 5 extension + 10 joint angles
+_FEATURE_DIM = 87  # 63 landmark + 3 spacing + 5 extension + 10 joint + 5 curl-class + 1 spread-class
+
+# Per-finger wrist-to-tip distance thresholds (normalized landmark units,
+# where wrist-to-L9 = 1.0). Calibrated against real MediaPipe outputs.
+# Format: (extended_floor, slightly_floor, half_floor, mostly_floor)
+_CURL_DISTANCE_THRESHOLDS: Tuple[Tuple[float, float, float, float], ...] = (
+    (1.00, 0.90, 0.80, 0.72),  # thumb
+    (1.70, 1.40, 1.05, 0.75),  # index
+    (1.80, 1.50, 1.10, 0.75),  # middle
+    (1.65, 1.35, 1.00, 0.65),  # ring
+    (1.40, 1.15, 0.85, 0.60),  # pinky
+)
 
 # Per-finger landmark chains (4 landmarks each), used to compute joint
 # bend angles. MediaPipe's hand model: 0=wrist, 1-4=thumb, 5-8=index,
@@ -90,6 +101,51 @@ def _bend_angle(v1: np.ndarray, v2: np.ndarray) -> float:
     return float(np.arccos(cos))
 
 
+def _curl_class_features(extension_distances: np.ndarray) -> np.ndarray:
+    """5 ordinal curl-class labels per finger (0=fully extended,
+    1=slightly curled, 2=half curled, 3=mostly curled, 4=closed/fist).
+
+    Derived from wrist-to-fingertip distance with per-finger thresholds.
+    Distance is more robust than joint-angle sums because MediaPipe's
+    z-coordinate is noisy enough that bend angles for fingers curling
+    forward come out artificially small. Wrist-to-tip distance is a
+    single 2D-dominant measurement that doesn't require accurate depth
+    inference at every joint.
+
+    Hard bucketing — values snap to a stable integer that doesn't change
+    under small landmark noise.
+    """
+    out: List[float] = []
+    for finger_idx in range(5):
+        dist = float(extension_distances[finger_idx])
+        thresholds = _CURL_DISTANCE_THRESHOLDS[finger_idx]
+        if dist >= thresholds[0]:
+            out.append(0.0)
+        elif dist >= thresholds[1]:
+            out.append(1.0)
+        elif dist >= thresholds[2]:
+            out.append(2.0)
+        elif dist >= thresholds[3]:
+            out.append(3.0)
+        else:
+            out.append(4.0)
+    return np.asarray(out, dtype=np.float32)
+
+
+def _spread_class_features(spacing_features: np.ndarray) -> np.ndarray:
+    """1 ordinal spread-class label (0=tight..3=wide). Derived from the
+    SUM of the 3 adjacent fingertip-pair distances. Calibrated against
+    real MediaPipe outputs."""
+    total = float(np.sum(spacing_features))
+    if total < 0.35:
+        return np.asarray([0.0], dtype=np.float32)
+    if total < 0.65:
+        return np.asarray([1.0], dtype=np.float32)
+    if total < 1.05:
+        return np.asarray([2.0], dtype=np.float32)
+    return np.asarray([3.0], dtype=np.float32)
+
+
 def _joint_angle_features_from_landmarks(lm: np.ndarray) -> np.ndarray:
     """10 joint bend angles, 2 per finger.
 
@@ -152,8 +208,11 @@ def normalize_landmarks(landmarks: np.ndarray) -> np.ndarray:
     spacing_feats = _spacing_features_from_landmarks(arr)
     extension_feats = _extension_features_from_landmarks(arr)
     joint_feats = _joint_angle_features_from_landmarks(arr)
+    curl_feats = _curl_class_features(extension_feats)
+    spread_feats = _spread_class_features(spacing_feats)
     return np.concatenate(
-        [landmark_feats, spacing_feats, extension_feats, joint_feats]
+        [landmark_feats, spacing_feats, extension_feats, joint_feats,
+         curl_feats, spread_feats]
     ).astype(np.float32)
 
 
@@ -223,15 +282,19 @@ def _landmarks_from_sample(sample: GestureSample) -> np.ndarray:
 
 
 def _sample_from_landmarks(lm: np.ndarray) -> GestureSample:
-    """Build a fresh 81-dim sample from a (21, 3) landmark array. Spacing,
-    extension, and joint-angle features are recomputed so they always
-    reflect the current landmarks."""
+    """Build a fresh 87-dim sample from a (21, 3) landmark array. All
+    derived features (spacing, extension, joint angles, curl classes,
+    spread class) are recomputed so they always reflect the current
+    landmarks."""
     landmark_feats = lm.reshape(_LANDMARK_DIM)
     spacing_feats = _spacing_features_from_landmarks(lm)
     extension_feats = _extension_features_from_landmarks(lm)
     joint_feats = _joint_angle_features_from_landmarks(lm)
+    curl_feats = _curl_class_features(extension_feats)
+    spread_feats = _spread_class_features(spacing_feats)
     feats = np.concatenate(
-        [landmark_feats, spacing_feats, extension_feats, joint_feats]
+        [landmark_feats, spacing_feats, extension_feats, joint_feats,
+         curl_feats, spread_feats]
     ).astype(np.float32)
     return GestureSample(features=feats.tolist())
 

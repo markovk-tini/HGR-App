@@ -35,7 +35,15 @@ import mediapipe as mp  # noqa: E402
 
 from hgr.custom_gestures.action import describe, fire_once  # noqa: E402
 from hgr.custom_gestures.classifier import GestureClassifier  # noqa: E402
-from hgr.custom_gestures.recorder import landmarks_from_mediapipe  # noqa: E402
+from hgr.custom_gestures.description import (  # noqa: E402
+    live_signature,
+    short_curl_label,
+    short_spread_label,
+)
+from hgr.custom_gestures.recorder import (  # noqa: E402
+    landmarks_from_mediapipe,
+    normalize_landmarks,
+)
 from hgr.custom_gestures.registry import GestureRegistry  # noqa: E402
 
 
@@ -144,6 +152,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             color = (180, 180, 180)
             hold_progress = 0.0
             match = None
+            sig: dict = {}
+            feats = None
             if result.multi_hand_landmarks:
                 drawer.draw_landmarks(
                     frame,
@@ -155,7 +165,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 lm = landmarks_from_mediapipe(
                     result.multi_hand_landmarks[0].landmark
                 )
-                match = classifier.classify(lm)
+                # Compute the full feature vector once so we can both
+                # classify AND show what curl/spread categories the system
+                # currently perceives.
+                feats = normalize_landmarks(lm)
+                sig = live_signature(feats)
+                # Pass the currently held gesture so hysteresis can keep
+                # it recognized through small score dips at the boundary.
+                match = classifier.classify_raw(feats, sticky_name=hold_name)
                 if match is not None:
                     runner_up_str = (
                         f"  vs '{match.runner_up_name}' {match.runner_up_score:.3f}"
@@ -274,6 +291,57 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cv2.putText(frame, f"FIRED: {last_fired_name}",
                             (12, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                             (0, 0, 255), 2, cv2.LINE_AA)
+
+            # Live finger-state overlay (top-right). Shows curl class +
+            # raw wrist-to-tip distance per finger, plus spread. The raw
+            # distances let you calibrate per-finger thresholds in
+            # recorder.py if a pose isn't bucketing the way you intend.
+            if sig and feats is not None:
+                ext_dists = feats[66:71]
+                frame_h, frame_w = frame.shape[:2]
+                box_x = frame_w - 240
+                box_y = 8
+                line_h = 18
+                cv2.rectangle(frame,
+                              (box_x - 4, box_y - 2),
+                              (frame_w - 4, box_y + line_h * 7 + 6),
+                              (0, 0, 0), -1)
+                cv2.putText(frame, "Live finger state:",
+                            (box_x, box_y + 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                            (220, 220, 220), 1, cv2.LINE_AA)
+                fingers = [
+                    ("Thumb", sig["thumb_curl"], float(ext_dists[0])),
+                    ("Index", sig["index_curl"], float(ext_dists[1])),
+                    ("Mid", sig["middle_curl"], float(ext_dists[2])),
+                    ("Ring", sig["ring_curl"], float(ext_dists[3])),
+                    ("Pinky", sig["pinky_curl"], float(ext_dists[4])),
+                ]
+                for i, (fname, c, dist) in enumerate(fingers):
+                    if c == 0:
+                        col = (60, 220, 60)
+                    elif c == 1:
+                        col = (60, 220, 180)
+                    elif c == 2:
+                        col = (60, 180, 220)
+                    elif c == 3:
+                        col = (140, 120, 220)
+                    else:
+                        col = (200, 80, 200)
+                    cv2.putText(
+                        frame,
+                        f"{fname:<5} {short_curl_label(c)[:9]:<9} c{c} d={dist:.2f}",
+                        (box_x, box_y + 12 + (i + 1) * line_h),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1, cv2.LINE_AA,
+                    )
+                spread_c = sig["spread"]
+                cv2.putText(
+                    frame,
+                    f"Spread {short_spread_label(spread_c)} ({spread_c})",
+                    (box_x, box_y + 12 + 6 * line_h),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                    (220, 220, 80), 1, cv2.LINE_AA,
+                )
 
             cv2.imshow(_WINDOW_TITLE, frame)
             if (cv2.waitKey(1) & 0xFF) == 27:

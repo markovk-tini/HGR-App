@@ -35,6 +35,7 @@ import numpy as np  # noqa: E402
 
 from hgr.custom_gestures.action import describe  # noqa: E402
 from hgr.custom_gestures.classifier import GestureClassifier  # noqa: E402
+from hgr.custom_gestures.description import format_gesture_summary  # noqa: E402
 from hgr.custom_gestures.recorder import (  # noqa: E402
     GestureRecorder,
     augment_samples,
@@ -294,6 +295,10 @@ def _reaugment_existing(registry: GestureRegistry, name: str) -> int:
         f"[train] re-augmented {existing.name!r}: "
         f"{len(originals)} -> {len(augmented)} samples"
     )
+    refreshed = registry.get(existing.name)
+    if refreshed is not None:
+        print()
+        print(format_gesture_summary(refreshed))
     return 0
 
 
@@ -320,7 +325,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=f"How many real captures to record (default {_TARGET_SAMPLES}). "
         "More = better tolerance for your natural pose drift, longer recording.",
     )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Print summaries of every saved gesture and exit (no recording).",
+    )
+    parser.add_argument(
+        "--show",
+        metavar="NAME",
+        default=None,
+        help="Print the summary for a single saved gesture and exit.",
+    )
     args = parser.parse_args(argv)
+
+    if args.list or args.show:
+        registry = GestureRegistry()
+        registry.load()
+        if args.show:
+            target = registry.get(args.show)
+            if target is None:
+                print(f"[train] no gesture named {args.show!r} in {registry.path}")
+                return 1
+            print(format_gesture_summary(target))
+            return 0
+        gestures = registry.list()
+        if not gestures:
+            print(f"[train] no gestures saved in {registry.path}")
+            return 0
+        for i, g in enumerate(gestures):
+            if i > 0:
+                print()
+            print(format_gesture_summary(g))
+        return 0
 
     if args.reaugment:
         return _reaugment_existing(GestureRegistry(), args.reaugment)
@@ -378,6 +414,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[train] {len(gesture.samples)} samples, action = {describe(gesture.action)}")
 
     _check_conflicts(registry, gesture)
+
+    # Print a human-readable how-to-do-it summary derived from the
+    # categorical curl/spread features. Lets the user verify the recorded
+    # pose and gives them a written reference for later.
+    print()
+    print(format_gesture_summary(gesture))
 
     print()
     print("Next: run  python tools/custom_gestures/test.py  to validate recognition.")

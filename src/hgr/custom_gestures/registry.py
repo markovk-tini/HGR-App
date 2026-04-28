@@ -14,33 +14,29 @@ from typing import Any, Dict, List, Optional
 _ENV_REGISTRY_PATH = "HGR_CUSTOM_GESTURES_PATH"
 _DEFAULT_REGISTRY_PATH = Path.home() / ".hgr_app" / "custom_gestures.json"
 
-# Feature vector layout (total 81):
+# Feature vector layout (total 87):
 #   [0:63]   — 21 landmarks * 3 coords, wrist-centered, scaled by |L9|
-#   [63:66]  — 3 adjacent fingertip-pair distances (grouping signal):
-#              |L8-L12|, |L12-L16|, |L16-L20|
-#   [66:71]  — 5 wrist-to-fingertip distances (extension signal):
-#              |L0-L4|, |L0-L8|, |L0-L12|, |L0-L16|, |L0-L20|
-#   [71:81]  — 10 joint-bend angles (curl signal, in radians):
-#              2 angles per finger × 5 fingers; angle = bend at the joint
-#              (0 = bones colinear/extended, π/2 = bent 90°, π = folded).
-#              Order: thumb (L2, L3), index (L6, L7), middle (L10, L11),
-#                     ring (L14, L15), pinky (L18, L19).
+#   [63:66]  — 3 adjacent fingertip-pair distances (grouping signal)
+#   [66:71]  — 5 wrist-to-fingertip distances (extension signal)
+#   [71:81]  — 10 joint-bend angles (in radians)
+#   [81:86]  — 5 per-finger curl-class ordinals (0..4):
+#              0=fully extended, 1=slightly, 2=half, 3=mostly, 4=closed.
+#              Derived from wrist-to-fingertip distance (more robust than
+#              joint angles, which are corrupted by MediaPipe z-noise for
+#              fingers curling toward the palm).
+#   [86:87]  — 1 spread-class ordinal (0..3): tight/small/medium/wide.
 #
-# The trailing 18 structural features are rotation-invariant (distances
-# and angles between landmarks don't change under rigid rotation), and
-# they are multiplied by a weight in the classifier so their contribution
-# dominates the landmark portion — raw landmark Euclidean smears small
-# per-finger differences across 63 dims and loses the signal.
-#
-# Joint angles add a strong "how curled is each finger" signal that the
-# extension distances only approximate. Two poses with similar wrist-to-
-# tip distances but different curl patterns (e.g., a fist with thumb-up
-# vs a fist with thumb tucked) score very differently on joint angles.
-_FEATURE_VECTOR_LEN = 81
+# The categorical features SNAP to integers so they don't flicker under
+# small landmark noise the way the continuous features do. They give the
+# classifier a stable shape signature on top of the precise (but jittery)
+# continuous values.
+_FEATURE_VECTOR_LEN = 87
 _LANDMARK_FEATURE_LEN = 63
 _SPACING_FEATURE_LEN = 3
 _EXTENSION_FEATURE_LEN = 5
 _JOINT_ANGLE_FEATURE_LEN = 10
+_CURL_CLASS_FEATURE_LEN = 5
+_SPREAD_CLASS_FEATURE_LEN = 1
 
 
 def registry_path() -> Path:
@@ -128,21 +124,82 @@ class GestureSample:
                 out.append(_angle(lm, b, c, d))
             return out
 
+        def _derive_curl_classes(extension: List[float]) -> List[float]:
+            """Bucket each finger's wrist-to-tip distance into 5 categories
+            (0=extended .. 4=closed). Per-finger thresholds calibrated
+            against real MediaPipe outputs."""
+            thresholds = (
+                (1.00, 0.90, 0.80, 0.72),  # thumb
+                (1.70, 1.40, 1.05, 0.75),  # index
+                (1.80, 1.50, 1.10, 0.75),  # middle
+                (1.65, 1.35, 1.00, 0.65),  # ring
+                (1.40, 1.15, 0.85, 0.60),  # pinky
+            )
+            classes: List[float] = []
+            for finger_idx in range(5):
+                d = float(extension[finger_idx])
+                t = thresholds[finger_idx]
+                if d >= t[0]:
+                    classes.append(0.0)
+                elif d >= t[1]:
+                    classes.append(1.0)
+                elif d >= t[2]:
+                    classes.append(2.0)
+                elif d >= t[3]:
+                    classes.append(3.0)
+                else:
+                    classes.append(4.0)
+            return classes
+
+        def _derive_spread_class(spacing: List[float]) -> List[float]:
+            """Bucket total fingertip spread into 4 categories (tight..wide).
+            Calibrated against real MediaPipe outputs."""
+            total = sum(spacing)
+            if total < 0.35:
+                return [0.0]
+            if total < 0.65:
+                return [1.0]
+            if total < 1.05:
+                return [2.0]
+            return [3.0]
+
         if len(feats) == _LANDMARK_FEATURE_LEN:
-            # Legacy schema 1: landmarks only (63 floats).
+            # Legacy schema 1: landmarks only (63 floats). Derive everything.
             lm = feats
-            feats = (list(feats)
-                     + _derive_spacing(lm)
-                     + _derive_extension(lm)
-                     + _derive_joint_angles(lm))
+            spacing = _derive_spacing(lm)
+            extension = _derive_extension(lm)
+            joints = _derive_joint_angles(lm)
+            feats = (list(feats) + spacing + extension + joints
+                     + _derive_curl_classes(extension)
+                     + _derive_spread_class(spacing))
         elif len(feats) == _LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN:
             # Legacy schema 2: landmarks + spacing (66 floats).
             lm = feats[:_LANDMARK_FEATURE_LEN]
-            feats = list(feats) + _derive_extension(lm) + _derive_joint_angles(lm)
+            spacing = list(feats[_LANDMARK_FEATURE_LEN:])
+            extension = _derive_extension(lm)
+            joints = _derive_joint_angles(lm)
+            feats = (list(feats) + extension + joints
+                     + _derive_curl_classes(extension)
+                     + _derive_spread_class(spacing))
         elif len(feats) == _LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN + _EXTENSION_FEATURE_LEN:
             # Legacy schema 3: landmarks + spacing + extension (71 floats).
             lm = feats[:_LANDMARK_FEATURE_LEN]
-            feats = list(feats) + _derive_joint_angles(lm)
+            spacing = list(feats[_LANDMARK_FEATURE_LEN:_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN])
+            extension = list(feats[_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN
+                                   :_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN + _EXTENSION_FEATURE_LEN])
+            joints = _derive_joint_angles(lm)
+            feats = (list(feats) + joints
+                     + _derive_curl_classes(extension)
+                     + _derive_spread_class(spacing))
+        elif len(feats) == (_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN
+                            + _EXTENSION_FEATURE_LEN + _JOINT_ANGLE_FEATURE_LEN):
+            # Legacy schema 4: landmarks + spacing + extension + joints (81 floats).
+            spacing = list(feats[_LANDMARK_FEATURE_LEN:_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN])
+            extension = list(feats[_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN
+                                   :_LANDMARK_FEATURE_LEN + _SPACING_FEATURE_LEN + _EXTENSION_FEATURE_LEN])
+            feats = (list(feats)
+                     + _derive_curl_classes(extension)
+                     + _derive_spread_class(spacing))
         return cls(features=feats)
 
 

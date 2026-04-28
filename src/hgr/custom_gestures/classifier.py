@@ -9,54 +9,49 @@ from .recorder import normalize_landmarks
 from .registry import CustomGesture, GestureRegistry
 
 
-# Feature space: landmarks are normalized so wrist=origin and
-# wrist->middle-finger-MCP = unit length. Typical hand feature vectors
-# have norm ~10-15 in this space, so small rotations move points by
-# more than a glance would suggest. Empirical calibration:
-#   - 0 (identical):                    score 1.00
-#   - ~0.3 (natural jitter):            score 0.94
-#   - ~0.7 (small tilt within aug range): score 0.86
-#   - ~1.5 (same gesture, different hand orientation outside aug): score 0.70
-#   - ~3.0 (finger-spread change):      score 0.40
-#   - ~5.0+ (totally different pose):   score 0.00
-_SCORE_ZERO_DISTANCE = 5.0
+# Score curve: tuned for the 87-dim feature vector. Higher
+# _SCORE_ZERO_DISTANCE keeps typical same-pose distances mapping to
+# scores that comfortably clear the default 0.88 threshold.
+_SCORE_ZERO_DISTANCE = 7.0
 
-# Structural features (fingertip spacing + wrist-to-fingertip extension)
-# come last in the feature vector. They directly encode finger-grouping
-# and finger-extension patterns — raw-landmark Euclidean smears these
-# across 63 dims and loses the signal, so we boost their effective
-# contribution. Weighting goes into Euclidean as w² on the squared diff,
-# so weight=5 amplifies structural-feature variance 25×.
-#
-# Why so aggressive: rotation augmentation (±16° around z, ±12° x/y) can
-# shift fingertips laterally by ~1 unit, which means a query with
-# meaningfully spread fingers can land geographically close to a rotated
-# "fingers-together" sample in landmark space. Without dominant structural
-# weighting the classifier picks the rotated variant as its best match
-# even though spacing/extension clearly disagree.
-#
-# Empirical:
-#   - 1.0 (none): peace-sign still scored above threshold
-#   - 2.5: peace-sign rejected; fingers-spread-but-extended still matched
-#   - 5.0: fingers-spread-but-extended cleanly rejected, but pinch poses
-#          (OK sign) became too brittle — small natural drift in the
-#          thumb-index contact got amplified 25× in squared distance.
-#   - 4.0: pinch poses tolerate natural drift, finger-grouping/extension
-#          rejection still solid (peace-sign + extension diff dominates).
 _LANDMARK_FEATURE_LEN = 63
 _SPACING_FEATURE_LEN = 3
 _EXTENSION_FEATURE_LEN = 5
 _JOINT_ANGLE_FEATURE_LEN = 10
-_STRUCTURAL_FEATURE_LEN = (
-    _SPACING_FEATURE_LEN + _EXTENSION_FEATURE_LEN + _JOINT_ANGLE_FEATURE_LEN
-)
-_STRUCTURAL_WEIGHT = 4.0
+_CURL_CLASS_FEATURE_LEN = 5
+_SPREAD_CLASS_FEATURE_LEN = 1
 
-# Default minimum gap between best and second-best gesture scores. If
-# multiple gestures land within this window of each other, neither is
-# fired — the user is between two registered poses, and forcing one to
-# win would just produce the wrong action. Tunable per-classifier.
+# Spacing + extension features have small magnitudes (~0.1-4 range), so
+# they need amplification to compete with the 63-dim landmark portion.
+_DISTANCE_FEATURE_WEIGHT = 4.0
+
+# Joint angles are in radians (0..π), inherently larger magnitude. Kept
+# at 1.0 — they still discriminate strongly between distinct poses
+# (1-2 rad gaps between extended and curled) but small natural angle
+# wiggles (~0.05-0.2 rad per joint) don't punish same-pose recognition.
+_JOINT_ANGLE_WEIGHT = 1.0
+
+# Categorical class features are integer ordinals (0..4 curl, 0..3
+# spread). Same pose held steady → zero variance (the bucket boundaries
+# are far from any natural noise floor for clearly-in-class poses).
+# Different poses → 1-4 unit gaps. Weight 2.0 makes between-class
+# differences contribute meaningfully without punishing rare
+# boundary-jitter cases.
+_CLASS_FEATURE_WEIGHT = 2.0
+
+# Region offsets used during reload/match.
+_DISTANCE_REGION_LEN = _SPACING_FEATURE_LEN + _EXTENSION_FEATURE_LEN
+_CLASS_REGION_LEN = _CURL_CLASS_FEATURE_LEN + _SPREAD_CLASS_FEATURE_LEN
+
+# Default minimum gap between best and second-best gesture scores.
 _DEFAULT_CONFIDENCE_MARGIN = 0.05
+
+# Hysteresis: once a gesture is actively matching, allow its score to dip
+# this far below the entry threshold before letting go. Prevents the
+# "flickers on/off while held still" pattern caused by per-frame noise
+# crossing the boundary. Only kicks in when classify() is called with a
+# `sticky_name` hint (test.py passes the current hold_name).
+_DEFAULT_HYSTERESIS = 0.06
 
 
 def _distance_to_score(distance: float) -> float:
@@ -107,6 +102,7 @@ class GestureClassifier:
         gestures: Optional[Iterable[CustomGesture]] = None,
         threshold: float = 0.88,
         confidence_margin: float = _DEFAULT_CONFIDENCE_MARGIN,
+        hysteresis: float = _DEFAULT_HYSTERESIS,
     ) -> None:
         if registry is None and gestures is None:
             raise ValueError("either registry or gestures must be provided")
@@ -116,6 +112,7 @@ class GestureClassifier:
         )
         self._threshold = float(threshold)
         self._confidence_margin = max(0.0, float(confidence_margin))
+        self._hysteresis = max(0.0, float(hysteresis))
         self._matrix: Optional[np.ndarray] = None
         self._sample_to_gesture_idx: List[int] = []
         self._sample_to_local_idx: List[int] = []
@@ -154,38 +151,64 @@ class GestureClassifier:
             self._matrix = None
             return
         matrix = np.asarray(rows, dtype=np.float32)
-        # Apply the structural-feature weight in-place so classify() is a
-        # plain unweighted Euclidean — simpler and faster than weighting on
-        # every call.
-        structural_start = _LANDMARK_FEATURE_LEN
-        structural_end = structural_start + _STRUCTURAL_FEATURE_LEN
-        if matrix.shape[1] >= structural_end:
-            matrix[:, structural_start:structural_end] *= _STRUCTURAL_WEIGHT
+        # Apply per-region weights in-place so classify() is a plain
+        # unweighted Euclidean — simpler and faster than weighting on every
+        # call. Three weighted regions:
+        #   distance features (spacing + extension) → _DISTANCE_FEATURE_WEIGHT
+        #   joint angles                            → _JOINT_ANGLE_WEIGHT
+        #   class features (curl + spread)          → _CLASS_FEATURE_WEIGHT
+        dist_start = _LANDMARK_FEATURE_LEN
+        dist_end = dist_start + _DISTANCE_REGION_LEN
+        joint_end = dist_end + _JOINT_ANGLE_FEATURE_LEN
+        class_end = joint_end + _CLASS_REGION_LEN
+        if matrix.shape[1] >= dist_end:
+            matrix[:, dist_start:dist_end] *= _DISTANCE_FEATURE_WEIGHT
+        if matrix.shape[1] >= joint_end:
+            matrix[:, dist_end:joint_end] *= _JOINT_ANGLE_WEIGHT
+        if matrix.shape[1] >= class_end:
+            matrix[:, joint_end:class_end] *= _CLASS_FEATURE_WEIGHT
         self._matrix = matrix
 
     def _match_from_features(
-        self, features: np.ndarray
+        self,
+        features: np.ndarray,
+        *,
+        sticky_name: Optional[str] = None,
     ) -> Optional[MatchResult]:
         if self._matrix is None:
             self.reload()
         if self._matrix is None or self._matrix.size == 0:
             return None
-        # Apply the same structural weight to the query so matrix rows and
-        # query live in the same weighted space.
+        # Apply the same per-region weights to the query so matrix rows
+        # and query live in the same weighted space.
         q = np.array(features, dtype=np.float32, copy=True)
-        structural_start = _LANDMARK_FEATURE_LEN
-        structural_end = structural_start + _STRUCTURAL_FEATURE_LEN
-        if q.shape[0] >= structural_end:
-            q[structural_start:structural_end] *= _STRUCTURAL_WEIGHT
+        dist_start = _LANDMARK_FEATURE_LEN
+        dist_end = dist_start + _DISTANCE_REGION_LEN
+        joint_end = dist_end + _JOINT_ANGLE_FEATURE_LEN
+        class_end = joint_end + _CLASS_REGION_LEN
+        if q.shape[0] >= dist_end:
+            q[dist_start:dist_end] *= _DISTANCE_FEATURE_WEIGHT
+        if q.shape[0] >= joint_end:
+            q[dist_end:joint_end] *= _JOINT_ANGLE_WEIGHT
+        if q.shape[0] >= class_end:
+            q[joint_end:class_end] *= _CLASS_FEATURE_WEIGHT
         diffs = self._matrix - q
         distances = np.linalg.norm(diffs, axis=1)
         best_idx = int(np.argmin(distances))
         best_distance = float(distances[best_idx])
         score = _distance_to_score(best_distance)
-        if score < self._threshold:
-            return None
         best_g_idx = self._sample_to_gesture_idx[best_idx]
         best_g = self._gestures[best_g_idx]
+
+        # Hysteresis: if the best match is the gesture the caller says is
+        # currently active, relax the threshold. Stops the "flickers while
+        # held still" pattern when the score sits near the boundary.
+        effective_threshold = self._threshold
+        if sticky_name is not None and best_g.name == sticky_name:
+            effective_threshold = max(0.0, self._threshold - self._hysteresis)
+
+        if score < effective_threshold:
+            return None
 
         # Confidence-margin check: best score must beat the best score of
         # any OTHER gesture by at least confidence_margin. Find the best
@@ -223,16 +246,33 @@ class GestureClassifier:
             runner_up_score=runner_up_score,
         )
 
-    def classify(self, landmarks: np.ndarray) -> Optional[MatchResult]:
+    def classify(
+        self,
+        landmarks: np.ndarray,
+        *,
+        sticky_name: Optional[str] = None,
+    ) -> Optional[MatchResult]:
         """Classify a live (21, 3) landmark array. Returns the best match
-        above threshold, or None."""
-        return self._match_from_features(normalize_landmarks(landmarks))
+        above threshold, or None.
+
+        Pass `sticky_name` to engage hysteresis: if the best match would
+        be the named gesture, the threshold drops by the configured
+        hysteresis amount. Use this to keep an actively-held gesture
+        recognized despite per-frame score wiggle near the boundary.
+        """
+        return self._match_from_features(
+            normalize_landmarks(landmarks), sticky_name=sticky_name
+        )
 
     def classify_raw(
-        self, feature_vector: Sequence[float]
+        self,
+        feature_vector: Sequence[float],
+        *,
+        sticky_name: Optional[str] = None,
     ) -> Optional[MatchResult]:
         """Alternate entry point when the caller already has a normalized
-        63-dim feature vector (e.g., reusing an existing pipeline's output)."""
+        87-dim feature vector (e.g., reusing an existing pipeline's output)."""
         return self._match_from_features(
-            np.asarray(feature_vector, dtype=np.float32)
+            np.asarray(feature_vector, dtype=np.float32),
+            sticky_name=sticky_name,
         )
