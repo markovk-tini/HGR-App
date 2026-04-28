@@ -9,6 +9,7 @@ SRC = ROOT / "src"
 ASSETS = ROOT / "assets"
 GESTURE_GUIDE = ROOT / "GestureGuide"
 WHISPER_BUNDLES = [ROOT / "whisper.cpp", ROOT / "whisper_bundle"]
+LLAMA_ROOT = ROOT / "llama.cpp"
 ICON = ASSETS / "icons" / "touchless_icon.ico"
 
 datas = []
@@ -98,6 +99,56 @@ def _collect_whisper_runtime(roots):
 
 
 datas += _collect_whisper_runtime(WHISPER_BUNDLES)
+
+
+def _collect_llama_runtime(llama_root):
+    """Bundle the llama.cpp runtime binaries used by the local Live API agent.
+
+    The Live API local backend (`src/hgr/live_api/local_backend.py`) and the
+    grammar corrector (`src/hgr/voice/llama_server.py`) both spawn
+    `llama-server.exe` from `llama.cpp/build_<backend>/bin/`. We mirror the
+    whisper bundling strategy: only ship the runtime files (.exe / .dll /
+    .bin), not the CMake scaffolding, and preserve the canonical layout
+    so the existing discovery code doesn't need a packaged-vs-source switch.
+
+    GGUF model files are intentionally NOT bundled — they're 3-5 GB each
+    which would balloon the installer past the Inno Setup MAX_PATH limits
+    and double the download. Models live in
+    `~/Documents/TouchlessVoiceModels/` and the user downloads them once.
+
+    Future Phase 2 (vision) will use `llama-mtmd-cli.exe` /
+    `llama-qwen2vl-cli.exe` from the same bin/ dir, which is why we copy
+    every .exe rather than just llama-server.exe.
+    """
+    if not llama_root.exists():
+        return []
+    keep_ext = {".exe", ".dll"}
+    collected = []
+    seen: set[tuple[str, str]] = set()
+    for build_dir_name in ("build_cuda", "build_vulkan", "build_cpu", "build"):
+        bin_dir = llama_root / build_dir_name / "bin"
+        if not bin_dir.exists():
+            continue
+        # MSBuild emits to bin/Release; CMake to bin directly. Accept both
+        # and remap to the canonical bin/ layout the discovery code uses.
+        for source_dir in (bin_dir / "Release", bin_dir):
+            if not source_dir.exists():
+                continue
+            target = f"llama.cpp/{build_dir_name}/bin"
+            for entry in source_dir.iterdir():
+                if not entry.is_file():
+                    continue
+                if entry.suffix.lower() not in keep_ext:
+                    continue
+                key = (build_dir_name, entry.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append((str(entry), target))
+    return collected
+
+
+datas += _collect_llama_runtime(LLAMA_ROOT)
 
 a = Analysis(
     [str(ROOT / "run_app.py")],

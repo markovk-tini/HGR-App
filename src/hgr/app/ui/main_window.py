@@ -72,6 +72,7 @@ from ...config.app_config import (
 )
 from ...debug.debug_window import DebugWindow as StandaloneDebugWindow
 from ...debug.voice_command_listener import list_input_microphones
+from ...utils.runtime_paths import app_base_path
 from ...voice.save_prompt import SavePromptProcessor
 from ..integration.noop_engine import GestureWorker
 from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, RecordingIndicatorOverlay
@@ -798,12 +799,35 @@ class GestureMediaWidget(QFrame):
             layout.addWidget(fallback, 0, Qt.AlignCenter)
 
     def _resolve_media_path(self) -> Path | None:
-        root = Path(__file__).resolve().parents[4] / "GestureGuide"
         candidate_name = self._image_name or self._video_name
         if not candidate_name:
             return None
-        candidate = root / candidate_name
-        return candidate if candidate.exists() else None
+        # In source mode (python run_app.py) the GestureGuide folder
+        # sits at the project root, four parents above this file.
+        # In a PyInstaller --onedir bundle the spec copies it to
+        # `<bundle>/_internal/GestureGuide/`, which is what
+        # app_base_path() points at when sys.frozen is True. Try both
+        # so the gesture cards show real images / videos in either
+        # mode — previously the bundled app fell through to the
+        # auto-generated GestureSketchWidget because parents[4] was
+        # nowhere near the bundled GestureGuide directory.
+        candidate_roots: list[Path] = []
+        try:
+            candidate_roots.append(app_base_path() / "GestureGuide")
+        except Exception:
+            pass
+        try:
+            candidate_roots.append(Path(__file__).resolve().parents[4] / "GestureGuide")
+        except Exception:
+            pass
+        for root in candidate_roots:
+            candidate = root / candidate_name
+            try:
+                if candidate.exists():
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     def _handle_media_status(self, status) -> None:
         if self._player is None or self._loop_timer is None:
@@ -3064,6 +3088,10 @@ class MainWindow(QMainWindow):
         debug_row.addStretch(1)
         body_layout.addLayout(debug_row)
 
+        # Local Agent UI removed (paused). The underlying live_api/
+        # package code is intact — re-enable by restoring the home-page
+        # card + handlers from git history when ready.
+
         body_layout.addStretch(1)
         return page
 
@@ -3537,7 +3565,32 @@ class MainWindow(QMainWindow):
         self._refresh_low_fps_button_label()
 
         # ============================================================
-        # 5. SAVE CAMERA SELECTION (at the bottom)
+        # 5. LITE MODE
+        # ============================================================
+        box_layout.addWidget(_section_header("Lite Mode"))
+
+        lite_mode_note = QLabel(
+            "Lite Mode runs the lite hand-tracking model and a smaller inference frame for ~2.5× faster processing on every "
+            "machine. Tracking stays accurate for normal poses; very rare extreme angles or heavy occlusions may be slightly "
+            "less stable. A small \"Lite\" badge appears in the live and mini viewers while it's on."
+        )
+        lite_mode_note.setObjectName("cameraNote")
+        lite_mode_note.setWordWrap(True)
+        box_layout.addWidget(lite_mode_note)
+
+        lite_mode_row = QHBoxLayout()
+        self.lite_mode_button = QPushButton()
+        self.lite_mode_button.setCheckable(True)
+        self.lite_mode_button.setChecked(bool(getattr(self.config, "lite_mode", False)))
+        self.lite_mode_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.lite_mode_button.clicked.connect(self._on_lite_mode_button_toggled)
+        lite_mode_row.addWidget(self.lite_mode_button)
+        lite_mode_row.addStretch(1)
+        box_layout.addLayout(lite_mode_row)
+        self._refresh_lite_mode_button_label()
+
+        # ============================================================
+        # 6. SAVE CAMERA SELECTION (at the bottom)
         # ============================================================
         box_layout.addWidget(_section_header("Save Camera Selection"))
 
@@ -3892,6 +3945,35 @@ class MainWindow(QMainWindow):
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
                 "Last action: Low FPS Mode on" if self.config.low_fps_mode else "Last action: Low FPS Mode off"
+            )
+
+    def _refresh_lite_mode_button_label(self) -> None:
+        if not hasattr(self, "lite_mode_button"):
+            return
+        on = bool(getattr(self.config, "lite_mode", False))
+        self.lite_mode_button.setText("Lite Mode: ON" if on else "Lite Mode")
+        self.lite_mode_button.setChecked(on)
+
+    def _on_lite_mode_button_toggled(self, checked: bool) -> None:
+        self.config.lite_mode = bool(checked)
+        save_config(self.config)
+        self._refresh_lite_mode_button_label()
+        worker = getattr(self, "_worker", None)
+        if worker is not None and hasattr(worker, "set_lite_mode"):
+            worker.set_lite_mode(self.config.lite_mode)
+        # Push the new state into the live + mini viewers so the
+        # blue "Lite" badge flips immediately, even before the next
+        # frame from the worker arrives.
+        for viewer_attr in ("live_view_window", "mini_live_viewer"):
+            viewer = getattr(self, viewer_attr, None)
+            if viewer is not None and hasattr(viewer, "set_lite_mode_active"):
+                try:
+                    viewer.set_lite_mode_active(self.config.lite_mode)
+                except Exception:
+                    pass
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText(
+                "Last action: Lite Mode on" if self.config.lite_mode else "Last action: Lite Mode off"
             )
 
 
@@ -5626,16 +5708,31 @@ class MainWindow(QMainWindow):
                 return
     
             cameras = self._discovered_cameras if self._discovered_cameras else self.refresh_camera_inventory(update_status=True, notify=False)
-            if not cameras:
+            phone_qr_paired = (
+                bool(getattr(self.config, "phone_camera_qr_active", False))
+                and self._current_phone_camera_qr_server() is not None
+            )
+            if not cameras and not phone_qr_paired:
+                # Pure no-camera start. The phone QR path is its own
+                # source so a paired phone is enough to start without
+                # any local webcam — only fail here when neither is
+                # available.
                 QMessageBox.warning(self, "Touchless", "No available camera was found.")
                 self.status_label.setText("Status: no camera found")
                 return
-    
-            selected_camera_index = self._resolve_camera_for_start(cameras)
-            if selected_camera_index is None:
-                self.status_label.setText("Status: start cancelled")
-                self.last_action_label.setText("Last action: camera selection cancelled")
-                return
+
+            if cameras:
+                selected_camera_index = self._resolve_camera_for_start(cameras)
+                if selected_camera_index is None:
+                    self.status_label.setText("Status: start cancelled")
+                    self.last_action_label.setText("Last action: camera selection cancelled")
+                    return
+            else:
+                # No local cameras but phone QR is paired — let the
+                # phone source drive the engine. _open_camera reads
+                # camera_index_override=None as 'pick the phone QR
+                # source if active', which is what we want here.
+                selected_camera_index = None
 
             if self._worker is not None:
                 # Disconnect every signal from the old worker BEFORE
@@ -5731,7 +5828,12 @@ class MainWindow(QMainWindow):
             # POSTs are flowing from the phone.
             self._apply_phone_mic_preference()
 
-            self.camera_label.setText(f"Camera: Camera {selected_camera_index}")
+            if phone_qr_active and selected_camera_index is None:
+                self.camera_label.setText("Camera: Phone (QR)")
+            elif phone_url_active and selected_camera_index is None:
+                self.camera_label.setText("Camera: Phone (URL)")
+            else:
+                self.camera_label.setText(f"Camera: Camera {selected_camera_index}")
             self.status_label.setText("Status: starting...")
             self.last_action_label.setText("Last action: starting gesture and voice control")
             self.start_button.setEnabled(False)
@@ -7428,44 +7530,57 @@ class MainWindow(QMainWindow):
             selected.reverse()
             total_duration = sum(max(1e-3, float(entry.get("end_time", 0.0)) - float(entry.get("start_time", 0.0))) for entry in selected)
             start_trim = max(0.0, total_duration - float(duration_seconds))
-            concat_path = self._build_clip_concat_file(selected)
-            if concat_path is None:
-                return False
-            try:
-                output_path = self._clip_output_specs(duration_seconds)[0][0]
-                capture_region = QRect(self._clip_cache_region) if self._clip_cache_region is not None else QRect(self._screens_union_geometry())
-                filters = []
-                crop_filter = self._clip_crop_filter(capture_region, target_region)
-                if crop_filter:
-                    filters.append(crop_filter)
-                filters.append(f"trim=start={start_trim:.3f}:duration={float(duration_seconds):.3f}")
-                filters.append("setpts=PTS-STARTPTS")
-                command = [
-                    self._ffmpeg_path,
-                    "-hide_banner", "-loglevel", "error", "-y",
-                    "-f", "concat", "-safe", "0", "-i", str(concat_path),
-                    "-an",
-                    "-vf", ",".join(filters),
-                    *self._ffmpeg_encoder_args(purpose="clip_export", fps=self._clip_cache_fps),
-                    str(output_path),
-                ]
-                completed = subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1024:
-                    actual_seconds = min(float(duration_seconds), max(0.0, total_duration))
-                    self.last_action_label.setText(f"Last action: saved {actual_seconds:.1f}s clip to {output_path}")
-                    self._queue_post_action_save_prompt("clips", output_path)
-                    return True
-                return False
-            finally:
-                try:
-                    concat_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            output_path = self._clip_output_specs(duration_seconds)[0][0]
+            capture_region = QRect(self._clip_cache_region) if self._clip_cache_region is not None else QRect(self._screens_union_geometry())
+            # Use the concat *filter* instead of the concat demuxer.
+            # Segments were recorded with -reset_timestamps 1, which
+            # makes each .mkv start at PTS 0; the concat demuxer's
+            # PTS-chaining logic was giving truncated output (e.g.,
+            # 60s clip → 36s) when a few segments had recently
+            # wrapped, because some segments were treated as
+            # overlapping the timeline of earlier ones. The concat
+            # filter joins frame-by-frame and produces a
+            # guaranteed-monotonic PTS, so trim=start=X:duration=N
+            # then keeps exactly N seconds without surprises. Each
+            # input file has the same resolution/codec/fps (we
+            # recorded them with one ffmpeg pass), which is the
+            # requirement for the concat filter.
+            inputs: list[str] = []
+            for entry in selected:
+                inputs.extend(["-i", str(Path(entry["path"]).resolve())])
+            n = len(selected)
+            concat_in = "".join(f"[{i}:v]" for i in range(n))
+            filter_chain = [f"{concat_in}concat=n={n}:v=1:a=0"]
+            crop_filter = self._clip_crop_filter(capture_region, target_region)
+            if crop_filter:
+                filter_chain.append(crop_filter)
+            filter_chain.append(
+                f"trim=start={start_trim:.3f}:duration={float(duration_seconds):.3f}"
+            )
+            filter_chain.append("setpts=PTS-STARTPTS")
+            filter_complex = ",".join(filter_chain) + "[vout]"
+            command = [
+                self._ffmpeg_path,
+                "-hide_banner", "-loglevel", "error", "-y",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-an",
+                *self._ffmpeg_encoder_args(purpose="clip_export", fps=self._clip_cache_fps),
+                str(output_path),
+            ]
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1024:
+                actual_seconds = min(float(duration_seconds), max(0.0, total_duration))
+                self.last_action_label.setText(f"Last action: saved {actual_seconds:.1f}s clip to {output_path}")
+                self._queue_post_action_save_prompt("clips", output_path)
+                return True
+            return False
         finally:
             self._cleanup_ffmpeg_clip_cache_files()
             if was_active and self._worker is not None and getattr(self._worker, "is_running", False):

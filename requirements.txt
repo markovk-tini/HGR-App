@@ -10,3 +10,8 @@ pycaw
 comtypes
 sounddevice
 faster-whisper
+
+# Optional — only needed by the experimental Live API agent
+# (src/hgr/live_api). The rest of the app launches fine without it;
+# clicking "Test Live API" in the UI shows a friendly install hint.
+websocket-client

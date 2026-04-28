@@ -28,8 +28,6 @@ class DictationEvent:
 _SAMPLE_RATE = 16000
 _BLOCK_MS = 100
 _BLOCK_SAMPLES = _SAMPLE_RATE * _BLOCK_MS // 1000
-_MIN_DECODE_MS = 500
-_DECODE_INTERVAL_MS = 300
 _SILENCE_COMMIT_MS = 2000
 _MAX_UTTERANCE_MS = 30000
 _MIN_SPEECH_MS = 500
@@ -85,54 +83,11 @@ def _match_sd_input_device(preferred_name: str) -> Optional[int]:
     return None
 
 
-_TOKEN_TRAIL_PUNCT = re.compile(r"[\s.,!?;:\"')\]]+$")
-_TOKEN_LEAD_PUNCT = re.compile(r"^[\s.,!?;:\"'(\[]+")
-
-
-def _norm_token(tok: str) -> str:
-    return _TOKEN_LEAD_PUNCT.sub("", _TOKEN_TRAIL_PUNCT.sub("", tok)).lower()
-
-
-class _LocalAgreement:
-    """LocalAgreement-2 committer: a token is committed once it appears
-    identically in two consecutive hypotheses. The unstable tail stays as
-    a "pending" suffix that can still change between decodes.
-    """
-
-    def __init__(self) -> None:
-        self._prev: List[str] = []
-        self._committed: List[str] = []
-
-    def update(self, new_tokens: List[str]) -> Tuple[List[str], List[str]]:
-        committed_n = len(self._committed)
-        new_tail = new_tokens[committed_n:] if len(new_tokens) >= committed_n else []
-        prev_tail = self._prev[committed_n:] if len(self._prev) >= committed_n else []
-
-        agree = 0
-        for a, b in zip(new_tail, prev_tail):
-            if _norm_token(a) == _norm_token(b) and _norm_token(a):
-                agree += 1
-            else:
-                break
-        if agree > 0:
-            self._committed.extend(new_tail[:agree])
-
-        self._prev = list(new_tokens)
-        pending = new_tokens[len(self._committed):] if len(new_tokens) > len(self._committed) else []
-        return (list(self._committed), list(pending))
-
-    def reset(self) -> None:
-        self._prev = []
-        self._committed = []
-
-
 class WhisperStreamer:
-    """Local streaming dictation using faster-whisper + Silero VAD +
-    LocalAgreement-2.
+    """Local streaming dictation using faster-whisper.
 
-    API-compatible with the prior whisper-stream subprocess streamer. The
-    subprocess, the SDL mic-index probe, and the stderr parser have been
-    removed. Audio capture is now in-process via sounddevice and decoding
+    Commit-only decoding: one decode per utterance, triggered by RMS-based
+    silence detection. Audio capture is in-process via sounddevice; decode
     is in-process via faster-whisper (CTranslate2).
     """
 
@@ -276,12 +231,9 @@ class WhisperStreamer:
         mic_label = f"idx {self._mic_index}" if self._mic_index is not None else "default"
         print(f"[whisper-stream] listening (mic={mic_label}, backend={self._backend})")
 
-        la = _LocalAgreement()
         utterance = np.zeros(0, dtype=np.float32)
-        samples_at_last_decode = 0
         silence_run_ms = 0.0
         speech_ms = 0.0
-        last_hyp_text = ""
 
         try:
             while not stop_event.is_set():
@@ -307,11 +259,8 @@ class WhisperStreamer:
                     continue
 
                 if utterance.size == 0:
-                    samples_at_last_decode = 0
                     silence_run_ms = 0.0
                     speech_ms = 0.0
-                    la.reset()
-                    last_hyp_text = ""
 
                 utterance = np.concatenate([utterance, block])
                 if is_silent_block:
@@ -332,11 +281,8 @@ class WhisperStreamer:
                 if speech_ms < _MIN_SPEECH_MS:
                     print(f"[whisper-stream] skip decode (speech={speech_ms:.0f}ms < {_MIN_SPEECH_MS}ms, audio={utt_ms:.0f}ms)")
                     utterance = np.zeros(0, dtype=np.float32)
-                    samples_at_last_decode = 0
                     silence_run_ms = 0.0
                     speech_ms = 0.0
-                    la.reset()
-                    last_hyp_text = ""
                     continue
 
                 t0 = time.monotonic()
@@ -353,11 +299,8 @@ class WhisperStreamer:
                     event_callback(DictationEvent(event="final", text=final_text, confidence=1.0))
                     print(f"[whisper-stream] final (decode={decode_ms:.0f}ms, audio={utt_ms:.0f}ms): {final_text!r}")
                 utterance = np.zeros(0, dtype=np.float32)
-                samples_at_last_decode = 0
                 silence_run_ms = 0.0
                 speech_ms = 0.0
-                la.reset()
-                last_hyp_text = ""
         except Exception as exc:
             msg = f"stream loop error: {exc}"
             print(f"[whisper-stream] {msg}")

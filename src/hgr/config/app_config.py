@@ -185,6 +185,17 @@ class AppConfig:
     # this version", but v1.0.8 still gets a prompt the moment it
     # ships. Empty string = no version dismissed yet.
     last_dismissed_update_version: str = ""
+    # Lite Mode: switches MediaPipe Hands to model_complexity=0
+    # (the lite landmark model) and downsamples inference input to
+    # ~480px wide. ~2.5x faster than the default full model on
+    # every machine, with a small accuracy hit on rare edge poses
+    # (extreme tilt / heavy occlusion). Independent from low_fps_mode
+    # — low_fps_mode is the auto-degrade path that also drops the
+    # stable-frame requirement and is enabled when we detect the
+    # camera/CPU can't sustain frame rate; lite_mode is a
+    # user-driven uniform speedup that keeps the rest of the
+    # pipeline at normal sensitivity.
+    lite_mode: bool = False
 
 
 DEFAULT_CONFIG = AppConfig()

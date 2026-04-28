@@ -109,17 +109,22 @@ class SpotifyGestureRouter:
                 self._control_text = "spotify inactive on device"
                 self._set_action("spotify_toggle_idle")
                 return
-            toggled = controller.toggle_playback()
-            self._control_text = controller.message
-            self._set_action("spotify_toggle" if toggled else "spotify_toggle_failed")
+            # Fire HTTP call on a background thread so the gesture
+            # worker doesn't block on the 50-300 ms Spotify Web API
+            # roundtrip. Action label is set optimistically; the
+            # controller's `message` updates when the call completes
+            # and the next gesture frame picks it up.
+            controller.dispatch_async(controller.toggle_playback)
+            self._control_text = "spotify play/pause"
+            self._set_action("spotify_toggle")
         elif stable_label == "ok":
             if not self._can_control_without_focus(controller):
                 self._control_text = "spotify inactive on device"
                 self._set_action("spotify_shuffle_idle")
                 return
-            toggled = controller.toggle_shuffle()
-            self._control_text = controller.message
-            self._set_action("spotify_shuffle" if toggled else "spotify_shuffle_failed")
+            controller.dispatch_async(controller.toggle_shuffle)
+            self._control_text = "spotify shuffle"
+            self._set_action("spotify_shuffle")
 
     def _update_dynamic(self, dynamic_label: str, controller: SpotifyController, now: float) -> None:
         actionable = {"swipe_left", "swipe_right", "repeat_circle"}
@@ -147,16 +152,23 @@ class SpotifyGestureRouter:
 
         self._dynamic_cooldown_until = now + self.dynamic_cooldown_seconds
         self._dynamic_latched_label = dynamic_label
+        # Fire HTTP calls on a background thread — dynamic gestures
+        # (swipes / repeat circle) used to spike the gesture
+        # worker's frame to 200+ ms during the Spotify Web API
+        # roundtrip. Cooldowns + latching above ensure we don't
+        # double-fire while a dispatch is in flight.
         if dynamic_label == "swipe_left":
-            success = controller.previous_track()
-            self._set_action("spotify_previous" if success else "spotify_previous_failed")
+            controller.dispatch_async(controller.previous_track)
+            self._control_text = "spotify previous track"
+            self._set_action("spotify_previous")
         elif dynamic_label == "swipe_right":
-            success = controller.next_track()
-            self._set_action("spotify_next" if success else "spotify_next_failed")
+            controller.dispatch_async(controller.next_track)
+            self._control_text = "spotify next track"
+            self._set_action("spotify_next")
         else:
-            success = controller.toggle_repeat_track()
-            self._set_action("spotify_repeat" if success else "spotify_repeat_failed")
-        self._control_text = controller.message
+            controller.dispatch_async(controller.toggle_repeat_track)
+            self._control_text = "spotify repeat toggle"
+            self._set_action("spotify_repeat")
 
     def _can_control_without_focus(self, controller: SpotifyController) -> bool:
         # Stricter than the old is_running() catch-all: a Spotify

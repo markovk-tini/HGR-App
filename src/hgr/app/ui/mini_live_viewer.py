@@ -46,6 +46,18 @@ class MiniLiveViewer(QWidget):
         self.title_label = QLabel("Touchless")
         self.title_label.setObjectName("miniTitle")
         header_layout.addWidget(self.title_label)
+
+        # Light-blue Lite Mode badge — only visible while
+        # config.lite_mode is on. Sits between the title and the
+        # buttons so it's the first thing the user notices when the
+        # mode flips. We use the same stylesheet hook as the gesture
+        # chip so the colour pops against the dark header surface.
+        self.lite_mode_badge = QLabel("Lite")
+        self.lite_mode_badge.setObjectName("miniLiteBadge")
+        self.lite_mode_badge.setAlignment(Qt.AlignCenter)
+        self.lite_mode_badge.setVisible(bool(getattr(self.config, "lite_mode", False)))
+        header_layout.addWidget(self.lite_mode_badge)
+
         header_layout.addStretch(1)
 
         self.enlarge_button = QPushButton("Enlarge")
@@ -125,6 +137,16 @@ class MiniLiveViewer(QWidget):
                 padding: 6px 8px;
                 font-weight: 800;
             }}
+            QLabel#miniLiteBadge {{
+                background-color: rgba(96,165,250,0.18);
+                color: #93C5FD;
+                border: 1px solid rgba(147,197,253,0.55);
+                border-radius: 10px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 0.5px;
+            }}
             QPushButton#miniButton {{
                 background-color: rgba(255,255,255,0.07);
                 color: {self.config.text_color};
@@ -148,6 +170,10 @@ class MiniLiveViewer(QWidget):
     def set_gestures_enabled(self, enabled: bool) -> None:
         self._gestures_enabled = bool(enabled)
         self.gesture_toggle_button.setText("Gestures On" if self._gestures_enabled else "Gestures Off")
+
+    def set_lite_mode_active(self, active: bool) -> None:
+        if hasattr(self, "lite_mode_badge"):
+            self.lite_mode_badge.setVisible(bool(active))
 
     def attach_to_worker(self, worker: Optional[object]) -> None:
         if self._worker is worker:

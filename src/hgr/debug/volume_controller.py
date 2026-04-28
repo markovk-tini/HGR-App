@@ -199,6 +199,67 @@ class VolumeController:
             pass
         return None, None
 
+    def get_active_app_audio_info(
+        self,
+        process_names: list[str],
+        *,
+        peak_threshold: float = 0.005,
+    ) -> tuple[str | None, float | None]:
+        """Like get_app_audio_info but only returns an app that is actually
+        playing audio right now (meter peak > threshold). Picks the loudest
+        matching session when several are active. Returns (None, None) if
+        every matching session is silent — used by the dual-bar volume
+        overlay so it doesn't show Chrome just because Chrome is open.
+
+        Called once when the overlay appears (not on a hot tick loop), so
+        the peak enumeration is safe for the Razer/Genshin driver stability
+        concern that forced us to remove the YouTube auto-mode probe.
+        """
+        if platform.system() != "Windows":
+            return None, None
+        try:
+            self._ensure_com_ready()
+            from pycaw.pycaw import (
+                AudioUtilities,
+                IAudioMeterInformation,
+                ISimpleAudioVolume,
+            )
+
+            sessions = AudioUtilities.GetAllSessions()
+            best_peak = float(peak_threshold)
+            best_target: str | None = None
+            best_level: float | None = None
+            for session in sessions:
+                proc = session.Process
+                if proc is None:
+                    continue
+                proc_name = (proc.name() or "").lower()
+                matched_target: str | None = None
+                for target in process_names:
+                    if target.lower() in proc_name:
+                        matched_target = target
+                        break
+                if matched_target is None:
+                    continue
+                try:
+                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                    peak = float(meter.GetPeakValue())
+                except Exception:
+                    continue
+                if peak <= best_peak:
+                    continue
+                try:
+                    simple = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    level = float(simple.GetMasterVolume())
+                except Exception:
+                    level = None
+                best_peak = peak
+                best_target = matched_target
+                best_level = level
+            return best_target, best_level
+        except Exception:
+            return None, None
+
     def get_process_audio_peak(self, process_names: list[str]) -> float | None:
         if platform.system() != "Windows":
             return None

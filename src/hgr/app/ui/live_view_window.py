@@ -50,6 +50,16 @@ class LiveViewWindow(QMainWindow):
         self.title_label = QLabel("Touchless Gesture Live View")
         self.title_label.setObjectName("debugHeaderTitle")
         header_layout.addWidget(self.title_label)
+
+        # Light-blue Lite Mode badge — visible only while
+        # config.lite_mode is on, so the user can tell at a glance
+        # that the speed boost is engaged.
+        self.lite_mode_badge = QLabel("Lite")
+        self.lite_mode_badge.setObjectName("debugLiteBadge")
+        self.lite_mode_badge.setAlignment(Qt.AlignCenter)
+        self.lite_mode_badge.setVisible(bool(getattr(self.config, "lite_mode", False)))
+        header_layout.addWidget(self.lite_mode_badge)
+
         header_layout.addStretch(1)
 
         self.min_button = QPushButton("Minimize")
@@ -233,6 +243,16 @@ class LiveViewWindow(QMainWindow):
                 padding: 6px 10px;
                 font-weight: 800;
             }}
+            QLabel#debugLiteBadge {{
+                background-color: rgba(96,165,250,0.18);
+                color: #93C5FD;
+                border: 1px solid rgba(147,197,253,0.55);
+                border-radius: 10px;
+                padding: 2px 10px;
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 0.5px;
+            }}
             QLabel#debugInfoLabel {{
                 color: {self.config.text_color};
                 background: transparent;
@@ -265,6 +285,10 @@ class LiveViewWindow(QMainWindow):
     def set_gestures_enabled(self, enabled: bool) -> None:
         self._gestures_enabled = bool(enabled)
         self.gesture_toggle_button.setText("Gestures On" if self._gestures_enabled else "Gestures Off")
+
+    def set_lite_mode_active(self, active: bool) -> None:
+        if hasattr(self, "lite_mode_badge"):
+            self.lite_mode_badge.setVisible(bool(active))
 
     def attach_to_worker(self, worker: Optional[object]) -> None:
         if self._worker is worker:

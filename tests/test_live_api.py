@@ -1,0 +1,456 @@
+"""Tests for the experimental Live API subsystem.
+
+These tests cover the parts that don't need a network or microphone:
+schema validation, file-action safety, manager state transitions, and
+realtime event parsing on canned JSON. The OpenAI websocket itself is
+not exercised here.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from hgr.live_api.config import LiveApiConfig
+from hgr.live_api.live_api_logger import LiveApiLogger, redact
+from hgr.live_api.schemas import all_tool_schemas, validate_args
+from hgr.live_api.tool_executor import ToolExecutor
+
+
+class _FakeScreen:
+    def capture(self):
+        return None
+
+
+def _make_logger(tmp: Path) -> LiveApiLogger:
+    return LiveApiLogger(log_dir=tmp / "logs", debug_text_logging=False)
+
+
+class SchemaTests(unittest.TestCase):
+    def test_all_tool_schemas_have_required_fields(self) -> None:
+        for schema in all_tool_schemas():
+            self.assertIn("type", schema)
+            self.assertEqual(schema["type"], "function")
+            self.assertIn("name", schema)
+            self.assertIn("description", schema)
+            self.assertIn("parameters", schema)
+            params = schema["parameters"]
+            self.assertEqual(params.get("type"), "object")
+            self.assertIn("properties", params)
+
+    def test_validate_args_rejects_unknown_tool(self) -> None:
+        ok, err, _ = validate_args("not_a_tool", {})
+        self.assertFalse(ok)
+        self.assertIn("unknown tool", err)
+
+    def test_validate_args_requires_required_field(self) -> None:
+        ok, err, _ = validate_args("create_folder", {})
+        self.assertFalse(ok)
+        self.assertIn("folder_name", err)
+
+    def test_validate_args_applies_defaults(self) -> None:
+        ok, err, args = validate_args("click_screen", {"x": 0.5, "y": 0.5})
+        self.assertTrue(ok, msg=err)
+        self.assertEqual(args["coordinate_space"], "normalized")
+        self.assertEqual(args["button"], "left")
+        self.assertFalse(args["double_click"])
+
+    def test_validate_args_enforces_enum(self) -> None:
+        ok, err, _ = validate_args("type_text", {"text": "hi", "method": "telepathy"})
+        self.assertFalse(ok)
+        self.assertIn("must be one of", err)
+
+
+class LoggerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="live_api_log_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_logger_creates_files(self) -> None:
+        logger = _make_logger(self.tmp)
+        try:
+            logger.event("hello", x=1)
+            self.assertTrue(logger.text_log_path.exists())
+            self.assertTrue(logger.jsonl_log_path.exists())
+            with open(logger.jsonl_log_path, encoding="utf-8") as fh:
+                lines = [json.loads(line) for line in fh if line.strip()]
+            self.assertTrue(any(rec.get("kind") == "hello" for rec in lines))
+        finally:
+            logger.close()
+
+    def test_redact_strips_api_key(self) -> None:
+        out = redact({"api_key": "sk-123", "nested": {"authorization": "Bearer x", "ok": 1}})
+        self.assertEqual(out["api_key"], "***redacted***")
+        self.assertEqual(out["nested"]["authorization"], "***redacted***")
+        self.assertEqual(out["nested"]["ok"], 1)
+
+
+class FileToolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="live_api_files_"))
+        self.cfg = LiveApiConfig(
+            api_key="test", safe_workspace_dir=self.tmp / "workspace", log_dir=self.tmp / "logs"
+        )
+        self.logger = _make_logger(self.tmp)
+        self.executor = ToolExecutor(
+            config=self.cfg, logger=self.logger, screen_context=_FakeScreen()
+        )
+
+    def tearDown(self) -> None:
+        self.logger.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_create_folder_creates_under_safe_workspace(self) -> None:
+        result = self.executor.execute("create_folder", {"folder_name": "demo"})
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue((self.cfg.safe_workspace_dir / "demo").is_dir())
+
+    def test_create_file_refuses_to_overwrite(self) -> None:
+        # Pre-create the file the model is about to "create".
+        target = self.cfg.safe_workspace_dir / "main.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("preexisting", encoding="utf-8")
+
+        result = self.executor.execute(
+            "create_file", {"relative_path": "main.py", "content": "new"}
+        )
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertEqual(target.read_text(encoding="utf-8"), "preexisting")
+
+    def test_write_file_overwrite_creates_backup(self) -> None:
+        target = self.cfg.safe_workspace_dir / "draft.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("old", encoding="utf-8")
+
+        result = self.executor.execute(
+            "write_file",
+            {"relative_path": "draft.txt", "content": "new", "overwrite": True},
+        )
+        self.assertEqual(result["status"], "ok", msg=result)
+        self.assertEqual(target.read_text(encoding="utf-8"), "new")
+        backup = target.with_suffix(target.suffix + ".bak")
+        self.assertTrue(backup.exists())
+        self.assertEqual(backup.read_text(encoding="utf-8"), "old")
+
+    def test_invalid_args_short_circuit(self) -> None:
+        result = self.executor.execute("write_file", {"relative_path": "", "content": "x"})
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result.get("code"), "invalid_arguments")
+
+
+class ManagerStateTests(unittest.TestCase):
+    """Lightweight smoke test for state machine wiring with mocks.
+
+    A full integration test would need a websocket server stub; here we
+    just verify start() emits CONNECTING when the client constructor is
+    monkey-patched out, and stop() returns to OFF.
+    """
+
+    def test_start_without_api_key_fires_error(self) -> None:
+        # Importing here to avoid pulling Qt at module import time when
+        # the rest of the suite doesn't need it.
+        from PySide6.QtCore import QCoreApplication
+        from hgr.live_api.live_api_manager import LiveApiManager, LiveApiState
+
+        app = QCoreApplication.instance() or QCoreApplication([])
+        cfg = LiveApiConfig(api_key=None)
+        manager = LiveApiManager(config=cfg)
+        captured: list[str] = []
+        manager.error_occurred.connect(lambda msg: captured.append(msg))
+        manager.start()
+        # State should be ERROR with no api key.
+        self.assertEqual(manager.state, LiveApiState.ERROR)
+        self.assertTrue(any("OPENAI_API_KEY" in m for m in captured))
+        del app  # silence "unused" warnings on some linters
+
+
+class LocalBackendTests(unittest.TestCase):
+    """Tests for the local (offline) backend that don't need real binaries."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="live_api_local_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _logger(self) -> LiveApiLogger:
+        return LiveApiLogger(log_dir=self.tmp / "logs")
+
+    def test_load_config_picks_backend_from_env(self) -> None:
+        from hgr.live_api.config import load_config
+        with patch.dict("os.environ", {"TOUCHLESS_LIVE_API_BACKEND": "local"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.backend, "local")
+
+    def test_local_backend_fires_error_when_llama_missing(self) -> None:
+        from hgr.live_api import local_backend as lb
+        logger = self._logger()
+        try:
+            errors: list[str] = []
+            backend = lb.LocalBackend(
+                config=LiveApiConfig(),
+                logger=logger,
+                tools=[],
+                system_instructions="",
+                on_event=lambda e: None,
+                on_error=lambda m: errors.append(m),
+            )
+            with patch.object(lb, "_resolve_llama_server_executable", return_value=None):
+                ok = backend.start()
+            self.assertFalse(ok)
+            self.assertTrue(any("llama-server" in m for m in errors))
+        finally:
+            logger.close()
+
+    def test_local_backend_send_screen_image_is_noop(self) -> None:
+        # Phase 1: vision off — calling send_screen_image must not raise
+        # and must not actually do anything network-y.
+        from hgr.live_api.local_backend import LocalBackend
+        logger = self._logger()
+        try:
+            backend = LocalBackend(
+                config=LiveApiConfig(),
+                logger=logger,
+                tools=[],
+                system_instructions="",
+                on_event=lambda e: None,
+            )
+            self.assertTrue(backend.send_screen_image("dGVzdA==", caption="ignored"))
+        finally:
+            logger.close()
+
+    def test_local_backend_send_text_message_appends(self) -> None:
+        from hgr.live_api.local_backend import LocalBackend
+        logger = self._logger()
+        try:
+            backend = LocalBackend(
+                config=LiveApiConfig(),
+                logger=logger,
+                tools=[],
+                system_instructions="",
+                on_event=lambda e: None,
+            )
+            self.assertTrue(backend.send_text_message("hello"))
+            self.assertEqual(backend._messages[-1], {"role": "user", "content": "hello"})
+        finally:
+            logger.close()
+
+    def test_local_backend_send_tool_result_serialises_payload(self) -> None:
+        from hgr.live_api.local_backend import LocalBackend
+        logger = self._logger()
+        try:
+            backend = LocalBackend(
+                config=LiveApiConfig(),
+                logger=logger,
+                tools=[],
+                system_instructions="",
+                on_event=lambda e: None,
+            )
+            backend._inflight_tool_calls["call_42"] = "create_folder"
+            self.assertTrue(backend.send_tool_result("call_42", {"status": "ok", "path": "C:\\x"}))
+            last = backend._messages[-1]
+            self.assertEqual(last["role"], "tool")
+            self.assertEqual(last["tool_call_id"], "call_42")
+            self.assertEqual(last["name"], "create_folder")
+            self.assertIn("\"status\": \"ok\"", last["content"])
+        finally:
+            logger.close()
+
+
+class TextOnlyManagerTests(unittest.TestCase):
+    """Verify the text-only manager path used by the typed-command UI."""
+
+    def test_send_user_text_returns_false_when_off(self) -> None:
+        from PySide6.QtCore import QCoreApplication
+        from hgr.live_api.live_api_manager import LiveApiManager
+
+        app = QCoreApplication.instance() or QCoreApplication([])
+        manager = LiveApiManager(config=LiveApiConfig(api_key="x"), text_only=True)
+        # Manager hasn't started — must refuse and not crash.
+        self.assertFalse(manager.send_user_text("hello"))
+        del app
+
+    def test_text_only_manager_skips_audio(self) -> None:
+        # We can't run a full session without llama-server, but we can
+        # at least verify that .text_only stops the manager from trying
+        # to instantiate AudioStream (which would fail without sounddevice).
+        from PySide6.QtCore import QCoreApplication
+        from hgr.live_api.live_api_manager import LiveApiManager
+
+        app = QCoreApplication.instance() or QCoreApplication([])
+        manager = LiveApiManager(text_only=True)
+        # Internal flag visible for assertion.
+        self.assertTrue(manager._text_only)
+        self.assertIsNone(manager._audio)
+        del app
+
+
+class FileManagementToolTests(unittest.TestCase):
+    """Move/rename/delete + recent-paths tracking + system-dir safety."""
+
+    def setUp(self) -> None:
+        # .resolve() normalizes Windows 8.3 short-names ("KONSTA~1") to
+        # their long form so test path comparisons match what the
+        # executor records (it always resolves before recording).
+        self.tmp = Path(tempfile.mkdtemp(prefix="live_api_files_")).resolve()
+        self.cfg = LiveApiConfig(
+            api_key="x", safe_workspace_dir=self.tmp / "ws", log_dir=self.tmp / "logs"
+        )
+        self.logger = LiveApiLogger(log_dir=self.cfg.log_dir)
+        self.executor = ToolExecutor(
+            config=self.cfg, logger=self.logger, screen_context=_FakeScreen()
+        )
+
+    def tearDown(self) -> None:
+        self.logger.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_move_file_moves_and_records_path(self) -> None:
+        src = self.tmp / "src" / "a.txt"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("hello", encoding="utf-8")
+        dst = self.tmp / "dst" / "a.txt"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        result = self.executor.execute(
+            "move_file",
+            {"source_path": str(src), "destination_path": str(dst)},
+        )
+        self.assertEqual(result["status"], "ok", msg=result)
+        self.assertFalse(src.exists())
+        self.assertTrue(dst.exists())
+        self.assertEqual(dst.read_text(encoding="utf-8"), "hello")
+        # Was recorded for list_recent_paths.
+        recent = self.executor.execute("list_recent_paths", {})
+        self.assertEqual(recent["status"], "ok")
+        self.assertIn(str(dst), recent["paths"])
+
+    def test_move_file_refuses_system_dirs(self) -> None:
+        src = self.tmp / "a.txt"
+        src.write_text("x", encoding="utf-8")
+        # Use the actual Windows dir env var if available, else fall back.
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        result = self.executor.execute(
+            "move_file",
+            {"source_path": str(src), "destination_path": f"{windir}\\agent_test.txt"},
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result.get("code"), "protected_path")
+        self.assertTrue(src.exists())  # unchanged
+
+    def test_rename_file_renames_in_place(self) -> None:
+        src = self.tmp / "old.txt"
+        src.write_text("y", encoding="utf-8")
+        result = self.executor.execute(
+            "rename_file", {"path": str(src), "new_name": "new.txt"}
+        )
+        self.assertEqual(result["status"], "ok", msg=result)
+        self.assertFalse(src.exists())
+        self.assertTrue((self.tmp / "new.txt").exists())
+
+    def test_rename_file_rejects_path_in_new_name(self) -> None:
+        src = self.tmp / "f.txt"
+        src.write_text("y", encoding="utf-8")
+        result = self.executor.execute(
+            "rename_file", {"path": str(src), "new_name": "../f.txt"}
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result.get("code"), "invalid_arguments")
+
+    def test_delete_file_requires_explicit_confirmation(self) -> None:
+        target = self.tmp / "to_delete.txt"
+        target.write_text("z", encoding="utf-8")
+        # Without confirmed=true, must NOT delete.
+        result = self.executor.execute("delete_file", {"path": str(target)})
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertTrue(target.exists())
+        # With confirmed=true, deletes.
+        result = self.executor.execute(
+            "delete_file", {"path": str(target), "confirmed": True}
+        )
+        self.assertEqual(result["status"], "ok", msg=result)
+        self.assertFalse(target.exists())
+
+    def test_delete_file_refuses_system_paths(self) -> None:
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        result = self.executor.execute(
+            "delete_file", {"path": windir, "confirmed": True}
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result.get("code"), "protected_path")
+
+    def test_create_folder_records_path_in_recent_list(self) -> None:
+        result = self.executor.execute("create_folder", {"folder_name": "TrackedDemo"})
+        self.assertEqual(result["status"], "ok")
+        recent = self.executor.execute("list_recent_paths", {})
+        self.assertIn(result["path"], recent["paths"])
+
+
+class CommandRouterTests(unittest.TestCase):
+    """The router shouldn't even instantiate the heavy controllers
+    until we ask it to route something. Verify the no-match path is
+    safe and the matched path returns the expected shape."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="live_api_router_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _logger(self) -> LiveApiLogger:
+        return LiveApiLogger(log_dir=self.tmp / "logs")
+
+    def test_empty_text_returns_no_match(self) -> None:
+        from hgr.live_api.command_router import CommandRouter, RouterResult
+        logger = self._logger()
+        try:
+            router = CommandRouter(logger=logger)
+            result = router.try_route("")
+            self.assertIsInstance(result, RouterResult)
+            self.assertFalse(result.matched)
+        finally:
+            logger.close()
+
+    def test_unknown_command_returns_no_match(self) -> None:
+        from hgr.live_api.command_router import CommandRouter
+        logger = self._logger()
+        try:
+            router = CommandRouter(logger=logger)
+            # An obviously novel multi-step request — the deterministic
+            # router should never claim this.
+            result = router.try_route(
+                "create a folder called experiments and write a tkinter "
+                "script that draws a rotating cube"
+            )
+            self.assertFalse(result.matched)
+        finally:
+            logger.close()
+
+    def test_router_init_failure_is_graceful(self) -> None:
+        # If VoiceCommandProcessor blows up at construction, the router
+        # must still answer no-match instead of raising.
+        from hgr.live_api import command_router as cr
+        logger = self._logger()
+        try:
+            with patch.object(
+                cr, "_ROUTER_CONFIDENCE_FLOOR", 0.7
+            ):
+                router = cr.CommandRouter(logger=logger)
+                # Force the lazy-init to fail.
+                with patch(
+                    "hgr.voice.command_processor.VoiceCommandProcessor",
+                    side_effect=RuntimeError("boom"),
+                ):
+                    result = router.try_route("open chrome")
+            self.assertFalse(result.matched)
+        finally:
+            logger.close()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

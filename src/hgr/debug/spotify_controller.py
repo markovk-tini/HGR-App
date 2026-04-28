@@ -7,11 +7,12 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 
@@ -105,6 +106,22 @@ class SpotifyController:
         self._executable_paths = executable_paths or self._default_executable_paths()
         self._handles_cache: list[int] = []
         self._handles_cache_until = 0.0
+        self._launch_in_flight = False
+        self._launch_lock = threading.Lock()
+        # Cache the "is an active Spotify device available?" answer
+        # for a few seconds. The gesture pipeline checks this on
+        # every dynamic-gesture decision (and on each is_active_for_
+        # _wheel call), and each check fires a /me/player HTTPS
+        # request — 50-200 ms per call, blocking the gesture worker
+        # thread. The answer only changes when the user opens /
+        # closes Spotify or transfers playback to another device,
+        # neither of which happens at frame rate. 3 s is short
+        # enough to feel responsive after the user opens Spotify
+        # via right-hand 'two', long enough to absorb the 60 fps
+        # gesture loop without making 60 HTTPS requests per second.
+        self._active_device_cache: bool | None = None
+        self._active_device_cache_until: float = 0.0
+        self._active_device_cache_seconds: float = 3.0
         self._load_credentials()
         self._load_tokens()
 
@@ -148,45 +165,112 @@ class SpotifyController:
         return True
 
     def launch_spotify(self, *, hidden: bool) -> bool:
-        # Prefer ShellExecuteW (via launch_external) FIRST. The
-        # Microsoft Store install of Spotify lives behind 0-byte
-        # App Execution Alias stubs at:
-        #   %LOCALAPPDATA%\Microsoft\WindowsApps\Spotify.exe
-        #   %LOCALAPPDATA%\Microsoft\WindowsApps\<package>\Spotify.exe
-        # subprocess.Popen() on those stubs looks successful (no
-        # exception, returns a Popen object) but doesn't actually
-        # launch Spotify — the redirect only fires when the binary
-        # is invoked through ShellExecuteW. Tried Popen first with
-        # the stubs, the function reports "launching spotify"
-        # success, focus_or_open_window then waits for window
-        # handles that never appear, ultimately reports "spotify
-        # window not found", and the user sees no Spotify.
-        for target in ("spotify:", "spotify"):
-            if launch_external(target):
-                self._message = "launching spotify"
-                return True
-        # Fallback: classic non-store install at
-        # ~\AppData\Roaming\Spotify\Spotify.exe. Skip any 0-byte
-        # stub files we encounter so we don't fake-success on them.
+        # The launcher used to be a single-line subprocess.Popen on
+        # whichever Spotify.exe path existed first — including the
+        # 0-byte App Execution Alias stub at
+        # %LOCALAPPDATA%\Microsoft\WindowsApps\<package>\Spotify.exe.
+        # That worked: Windows resolves the alias on CreateProcess
+        # and the real Store Spotify boots. A later attempt to skip
+        # the stub by file size was wrong — Popen on the stub does
+        # work, and removing it broke launching for users who only
+        # have the Store install. Now we Popen every candidate that
+        # exists, regardless of size, and verify each launch by
+        # polling for a real Spotify process before declaring it
+        # the winner.
+        def _attempt(fire: Callable[[], None]) -> bool:
+            try:
+                fire()
+            except Exception:
+                return False
+            return self._wait_for_spotify_process(timeout_seconds=4.0)
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
         for candidate in self._executable_paths:
             try:
                 if not candidate.exists():
                     continue
-                if candidate.stat().st_size < 1024:
-                    # WindowsApps redirect stub — Popen-launching
-                    # this doesn't actually open Spotify. Skip.
-                    continue
-                startupinfo = None
-                if hidden and hasattr(subprocess, "STARTUPINFO"):
+            except Exception:
+                continue
+            startupinfo = None
+            if hidden and hasattr(subprocess, "STARTUPINFO"):
+                try:
                     startupinfo = subprocess.STARTUPINFO()
                     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                     startupinfo.wShowWindow = 0
-                subprocess.Popen([str(candidate)], startupinfo=startupinfo)
+                except Exception:
+                    startupinfo = None
+            if _attempt(
+                lambda c=candidate, si=startupinfo: subprocess.Popen(
+                    [str(c)], startupinfo=si, creationflags=creationflags
+                )
+            ):
                 self._message = "launching spotify"
                 return True
-            except Exception:
-                continue
+
+        # ShellExecute fallbacks — only reached when no candidate
+        # path was launchable. os.startfile self-inits the COM
+        # apartment so it works from background threads where raw
+        # ShellExecuteW silently drops the request. PowerShell is a
+        # last resort because it spawns a new process and reads
+        # like a dropper to behavioural AV.
+        if _attempt(lambda: os.startfile("spotify")):
+            self._message = "launching spotify"
+            return True
+        if _attempt(lambda: os.startfile("spotify:")):
+            self._message = "launching spotify"
+            return True
+        if _attempt(
+            lambda: subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Process spotify:",
+                ],
+                creationflags=creationflags,
+            )
+        ):
+            self._message = "launching spotify"
+            return True
+
         self._message = "spotify launch path not found"
+        return False
+
+    def _wait_for_spotify_process(self, *, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while time.monotonic() < deadline:
+            if self._spotify_window_handles():
+                return True
+            if self._has_real_spotify_process():
+                return True
+            time.sleep(0.25)
+        return self._has_real_spotify_process()
+
+    def _has_real_spotify_process(self) -> bool:
+        # is_running() returns True for any process whose name
+        # contains 'spotify' — including Spotify-WebHelper.exe,
+        # SpotifyMigrator, Spotify update services, even the
+        # store's Spotify.exe stub host before the real client
+        # spins up. For verifying a fresh launch we want to know
+        # the *interactive* client started, so we accept the match
+        # only when the executable has a meaningful size (>1MB).
+        try:
+            for proc in psutil.process_iter(["name", "exe"]):
+                name = (proc.info.get("name") or "").lower()
+                if name != "spotify.exe":
+                    continue
+                exe_path = proc.info.get("exe")
+                if not exe_path:
+                    return True
+                try:
+                    if Path(exe_path).stat().st_size > 1024 * 1024:
+                        return True
+                except Exception:
+                    return True
+        except Exception:
+            return False
         return False
 
     def is_running(self) -> bool:
@@ -383,25 +467,113 @@ class SpotifyController:
             return True
 
         handles = self._spotify_window_handles()
-        if not handles:
-            if not self.is_running():
-                self.ensure_ready(open_if_needed=True)
-                self.launch_spotify(hidden=False)
-            else:
-                self.ensure_ready(open_if_needed=False)
-            handles = self._wait_for_window_handles()
-        if not handles:
-            self._message = "spotify window not found"
+        if handles:
+            if self._activate_window_handle(handles[0]):
+                self._message = "spotify focused"
+                return True
+            self._message = "spotify focus failed"
             return False
 
-        if self._activate_window_handle(handles[0]):
-            self._message = "spotify focused"
+        # No window yet → kick off the launch on a background thread
+        # and return immediately. The 10-15s wait_for_window_handles
+        # poll used to run on whichever thread invoked focus, which
+        # froze the gesture worker (right-hand 'two') and voice
+        # command pipeline (open spotify) and made the camera feed
+        # stutter for the duration. The bg thread will refresh
+        # self._message when it knows the outcome; we report
+        # "launching spotify" as the immediate optimistic result so
+        # the caller gets a non-failure status to surface in the UI.
+        with self._launch_lock:
+            already_in_flight = self._launch_in_flight
+            if not already_in_flight:
+                self._launch_in_flight = True
+        if already_in_flight:
+            self._message = "launching spotify"
             return True
-        self._message = "spotify focus failed"
-        return False
+
+        worker = threading.Thread(
+            target=self._async_launch_and_focus,
+            name="spotify-launch",
+            daemon=True,
+        )
+        self._message = "launching spotify"
+        worker.start()
+        return True
+
+    def dispatch_async(self, callable_obj, *args, **kwargs) -> None:
+        # Fire-and-forget runner for synchronous Spotify HTTP calls
+        # (next_track, previous_track, toggle_playback, etc.). The
+        # gesture worker calls these from inside its main loop;
+        # each call is 50-300 ms of urllib_request roundtrip.
+        # Without this dispatcher the camera/MediaPipe loop visibly
+        # stalls during a swipe — diagnostic showed 200+ ms spikes
+        # on slow network round-trips. NOTE: deliberately does NOT
+        # invalidate the active-device cache here. Track-skip /
+        # play-pause / shuffle / repeat don't change *whether* a
+        # device is available, only what's playing on it. Forcing
+        # a re-query after every action made the next gesture
+        # decision pay a fresh HTTP call, undoing the cache's
+        # whole reason to exist. focus_or_open_window already
+        # invalidates separately when it actually opens Spotify.
+        def _runner():
+            try:
+                callable_obj(*args, **kwargs)
+            except Exception:
+                pass
+
+        worker = threading.Thread(target=_runner, name="spotify-action", daemon=True)
+        worker.start()
+
+    def _async_launch_and_focus(self) -> None:
+        try:
+            # Strict check: SpotifyLauncher.exe and
+            # Spotify-WebHelper.exe loiter in the background long
+            # after the user has closed Spotify, and is_running()
+            # matches any process whose name contains 'spotify'.
+            # Using is_running() here meant we skipped launch_spotify
+            # entirely whenever those helpers were alive — leaving
+            # the user with no window and our overlay stuck on
+            # "launching spotify". Use the strict "real client"
+            # check that requires an actual large Spotify.exe.
+            if not self._has_real_spotify_process():
+                try:
+                    self.ensure_ready(open_if_needed=True)
+                except Exception:
+                    pass
+                self.launch_spotify(hidden=False)
+            else:
+                try:
+                    self.ensure_ready(open_if_needed=False)
+                except Exception:
+                    pass
+            handles = self._wait_for_window_handles(timeout_seconds=15.0)
+            if handles:
+                if self._activate_window_handle(handles[0]):
+                    self._message = "spotify focused"
+                else:
+                    self._message = "spotify focus failed"
+            else:
+                self._message = "spotify window not found"
+        finally:
+            with self._launch_lock:
+                self._launch_in_flight = False
 
     def is_active_device_available(self) -> bool:
-        return self.get_player_state() is not None
+        now = time.monotonic()
+        if self._active_device_cache is not None and now < self._active_device_cache_until:
+            return self._active_device_cache
+        result = self.get_player_state() is not None
+        self._active_device_cache = result
+        self._active_device_cache_until = now + self._active_device_cache_seconds
+        return result
+
+    def invalidate_active_device_cache(self) -> None:
+        # Called from focus_or_open_window paths after we deliberately
+        # change Spotify's run state, so the next is_active_device_
+        # available query re-checks instead of returning a stale
+        # "False" from before we launched the app.
+        self._active_device_cache = None
+        self._active_device_cache_until = 0.0
 
     def get_current_track_details(self) -> SpotifyTrackDetails | None:
         player = self.get_player_state()
@@ -832,10 +1004,52 @@ class SpotifyController:
 
     def _default_executable_paths(self) -> tuple[Path, ...]:
         home = Path.home()
-        return (
-            home / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "SpotifyAB.SpotifyMusic_zpdnekdrzrea0" / "Spotify.exe",
+        candidates: list[Path] = [
+            # Per-user classic install (Spotify's default installer
+            # location for the desktop .exe build off spotify.com).
             home / "AppData" / "Roaming" / "Spotify" / "Spotify.exe",
-        )
+            home / "AppData" / "Local" / "Spotify" / "Spotify.exe",
+            # Machine-wide installs (rare for Spotify but supported).
+            Path("C:/Program Files/Spotify/Spotify.exe"),
+            Path("C:/Program Files (x86)/Spotify/Spotify.exe"),
+            Path("C:/ProgramData/Spotify/Spotify.exe"),
+            # Microsoft Store stub last — these are 0-byte App
+            # Execution Aliases that need ShellExecute, and we now
+            # filter them by stat().st_size < 1024 in launch_spotify
+            # so they don't masquerade as a launchable .exe.
+            home / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "SpotifyAB.SpotifyMusic_zpdnekdrzrea0" / "Spotify.exe",
+        ]
+        # Pull the App Paths registry key so we pick up unusual
+        # install locations the user might have (portable installs,
+        # custom paths, etc.) without hardcoding more guesses.
+        try:
+            import winreg
+
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(
+                        hive,
+                        r"Software\Microsoft\Windows\CurrentVersion\App Paths\Spotify.exe",
+                    ) as key:
+                        raw, _ = winreg.QueryValueEx(key, None)
+                        if raw:
+                            candidates.insert(0, Path(str(raw).strip('"')))
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    continue
+        except Exception:
+            pass
+        # De-dup while preserving order.
+        seen: set[str] = set()
+        ordered: list[Path] = []
+        for path in candidates:
+            key = str(path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(path)
+        return tuple(ordered)
 
     def _load_credentials(self) -> None:
         env_client_id = os.getenv("CLIENT_ID") or os.getenv("SPOTIFY_CLIENT_ID")
@@ -1267,10 +1481,6 @@ class SpotifyController:
             }
         except Exception:
             spotify_pids = set()
-        if not spotify_pids:
-            self._handles_cache = []
-            self._handles_cache_until = now + 1.0
-            return []
 
         user32 = ctypes.windll.user32
         handles: list[int] = []
@@ -1279,14 +1489,54 @@ class SpotifyController:
         def _enum_windows(hwnd, _lparam):
             if not user32.IsWindowVisible(hwnd):
                 return True
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if int(pid.value) not in spotify_pids:
-                return True
             title_length = user32.GetWindowTextLengthW(hwnd)
             if title_length <= 0:
                 return True
-            handles.append(int(hwnd))
+            # PID-based match (preferred): catches the classic
+            # AppData\Roaming\Spotify\Spotify.exe install where the
+            # visible top-level window is owned by Spotify.exe itself.
+            if spotify_pids:
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if int(pid.value) in spotify_pids:
+                    handles.append(int(hwnd))
+                    return True
+            # Title + class fallback for the Microsoft Store install:
+            # the visible top-level window is an ApplicationFrameWindow
+            # owned by ApplicationFrameHost.exe — its PID is *not*
+            # Spotify.exe, so the PID filter alone misses it. The
+            # actual Spotify.exe lives one HWND down as a
+            # Windows.UI.Core.CoreWindow child. Match the frame
+            # window by class + title prefix so we surface a window
+            # that focus_or_open_window can BringWindowToTop on, but
+            # stay strict about the title to avoid grabbing a Discord
+            # / browser tab that merely mentions Spotify.
+            buf = ctypes.create_unicode_buffer(title_length + 1)
+            user32.GetWindowTextW(hwnd, buf, title_length + 1)
+            title = (buf.value or "").strip()
+            if not title:
+                return True
+            class_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, class_buf, 256)
+            class_name = class_buf.value or ""
+            is_frame_class = (
+                class_name == "ApplicationFrameWindow"
+                or class_name.startswith("Chrome_WidgetWin")
+            )
+            if not is_frame_class:
+                return True
+            lowered_title = title.lower()
+            looks_like_spotify = (
+                lowered_title == "spotify"
+                or lowered_title.startswith("spotify ")
+                or lowered_title.startswith("spotify - ")
+                or lowered_title.startswith("spotify premium")
+                or lowered_title.startswith("spotify free")
+                or lowered_title.endswith(" | spotify")
+                or lowered_title.endswith(" - spotify")
+            )
+            if looks_like_spotify:
+                handles.append(int(hwnd))
             return True
 
         try:
@@ -1297,18 +1547,19 @@ class SpotifyController:
         self._handles_cache_until = now + 1.0
         return handles
 
-    def _wait_for_window_handles(self, timeout_seconds: float = 10.0) -> list[int]:
-        # 10s default is generous enough for Microsoft Store cold
-        # launches (the ShellExecuteW path that resolves the App
-        # Execution Alias stub then spins up the appcontainer can
-        # take 5-8s on first launch of a session). Previous 4s
-        # default reliably timed out and surfaced "spotify window
-        # not found" when the user said "open spotify" or did the
-        # right-hand 'two' gesture.
+    def _wait_for_window_handles(self, timeout_seconds: float = 15.0) -> list[int]:
+        # Microsoft Store cold launches resolve the App Execution
+        # Alias stub then spin up an AppContainer; on first launch
+        # of a session that can take 5-12s. The 1s cache inside
+        # _spotify_window_handles must be busted between polls or
+        # we'd spend 4-5 of every 5s window getting the same cached
+        # empty list back instead of actually re-enumerating.
         deadline = time.monotonic() + timeout_seconds
+        self._handles_cache_until = 0.0
         handles = self._spotify_window_handles()
         while not handles and time.monotonic() < deadline:
-            time.sleep(0.2)
+            time.sleep(0.5)
+            self._handles_cache_until = 0.0
             handles = self._spotify_window_handles()
         return handles
 

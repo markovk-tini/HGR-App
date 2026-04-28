@@ -95,17 +95,31 @@ class ChromeController:
             return True
 
         handles = self._chrome_window_handles()
+        launched_fresh = False
         if not handles:
             if not self.launch_chrome():
                 return False
+            launched_fresh = True
             handles = self._wait_for_window_handles()
+        # If we just successfully launched Chrome, treat the action as
+        # success even if window-handle detection times out — Chrome IS
+        # opening from the user's perspective. Otherwise the Live API
+        # router (and the voice overlay) would falsely report failure.
         if not handles:
+            if launched_fresh:
+                self._message = "launched chrome (window not yet visible)"
+                return True
             self._message = "chrome window not found"
             return False
 
         if self._activate_window_handle(handles[0]):
             time.sleep(0.05)
             self._message = "chrome focused"
+            return True
+        if launched_fresh:
+            # Same logic as above: launch happened, focus failed — not
+            # the user's problem.
+            self._message = "launched chrome"
             return True
         self._message = "chrome focus failed"
         return False

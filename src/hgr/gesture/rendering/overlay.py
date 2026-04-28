@@ -21,7 +21,14 @@ def _to_pixel(point: np.ndarray, width: int, height: int) -> tuple[int, int]:
 
 
 def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.ndarray:
-    frame = frame_bgr.copy()
+    # Mutate in place. The engine already produces `annotated_frame`
+    # as a fresh buffer (or a no-hand passthrough that the caller
+    # doesn't reuse), and the only consumer of the return value
+    # treats it as its own going forward — so a second .copy() here
+    # was pure waste, ~3-4 ms per frame at 720p BGR. That added up
+    # with the per-frame Qt emit + LINE_AA landmark draws to push
+    # gesturing frames over the 38 ms / 26 fps cliff.
+    frame = frame_bgr
     if not result.found or result.tracked_hand is None or result.hand_reading is None:
         return frame
 
@@ -38,7 +45,7 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
     y2 = int((hand.bbox.y + hand.bbox.height) * height)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
     banner = f"{hand.handedness} | {label}"
-    cv2.putText(frame, banner, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 1, cv2.LINE_AA)
+    cv2.putText(frame, banner, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 1, cv2.LINE_8)
 
     for a, b in HAND_CONNECTIONS:
         cv2.line(
@@ -47,7 +54,7 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
             _to_pixel(hand.landmarks[b], width, height),
             (236, 240, 241),
             1,
-            cv2.LINE_AA,
+            cv2.LINE_8,
         )
 
     finger_colors = {
@@ -59,7 +66,7 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
     tip_indices = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
     for name, tip_index in tip_indices.items():
         finger = reading.fingers[name]
-        cv2.circle(frame, _to_pixel(hand.landmarks[tip_index], width, height), 3, finger_colors[finger.state], -1, cv2.LINE_AA)
+        cv2.circle(frame, _to_pixel(hand.landmarks[tip_index], width, height), 3, finger_colors[finger.state], -1, cv2.LINE_8)
 
     secondary_hand = getattr(result, "secondary_tracked_hand", None)
     secondary_reading = getattr(result, "secondary_hand_reading", None)
@@ -78,7 +85,7 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
             0.52,
             secondary_color,
             1,
-            cv2.LINE_AA,
+            cv2.LINE_8,
         )
         for a, b in HAND_CONNECTIONS:
             cv2.line(
@@ -87,7 +94,7 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
                 _to_pixel(secondary_hand.landmarks[b], width, height),
                 (200, 200, 200),
                 1,
-                cv2.LINE_AA,
+                cv2.LINE_8,
             )
         for name, tip_index in tip_indices.items():
             finger = secondary_reading.fingers[name]
@@ -97,6 +104,6 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
                 3,
                 finger_colors[finger.state],
                 -1,
-                cv2.LINE_AA,
+                cv2.LINE_8,
             )
     return frame

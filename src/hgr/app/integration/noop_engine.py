@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -45,6 +46,7 @@ from ...voice.grammar_corrector import CorrectionResult, GrammarCorrector
 from ...voice.llama_server import LlamaServer
 from ...voice.whisper_refiner import RefinementResult, WhisperRefiner
 from ..camera.camera_utils import open_camera_by_index, open_phone_camera_url, open_preferred_or_first_available
+from ..camera.ffmpeg_capture import FfmpegMjpegCapture, resolve_dshow_device_for_index
 
 
 _DICTATION_HALLUCINATION_STOPWORDS = {
@@ -295,6 +297,15 @@ class GestureWorker(QObject):
     _FORCED_TEST_FPS_TARGET = 10.0
     _NORMAL_PROCESS_WIDTH = 960
     _LOW_FPS_PROCESS_WIDTH = 384
+    # Lite Mode runs the lite landmark model on a downsampled
+    # inference frame. MediaPipe's palm detector internally rescales
+    # to a 192-px square ROI for landmark inference, so dropping the
+    # input from 960 → 384 px gives the palm detector ~6x less
+    # pixels to scan without harming landmark accuracy. Same width
+    # Low-FPS mode uses, with the difference that Lite keeps
+    # Normal-mode confidence thresholds + stable-frame requirement
+    # so the gesture decisions still feel as solid as before.
+    _LITE_MODE_PROCESS_WIDTH = 384
     _FULLSCREEN_POLL_INTERVAL = 1.0
     # Suggestion overlay: triggered when measured FPS stays below 15 for
     # longer than 10 seconds. After the user dismisses (X, left-fist, or
@@ -352,6 +363,12 @@ class GestureWorker(QObject):
         self._volume_mode_active = False
         self._volume_level: float | None = self.volume_controller.get_level()
         self._volume_status_text = "idle"
+        # Mute cache must be initialised before the first call to
+        # _read_system_mute() — that helper reads these fields and
+        # sets the cache, and gets called as part of constructing
+        # _volume_muted on the very next line.
+        self._mute_cache_value: bool = False
+        self._mute_cache_until: float = 0.0
         self._volume_muted = self._read_system_mute()
         self._volume_overlay_visible = False
         self._mute_block_until = 0.0
@@ -598,6 +615,48 @@ class GestureWorker(QObject):
         self._timer.setInterval(15)
         self._timer.timeout.connect(self._tick)
 
+        # Per-frame timing samples used by the Lite Mode diagnostic
+        # in _tick. Empty when Lite Mode is off; sampled at every
+        # tick when on, summarised to stderr every 2s. Helps tell
+        # camera-bound from CPU-bound frames apart when an FPS
+        # report comes in.
+        self._timing_samples: deque[tuple[float, float, float, float, float, float, float, float]] = deque(maxlen=240)
+        self._last_timing_log: float = 0.0
+
+        # Skip-frame inference state. When Lite Mode is on AND no
+        # hand was visible in the previous frame, we skip MediaPipe
+        # on every other tick — the detector is the single biggest
+        # CPU cost (12-25 ms), and there's nothing it could surface
+        # on an empty frame that the next-tick inference won't catch
+        # one frame (~16 ms) later. As soon as a hand appears we go
+        # back to full-rate inference so dynamic gestures (swipe,
+        # repeat-circle) — which depend on frame-by-frame motion —
+        # are never sampled at half-rate. `_inference_skipped_last`
+        # guarantees we never skip two ticks in a row, so we always
+        # re-sample to detect a new hand entering the frame.
+        self._last_result_had_hand: bool = False
+        self._inference_skipped_last: bool = False
+
+        # Wall-clock-rate-limited debug-frame emit. The receivers
+        # (mini viewer + live view) each do cv2.cvtColor + QImage +
+        # QPixmap.fromImage + scaled-with-smooth-transformation per
+        # emit, totalling 15-30 ms of main-thread work. When the
+        # gesture loop produces emits at 60-70 Hz but receivers can
+        # only render at 25-30 Hz, the Qt cross-thread queued-signal
+        # queue accumulates frames at ~30/second and the user sees
+        # 1-2 seconds of perceived display lag on top of the actual
+        # capture latency. Rate-limiting emits by wall-clock time
+        # guarantees we never push more frames than the receivers
+        # can render, so the queue never grows. 30 Hz is plenty for
+        # smooth-looking live preview; gesture detection still runs
+        # at full loop rate underneath. `_action_history_dirty_
+        # for_emit` flips True when a new action gets recorded so
+        # the next emit fires regardless of the rate-limit cooldown,
+        # keeping toasts / overlays punctual.
+        self._emit_min_interval_seconds: float = 1.0 / 30.0
+        self._last_emit_monotonic: float = 0.0
+        self._action_history_dirty_for_emit: bool = False
+
     def _record_action(self, label: str, display_text: str) -> None:
         if not label or label == "-":
             return
@@ -613,6 +672,10 @@ class GestureWorker(QObject):
         with self._action_history_lock:
             self._action_history.append(event)
             snapshot = list(self._action_history)
+        # Promote the next throttled-emit to fire immediately so
+        # the user sees the toast / overlay update without the
+        # 1-frame skew the throttle would otherwise impose.
+        self._action_history_dirty_for_emit = True
         try:
             self.action_history_changed.emit(snapshot)
         except Exception:
@@ -2356,7 +2419,10 @@ class GestureWorker(QObject):
 
     def _build_engine_for_fps_mode(self) -> GestureRecognitionEngine:
         self._low_fps_active = bool(getattr(self.config, "low_fps_mode", False)) or self._low_fps_auto_engaged
+        lite_active = bool(getattr(self.config, "lite_mode", False))
         if self._low_fps_active:
+            # Low-FPS already implies lite landmark model — keep its
+            # tuned thresholds; lite_mode would be redundant here.
             detector = HandDetector(
                 min_detection_confidence=0.34,
                 min_tracking_confidence=0.22,
@@ -2367,6 +2433,16 @@ class GestureWorker(QObject):
                 secondary_smoother=AdaptiveLandmarkSmoother(alpha=0.66, min_alpha=0.24, max_alpha=0.88),
             )
             stable_frames = 1
+        elif lite_active:
+            # Lite Mode: lite landmark model (~2.5x faster on CPU)
+            # + smaller inference frame, but keep Normal-mode
+            # confidence thresholds + full stable-frame requirement
+            # so gesture decisions still feel as solid as before.
+            detector = HandDetector(
+                model_complexity=0,
+                max_process_width=self._LITE_MODE_PROCESS_WIDTH,
+            )
+            stable_frames = max(2, self.config.stable_frames_required // 2)
         else:
             detector = HandDetector(max_process_width=self._NORMAL_PROCESS_WIDTH)
             stable_frames = max(2, self.config.stable_frames_required // 2)
@@ -2397,6 +2473,86 @@ class GestureWorker(QObject):
                     self._apply_low_fps_capture_tuning(self._cap)
                 else:
                     self._restore_normal_capture_tuning(self._cap)
+
+    def set_lite_mode(self, enabled: bool) -> None:
+        # User-driven lite-model toggle. Rebuilds the engine with
+        # the lite landmark model + downsampled inference and, when
+        # enabled, also swaps the camera capture for the
+        # ffmpeg-MJPG path so we can break the 30 fps YUY2 ceiling
+        # OpenCV can't get past on Windows. Toggling off restores
+        # the OpenCV path. Phone-camera sources (index < 0) skip
+        # the swap because their frames already arrive
+        # MJPG-compressed over the wire.
+        was_enabled = bool(self.config.lite_mode)
+        self.config.lite_mode = bool(enabled)
+        if not self._running:
+            return
+        if self.engine is not None:
+            try:
+                self.engine.close()
+            except Exception:
+                pass
+        self.engine = self._build_engine_for_fps_mode()
+        self._fps = 0.0
+        if self._cap is None or self._low_fps_active:
+            return
+        if bool(enabled) == was_enabled:
+            return
+        info = self._camera_info
+        if info is None:
+            return
+        index = getattr(info, "index", None)
+        if index is None or int(index) < 0:
+            return
+        if not sys.platform.startswith("win"):
+            return
+        if enabled:
+            # Turn ON: try to upgrade the live cap to ffmpeg-MJPG.
+            device_name = resolve_dshow_device_for_index(
+                int(index),
+                qt_name_hint=str(getattr(info, "display_name", "") or ""),
+            )
+            if not device_name:
+                return
+            # Release the OpenCV cap before launching ffmpeg so the
+            # camera isn't held open by two processes (Windows
+            # serialises capture access — the second open would
+            # fail).
+            old_cap = self._cap
+            self._cap = None
+            try:
+                old_cap.release()
+            except Exception:
+                pass
+            ffmpeg_cap = FfmpegMjpegCapture(
+                device_name,
+                width=1280,
+                height=720,
+                fps=60,
+            )
+            if ffmpeg_cap.isOpened():
+                self._cap = ffmpeg_cap
+                return
+            # ffmpeg failed — fall back to a fresh OpenCV cap so the
+            # live view doesn't die on us.
+            try:
+                ffmpeg_cap.release()
+            except Exception:
+                pass
+            recovered = open_camera_by_index(int(index), max_index=self.config.camera_scan_limit)
+            if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
+                self._cap = recovered[1]
+        else:
+            # Turn OFF: drop ffmpeg-MJPG cap, recover with OpenCV.
+            old_cap = self._cap
+            self._cap = None
+            try:
+                old_cap.release()
+            except Exception:
+                pass
+            recovered = open_camera_by_index(int(index), max_index=self.config.camera_scan_limit)
+            if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
+                self._cap = recovered[1]
 
     def set_force_ten_fps_test_mode(self, enabled: bool) -> None:
         self.config.force_ten_fps_test_mode = bool(enabled)
@@ -2621,7 +2777,109 @@ class GestureWorker(QObject):
         else:
             result = open_preferred_or_first_available(self.config.preferred_camera_index, max_index=self.config.camera_scan_limit)
         self._apply_low_fps_capture_tuning(result)
+        result = self._upgrade_to_ffmpeg_capture_if_lite(result)
         return result
+
+    def _upgrade_to_ffmpeg_capture_if_lite(self, open_result):
+        # When Lite Mode is on for a local USB webcam, swap the
+        # OpenCV cap for an ffmpeg-backed MJPG cap. ffmpeg's dshow
+        # input reliably forces MJPG where OpenCV silently keeps
+        # YUY2, which is the only path on Windows that breaks the
+        # ~30 fps ceiling at 720p (and the ~10 fps ceiling at 1080p)
+        # for cheap webcams with USB-bandwidth-bound raw streams.
+        # If the ffmpeg cap can't deliver a frame within its startup
+        # budget we keep the original OpenCV cap, so the user is
+        # never stranded without video. Diagnostic prints to stderr
+        # so the user / dev can confirm in one shot which path was
+        # actually engaged when troubleshooting low-fps reports.
+        def _log(msg: str) -> None:
+            try:
+                sys.stderr.write(f"[lite_mode/ffmpeg] {msg}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+        if self._low_fps_active:
+            _log("skipped: low_fps_mode is active")
+            return open_result
+        if not bool(getattr(self.config, "lite_mode", False)):
+            _log("skipped: lite_mode is off")
+            return open_result
+        if not isinstance(open_result, tuple) or len(open_result) < 2:
+            _log("skipped: open_result not in (info, cap) shape")
+            return open_result
+        info, cap = open_result[0], open_result[1]
+        if cap is None or info is None:
+            _log("skipped: cap or info is None")
+            return open_result
+        index = getattr(info, "index", None)
+        if index is None or int(index) < 0:
+            _log(f"skipped: index={index!r} (phone-camera path)")
+            return open_result
+        if not sys.platform.startswith("win"):
+            _log("skipped: platform is not windows")
+            return open_result
+        display_name = str(getattr(info, "display_name", "") or "")
+        # Verbose: dump the full ffmpeg dshow device list so the
+        # user can see what was offered when "device='USB Video
+        # Device'" looks suspicious for a Razer / Logitech webcam.
+        try:
+            from ..camera.ffmpeg_capture import list_dshow_video_devices
+
+            _log(
+                f"qt_hint={display_name!r} index={index} "
+                f"ffmpeg_devices={list_dshow_video_devices()!r}"
+            )
+        except Exception:
+            pass
+        device_name = resolve_dshow_device_for_index(int(index), qt_name_hint=display_name)
+        if not device_name:
+            _log(
+                f"skipped: could not resolve dshow device for index={index} "
+                f"qt_hint={display_name!r}"
+            )
+            return open_result
+        _log(f"opening ffmpeg cap: device={device_name!r} 1280x720 @ 60 fps MJPG")
+        # Release the OpenCV cap BEFORE starting ffmpeg. Windows
+        # DirectShow gives exclusive capture access to one process at
+        # a time on most consumer webcams — if OpenCV still holds the
+        # device, ffmpeg's open will fail with "device busy" and we
+        # silently fall through to OpenCV's slow path. So we let go
+        # of the camera first, attempt ffmpeg, and if ffmpeg can't
+        # start we re-open OpenCV from scratch so the user keeps
+        # video.
+        index_int = int(index)
+        try:
+            cap.release()
+        except Exception:
+            pass
+        ffmpeg_cap = FfmpegMjpegCapture(
+            device_name,
+            width=1280,
+            height=720,
+            fps=60,
+        )
+        if ffmpeg_cap.isOpened():
+            _log("ffmpeg cap engaged")
+            return (info, ffmpeg_cap)
+        _log("ffmpeg cap startup failed — falling back to a fresh OpenCV cap")
+        try:
+            ffmpeg_cap.release()
+        except Exception:
+            pass
+        recovered = open_camera_by_index(index_int, max_index=self.config.camera_scan_limit)
+        if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
+            return recovered
+        # Last-ditch: open with default backend so we have *some*
+        # camera object — even default-format YUY2 is better than
+        # leaving the engine with self._cap = None.
+        try:
+            recovered_cap = cv2.VideoCapture(index_int)
+            if recovered_cap.isOpened():
+                return (info, recovered_cap)
+        except Exception:
+            pass
+        return open_result
 
     def _draw_low_fps_badge(self, frame) -> None:
         try:
@@ -2721,7 +2979,16 @@ class GestureWorker(QObject):
         tick_now = time.time()
         if self._should_skip_forced_fps_tick(tick_now):
             return
+        # Per-frame timing diagnostic: when Lite Mode is on, log the
+        # breakdown every ~2 seconds to stderr so the user / dev can
+        # see whether the 26 fps ceiling is camera (cap.read takes the
+        # whole frame budget), MediaPipe inference, or downstream
+        # work. Sample lazily so we don't pay any clock-syscall cost
+        # for users who aren't troubleshooting.
+        debug_timing = bool(getattr(self.config, "lite_mode", False))
+        t0 = time.perf_counter() if debug_timing else 0.0
         ok, frame = self._cap.read()
+        t_read = time.perf_counter() if debug_timing else 0.0
         if not ok:
             return
         # Touchless normally mirrors the camera feed so the user sees the
@@ -2733,7 +3000,32 @@ class GestureWorker(QObject):
         if not bool(getattr(self.config, "camera_source_is_mirrored", False)):
             frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
-        result = self.engine.process_frame(frame)
+        t_prep = time.perf_counter() if debug_timing else 0.0
+        # Smart skip-frame inference: when Lite Mode is on AND we
+        # know the previous frame was empty (no hand), skip MediaPipe
+        # this tick and synthesise a "no hand" result. Never skip two
+        # ticks in a row — that guarantees we'll always detect a new
+        # hand within one camera frame (~16 ms). When a hand was
+        # visible last tick we always run inference, so dynamic
+        # gestures (swipes, repeat-circle) — which feed every frame's
+        # landmark velocity to the dynamic recognizer — never lose
+        # any frames during a gesture. Net: ~50% of MediaPipe's cost
+        # disappears during empty-frame periods (idle / between
+        # gestures), no impact during active gesturing.
+        skip_inference = (
+            bool(getattr(self.config, "lite_mode", False))
+            and not self._low_fps_active
+            and not self._last_result_had_hand
+            and not self._inference_skipped_last
+        )
+        if skip_inference:
+            result = self.engine.neutral_result_for_frame(frame)
+            self._inference_skipped_last = True
+        else:
+            result = self.engine.process_frame(frame)
+            self._inference_skipped_last = False
+            self._last_result_had_hand = bool(result.found)
+        t_engine = time.perf_counter() if debug_timing else 0.0
         self._drawing_secondary_hand_reading = getattr(result, "secondary_hand_reading", None)
         now = time.time()
         dt = max(now - self._last_time, 1e-6)
@@ -2790,6 +3082,7 @@ class GestureWorker(QObject):
         else:
             self._left_hand_streak_since = 0.0
         self._left_hand_prediction = left_prediction
+        t_gate_a = time.perf_counter() if debug_timing else 0.0
         if self._gestures_enabled:
             if self._drawing_mode_enabled:
                 self._volume_mode_active = False
@@ -2799,9 +3092,13 @@ class GestureWorker(QObject):
                 self._update_volume_overlay()
             else:
                 self._handle_volume_control(result, monotonic_now, hand_handedness=hand_handedness)
+            t_volume = time.perf_counter() if debug_timing else 0.0
             self._handle_app_controls(result.prediction, result.hand_reading, hand_handedness, monotonic_now)
+            t_appctrl = time.perf_counter() if debug_timing else 0.0
         else:
             self._window_pair_pose_metrics(result.hand_reading if hand_handedness == "Right" else None, now=monotonic_now)
+            t_volume = time.perf_counter() if debug_timing else 0.0
+            t_appctrl = t_volume
         self._update_chrome_wheel_overlay(monotonic_now)
         self._update_spotify_wheel_overlay(monotonic_now)
         self._update_youtube_wheel_overlay(monotonic_now)
@@ -2809,6 +3106,7 @@ class GestureWorker(QObject):
         self._update_utility_wheel_overlay(monotonic_now)
         self.voice_status_overlay.tick(monotonic_now)
         self._update_runtime_status()
+        t_wheels = time.perf_counter() if debug_timing else 0.0
         display_frame = draw_hand_overlay(result.annotated_frame, result)
         self._draw_window_control_overlay(display_frame)
         self._update_camera_drawing_canvas(display_frame.shape)
@@ -2818,19 +3116,89 @@ class GestureWorker(QObject):
             debug_state=self.mouse_tracker.debug_state,
             mode_enabled=self._mouse_mode_enabled,
         )
-        draw_mouse_monitor_overlay(
-            display_frame,
-            mouse_controller=self.mouse_controller,
-            debug_state=self.mouse_tracker.debug_state,
-            mode_enabled=self._mouse_mode_enabled,
-        )
+        # Desktop-Map panel only paints when Mouse Mode is on. It
+        # was always drawn before, costing ~5-7 ms per frame for a
+        # panel the user can't even use unless mouse mode is
+        # engaged. That's a free 5-7 ms back to the gesture loop
+        # for everyone not currently controlling the mouse with
+        # gestures.
+        if self._mouse_mode_enabled:
+            draw_mouse_monitor_overlay(
+                display_frame,
+                mouse_controller=self.mouse_controller,
+                debug_state=self.mouse_tracker.debug_state,
+                mode_enabled=self._mouse_mode_enabled,
+            )
         if self._low_fps_active:
             self._draw_low_fps_badge(display_frame)
         payload = self._build_debug_payload(result, monotonic_now)
-        try:
-            self.debug_frame_ready.emit(display_frame, payload)
-        except Exception:
-            pass
+        if debug_timing:
+            t_draw = time.perf_counter()
+        # Wall-clock rate-limit on viewer emits when Lite Mode is on.
+        # The receivers can only render ~30 frames/second; at higher
+        # emit rates Qt's queued-signal queue grows unbounded and we
+        # see massive perceived display lag (the 2-second-delayed
+        # camera feeling). Always emit on hand appear/disappear or
+        # action-fire so toasts and overlays stay punctual.
+        should_emit = True
+        if (
+            bool(getattr(self.config, "lite_mode", False))
+            and not self._low_fps_active
+        ):
+            since_last = monotonic_now - self._last_emit_monotonic
+            significant = self._is_significant_state_change(result)
+            should_emit = significant or since_last >= self._emit_min_interval_seconds
+        if should_emit:
+            self._last_emit_monotonic = monotonic_now
+            try:
+                self.debug_frame_ready.emit(display_frame, payload)
+            except Exception:
+                pass
+        if debug_timing:
+            t_end = time.perf_counter()
+            self._timing_samples.append(
+                (
+                    t_read - t0,
+                    t_prep - t_read,
+                    t_engine - t_prep,
+                    t_volume - t_gate_a,
+                    t_appctrl - t_volume,
+                    t_wheels - t_appctrl,
+                    t_draw - t_wheels,
+                    t_end - t_draw,
+                )
+            )
+            now_secs = time.monotonic()
+            if now_secs - self._last_timing_log >= 2.0 and len(self._timing_samples) >= 8:
+                samples = list(self._timing_samples)
+                self._timing_samples.clear()
+                self._last_timing_log = now_secs
+                avg_read = sum(s[0] for s in samples) / len(samples) * 1000.0
+                avg_prep = sum(s[1] for s in samples) / len(samples) * 1000.0
+                avg_engine = sum(s[2] for s in samples) / len(samples) * 1000.0
+                avg_vol = sum(s[3] for s in samples) / len(samples) * 1000.0
+                avg_app = sum(s[4] for s in samples) / len(samples) * 1000.0
+                avg_wheel = sum(s[5] for s in samples) / len(samples) * 1000.0
+                avg_overlay = sum(s[6] for s in samples) / len(samples) * 1000.0
+                avg_emit = sum(s[7] for s in samples) / len(samples) * 1000.0
+                avg_total = (
+                    avg_read + avg_prep + avg_engine + avg_vol + avg_app
+                    + avg_wheel + avg_overlay + avg_emit
+                )
+                inferred_fps = 1000.0 / avg_total if avg_total > 0 else 0.0
+                try:
+                    sys.stderr.write(
+                        f"[lite_mode/timing] read={avg_read:.1f} "
+                        f"prep={avg_prep:.1f} engine={avg_engine:.1f} "
+                        f"vol={avg_vol:.1f} app={avg_app:.1f} "
+                        f"wheel={avg_wheel:.1f} overlay={avg_overlay:.1f} "
+                        f"emit={avg_emit:.1f} total={avg_total:.1f}ms "
+                        f"(ceiling {inferred_fps:.1f} fps, "
+                        f"actual self._fps={self._fps:.1f})\n"
+                    )
+                    sys.stderr.flush()
+                except Exception:
+                    pass
 
     def _handle_volume_control(self, result, now: float, *, hand_handedness: str | None) -> None:
         if not self.volume_controller.available:
@@ -3490,9 +3858,39 @@ class GestureWorker(QObject):
         elif self.volume_overlay.isVisible():
             self.volume_overlay.hide_overlay()
 
+    def _is_significant_state_change(self, result) -> bool:
+        # Returns True when this tick has a viewer-relevant change
+        # that we should emit even if we're in the throttled-skip
+        # half of the cycle: a hand appearing or disappearing, or
+        # a new gesture firing. The user perceives those events as
+        # "the app reacted instantly"; we don't want a 30 fps emit
+        # cap to delay them by ~16 ms. Pure-motion frames (hand
+        # already visible, no action change) can ride the throttle.
+        try:
+            current_found = bool(result.found)
+        except Exception:
+            return True
+        if current_found != self._last_result_had_hand:
+            return True
+        if self._action_history_dirty_for_emit:
+            self._action_history_dirty_for_emit = False
+            return True
+        return False
+
     def _read_system_mute(self) -> bool:
+        # Cache the COM IAudioEndpointVolume.GetMute call for ~120 ms
+        # — was firing every frame (1-3 ms each) inside _handle_volume
+        # _control's hot path. The mute state can't change between
+        # gesture frames in any meaningful way (the user can't
+        # press the mute key during a swipe), so refresh-rate is
+        # plenty for UX purposes.
+        now = time.monotonic()
+        if now < self._mute_cache_until:
+            return self._mute_cache_value
         muted = self.volume_controller.get_mute()
-        return bool(muted) if muted is not None else False
+        self._mute_cache_value = bool(muted) if muted is not None else False
+        self._mute_cache_until = now + 0.12
+        return self._mute_cache_value
 
     def _queue_spotify_volume(self, volume_percent: int) -> None:
         volume_percent = max(0, min(100, int(volume_percent)))

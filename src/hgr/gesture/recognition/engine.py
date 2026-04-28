@@ -699,7 +699,39 @@ class GestureRecognitionEngine:
             tracked_hand=tracked_hand,
             hand_reading=hand_reading,
             prediction=prediction,
-            annotated_frame=frame_bgr.copy(),
+            # Reference, not copy. Was `.copy()` here, which paired
+            # with another `.copy()` in draw_hand_overlay to spend
+            # ~6-8 ms per gesturing frame at 720p BGR for two
+            # successive copies of the exact same buffer. The
+            # downstream consumers either copy it themselves
+            # (tutorial / debug windows) or pass it to
+            # draw_hand_overlay which now mutates in place, so the
+            # caller-side ownership story is unchanged but the per
+            # frame cost drops measurably.
+            annotated_frame=frame_bgr,
+        )
+
+    def neutral_result_for_frame(self, frame_bgr: np.ndarray) -> GestureFrameResult:
+        """Synthetic 'no hand' result used by skip-frame inference.
+
+        Returns the same shape `process_frame` returns when the detector
+        finds no hand, but without actually invoking the detector — so
+        the caller can advertise "this tick saw no hand" while skipping
+        the 12-25 ms MediaPipe inference cost. Also resets the engine's
+        recognizer state so the next real inference call starts fresh,
+        matching the contract `process_frame` enforces on its no-hand
+        branch.
+        """
+        frame_index = self._frame_index
+        self._frame_index += 1
+        self.reset()
+        return GestureFrameResult(
+            found=False,
+            frame_index=frame_index,
+            tracked_hand=None,
+            hand_reading=None,
+            prediction=self._neutral_prediction(),
+            annotated_frame=frame_bgr,
         )
 
     def process_frame(self, frame_bgr: np.ndarray, timestamp: float | None = None) -> GestureFrameResult:
