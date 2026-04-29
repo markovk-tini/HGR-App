@@ -401,16 +401,8 @@ class LiveViewWindow(QMainWindow):
         height, width, channels = frame_rgb.shape
         image = QImage(frame_rgb.data, width, height, channels * width, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(image)
-        # FastTransformation (nearest-neighbour) instead of
-        # SmoothTransformation (bilinear/cubic). SmoothTransformation
-        # on a 720p frame is 15-25 ms of main-thread paint work, and
-        # that work runs AFTER setPixmap returns — between timer
-        # fires — silently bottlenecking the gesture loop's effective
-        # cadence to ~25-30 fps no matter how cheap inference is.
-        # Visual quality difference at live-preview scale is
-        # negligible; the latency difference is the entire ballgame.
         self.video_label.setPixmap(
-            pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
     def _update_volume_widgets(self) -> None:

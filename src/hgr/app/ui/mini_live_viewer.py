@@ -243,14 +243,8 @@ class MiniLiveViewer(QWidget):
         height, width, channels = frame_rgb.shape
         image = QImage(frame_rgb.data, width, height, channels * width, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(image)
-        # FastTransformation per the same logic the live-view
-        # window uses: scaling a 720p source to the mini viewer's
-        # ~360 px target every emit on the main thread was eating
-        # 8-15 ms of paint work that ran *between* timer fires
-        # rather than inside the worker tick — invisible to the
-        # per-tick diagnostic but very visible in self._fps lag.
         self.video_label.setPixmap(
-            pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
     def _handle_close(self) -> None:
