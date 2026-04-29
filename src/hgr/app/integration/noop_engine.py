@@ -653,7 +653,15 @@ class GestureWorker(QObject):
         # for_emit` flips True when a new action gets recorded so
         # the next emit fires regardless of the rate-limit cooldown,
         # keeping toasts / overlays punctual.
-        self._emit_min_interval_seconds: float = 1.0 / 30.0
+        # 20 Hz cap (was 30 Hz). The mini viewer + live view each
+        # do cv2.cvtColor + QImage + QPixmap + scaled-with-smooth-
+        # transformation per emit on the main thread (~25-50 ms of
+        # work for a 720p frame across both receivers). Capping at
+        # 30 Hz would let the Qt cross-thread queue grow during any
+        # busy stretch (draw mode, gesture spikes) and bleed lag
+        # back into the live view for several seconds after the
+        # loop catches up. 20 Hz gives the receivers margin.
+        self._emit_min_interval_seconds: float = 1.0 / 20.0
         self._last_emit_monotonic: float = 0.0
         self._action_history_dirty_for_emit: bool = False
 
