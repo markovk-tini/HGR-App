@@ -213,13 +213,23 @@ class FfmpegMjpegCapture:
         # hidden by the consumer always reading the freshest frame
         # from latest_frame and dropping older ones — see
         # FfmpegMjpegCapture.read.
+        # rtbufsize lowered from 32M -> 4M and -fflags +discardcorrupt
+        # added so ffmpeg DROPS input frames when the consumer can't
+        # keep up, instead of queueing seconds of stale ones in the
+        # buffer. 32M held ~30 MJPG frames (~1 s at 30 fps). After
+        # any temporary consumer slowdown (Spotify HTTP, drawing-
+        # mode blend), the consumer would then spend the next second
+        # processing those stale frames — visible to the user as a
+        # 1-2 s lag in the live view *even though* the per-tick
+        # diagnostic looked normal because the loop itself was fast.
+        # Better to drop a frame than to display a second-old one.
         cmd = [
             self._ffmpeg_path,
             "-hide_banner",
             "-loglevel", "error",
-            "-fflags", "nobuffer",
+            "-fflags", "nobuffer+discardcorrupt",
             "-flags", "low_delay",
-            "-rtbufsize", "32M",
+            "-rtbufsize", "4M",
             "-f", "dshow",
             "-vcodec", "mjpeg",
             "-framerate", str(self._fps),

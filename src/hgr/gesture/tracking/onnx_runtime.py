@@ -501,6 +501,18 @@ class _OnnxHands:
         # plus the 'handedness' label so we keep stable per-hand
         # labels across frames without re-running palm-detect.
         self._tracked_palms: list[dict[str, Any]] = []
+        # When at least one hand is tracked, only re-fire the palm
+        # detector every Nth frame to look for additional hands.
+        # Without this gate, max_num_hands=2 + a single hand visible
+        # would keep palm-detect firing on every frame (since
+        # survivors < max_num_hands every frame), wasting the entire
+        # tracking speedup. ~1 s between scans for new hands feels
+        # responsive; users introducing a second hand notice at
+        # most a 30-frame delay before it gets tracked. Doesn't
+        # affect single-hand max_num_hands=1 callers — they're
+        # fully tracked the moment palm-detect succeeds once.
+        self._scan_for_extra_hands_every = 30
+        self._frames_since_last_scan = 0
 
     def process(self, rgb_frame: np.ndarray) -> _HandsResult:
         # Serialise concurrent processes per session — the two
@@ -552,12 +564,29 @@ class _OnnxHands:
                 )
 
         # ----- Stage 2: palm-detect to discover new / replacement hands -
-        # If we already have max_num_hands tracks, no need to look
-        # for more. Otherwise scan for new palms; for each we run
-        # the landmark detector once to bootstrap a track. Static-
-        # image callers always go through this path (tracking
-        # disabled).
-        if self._tracking_disabled or len(survivors) < self._max_num_hands:
+        # Decide whether to actually run palm-detect this frame.
+        # Three reasons we'd run it:
+        #   (a) tracking disabled (static image mode)
+        #   (b) ZERO survivors — no hand currently tracked, palm-
+        #       detect must run to find any hand at all
+        #   (c) at least one survivor but fewer than max_num_hands
+        #       AND we haven't scanned in N frames — periodic look
+        #       for additional hands when one is already tracked
+        # Without case (c)'s frame gate, max_num_hands=2 + single
+        # hand visible would re-fire palm-detect every frame and
+        # waste the whole tracking speedup; the user would never
+        # see the engine= cost drop below ~13 ms even when the
+        # hand was steady-tracked.
+        run_palm_detect = (
+            self._tracking_disabled
+            or not survivors
+            or (
+                len(survivors) < self._max_num_hands
+                and self._frames_since_last_scan >= self._scan_for_extra_hands_every
+            )
+        )
+        if run_palm_detect:
+            self._frames_since_last_scan = 0
             palms = self._palm.detect(rgb_frame)
             palms = sorted(palms, key=lambda p: -p["score"])
             for palm in palms:
@@ -578,6 +607,8 @@ class _OnnxHands:
                 self._append_landmark_result(
                     lm, w, h, landmark_results, handedness_results
                 )
+        else:
+            self._frames_since_last_scan += 1
 
         self._tracked_palms = [] if self._tracking_disabled else survivors
         return _HandsResult(landmark_results, handedness_results)
