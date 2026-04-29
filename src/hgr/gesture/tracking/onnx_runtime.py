@@ -414,13 +414,21 @@ class _OnnxHandLandmarker:
         landmarks[:, :2] = rotated[:, :2] + original_center + pad_bias
 
         handedness_score = float(handedness_arr.flatten()[0])
-        # The model's handedness score is 0..1 where 0 = Left and
-        # 1 = Right (per OpenCV Zoo's downstream usage).
+        # The OpenCV Zoo ONNX export's handedness score is reversed
+        # relative to mediapipe.solutions.hands on the same mirrored
+        # selfie input: their convention has high score = "Left",
+        # low score = "Right". MediaPipe's convention (which the rest
+        # of the engine — left-fist voice toggle, four-finger
+        # YouTube mode, handedness reconciliation in detector.py) is
+        # the opposite. Swapping the labels here keeps the rest of
+        # the gesture pipeline unchanged. (User reported every gesture
+        # fired on the wrong hand on the first GPU build; flipping
+        # this is the single-line fix.)
         if handedness_score >= 0.5:
-            label = "Right"
+            label = "Left"
             score = handedness_score
         else:
-            label = "Left"
+            label = "Right"
             score = 1.0 - handedness_score
         return {
             "landmarks": landmarks,

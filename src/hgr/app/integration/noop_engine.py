@@ -2417,6 +2417,21 @@ class GestureWorker(QObject):
             except Exception:
                 pass
 
+    def _perf_optimisations_enabled(self) -> bool:
+        # Lite Mode and GPU Mode are independent toggles, but both
+        # imply "the user opted into the performance pipeline" —
+        # ffmpeg-MJPG capture, skip-frame inference, throttled
+        # debug-frame emit, and the per-frame timing diagnostic.
+        # Without this, a user who enables only GPU Mode keeps the
+        # OpenCV YUY2 30 fps camera ceiling, which masks the GPU
+        # inference speedup behind a hard camera-rate cap.
+        # Returning True for either toggle is the foot-gun-free
+        # behaviour the user reported wanting.
+        return (
+            bool(getattr(self.config, "lite_mode", False))
+            or bool(getattr(self.config, "gpu_mode", False))
+        )
+
     def _build_engine_for_fps_mode(self) -> GestureRecognitionEngine:
         self._low_fps_active = bool(getattr(self.config, "low_fps_mode", False)) or self._low_fps_auto_engaged
         lite_active = bool(getattr(self.config, "lite_mode", False))
@@ -2567,12 +2582,15 @@ class GestureWorker(QObject):
 
     def set_gpu_mode(self, enabled: bool) -> None:
         # User-driven GPU-acceleration toggle. Rebuilds the engine
-        # with prefer_gpu set so the runtime loader either lights up
-        # the GPU inference path or transparently falls back to CPU
-        # MediaPipe when no GPU path is reachable on this machine.
-        # Mid-session toggling matches set_lite_mode's pattern: we
-        # rebuild HandDetector on the fly without restarting the
-        # camera or losing the live preview frame.
+        # with prefer_gpu set so the runtime loader either lights
+        # up the GPU inference path or transparently falls back to
+        # CPU MediaPipe when no GPU path is reachable on this
+        # machine. Mid-session toggling mirrors set_lite_mode's
+        # pattern: we rebuild HandDetector on the fly + swap the
+        # camera capture to ffmpeg/MJPG so the GPU inference
+        # speedup actually translates to higher live FPS instead
+        # of being masked by the OpenCV/YUY2 30 fps camera ceiling.
+        was_enabled = bool(getattr(self.config, "gpu_mode", False))
         self.config.gpu_mode = bool(enabled)
         if not self._running:
             return
@@ -2583,6 +2601,66 @@ class GestureWorker(QObject):
                 pass
         self.engine = self._build_engine_for_fps_mode()
         self._fps = 0.0
+        # Don't re-swap the camera if Lite Mode is also on — set_lite
+        # _mode already manages the ffmpeg cap and we'd just thrash
+        # the device. Only fire when GPU Mode flips and Lite Mode
+        # isn't itself driving the same camera path.
+        if (
+            self._cap is None
+            or self._low_fps_active
+            or bool(getattr(self.config, "lite_mode", False))
+            or bool(enabled) == was_enabled
+        ):
+            return
+        info = self._camera_info
+        if info is None:
+            return
+        index = getattr(info, "index", None)
+        if index is None or int(index) < 0:
+            return
+        if not sys.platform.startswith("win"):
+            return
+        if enabled:
+            from ..camera.ffmpeg_capture import (
+                FfmpegMjpegCapture,
+                resolve_dshow_device_for_index,
+            )
+
+            device_name = resolve_dshow_device_for_index(
+                int(index),
+                qt_name_hint=str(getattr(info, "display_name", "") or ""),
+            )
+            if not device_name:
+                return
+            old_cap = self._cap
+            self._cap = None
+            try:
+                old_cap.release()
+            except Exception:
+                pass
+            ffmpeg_cap = FfmpegMjpegCapture(
+                device_name, width=1280, height=720, fps=60
+            )
+            if ffmpeg_cap.isOpened():
+                self._cap = ffmpeg_cap
+                return
+            try:
+                ffmpeg_cap.release()
+            except Exception:
+                pass
+            recovered = open_camera_by_index(int(index), max_index=self.config.camera_scan_limit)
+            if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
+                self._cap = recovered[1]
+        else:
+            old_cap = self._cap
+            self._cap = None
+            try:
+                old_cap.release()
+            except Exception:
+                pass
+            recovered = open_camera_by_index(int(index), max_index=self.config.camera_scan_limit)
+            if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
+                self._cap = recovered[1]
 
     def set_force_ten_fps_test_mode(self, enabled: bool) -> None:
         self.config.force_ten_fps_test_mode = bool(enabled)
@@ -2832,8 +2910,13 @@ class GestureWorker(QObject):
         if self._low_fps_active:
             _log("skipped: low_fps_mode is active")
             return open_result
-        if not bool(getattr(self.config, "lite_mode", False)):
-            _log("skipped: lite_mode is off")
+        # Camera-side ffmpeg/MJPG swap fires for either Lite Mode
+        # or GPU Mode — without this, a user who enabled only GPU
+        # Mode would keep OpenCV's YUY2 30 fps camera ceiling and
+        # the GPU inference speedup couldn't materialize as more
+        # live FPS. See _perf_optimisations_enabled.
+        if not self._perf_optimisations_enabled():
+            _log("skipped: lite_mode + gpu_mode both off")
             return open_result
         if not isinstance(open_result, tuple) or len(open_result) < 2:
             _log("skipped: open_result not in (info, cap) shape")
@@ -3015,7 +3098,7 @@ class GestureWorker(QObject):
         # whole frame budget), MediaPipe inference, or downstream
         # work. Sample lazily so we don't pay any clock-syscall cost
         # for users who aren't troubleshooting.
-        debug_timing = bool(getattr(self.config, "lite_mode", False))
+        debug_timing = self._perf_optimisations_enabled()
         t0 = time.perf_counter() if debug_timing else 0.0
         ok, frame = self._cap.read()
         t_read = time.perf_counter() if debug_timing else 0.0
@@ -3043,7 +3126,7 @@ class GestureWorker(QObject):
         # disappears during empty-frame periods (idle / between
         # gestures), no impact during active gesturing.
         skip_inference = (
-            bool(getattr(self.config, "lite_mode", False))
+            self._perf_optimisations_enabled()
             and not self._low_fps_active
             and not self._last_result_had_hand
             and not self._inference_skipped_last
@@ -3171,10 +3254,7 @@ class GestureWorker(QObject):
         # camera feeling). Always emit on hand appear/disappear or
         # action-fire so toasts and overlays stay punctual.
         should_emit = True
-        if (
-            bool(getattr(self.config, "lite_mode", False))
-            and not self._low_fps_active
-        ):
+        if self._perf_optimisations_enabled() and not self._low_fps_active:
             since_last = monotonic_now - self._last_emit_monotonic
             significant = self._is_significant_state_change(result)
             should_emit = significant or since_last >= self._emit_min_interval_seconds
