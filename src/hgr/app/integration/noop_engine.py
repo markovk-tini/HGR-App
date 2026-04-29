@@ -21,7 +21,6 @@ from ...debug.chrome_gesture_router import ChromeGestureRouter
 from ...debug.foreground_window import get_foreground_window_info, is_foreground_fullscreen
 from ...debug.mouse_controller import MouseController
 from ...debug.mouse_gesture import MouseGestureTracker
-from ...debug.mouse_overlay import draw_mouse_control_box_overlay, draw_mouse_monitor_overlay
 from ...voice.live_dictation import LiveDictationEvent, LiveDictationStreamer
 from ...config.app_config import save_config
 from ...debug.low_fps_suggestion_overlay import LowFpsSuggestionOverlay
@@ -37,7 +36,6 @@ from ...debug.youtube_gesture_router import YouTubeGestureRouter
 from ...gesture.recognition.engine import GestureRecognitionEngine
 from ...gesture.tracking.detector import HandDetector
 from ...gesture.tracking.smoothing import AdaptiveLandmarkSmoother
-from ...gesture.rendering.overlay import draw_hand_overlay
 from ...gesture.ui.test_window import SpotifyWheelOverlay
 from ...gesture.ui.voice_status_overlay import VoiceStatusOverlay
 from ...voice.command_processor import VoiceCommandContext, VoiceCommandProcessor
@@ -3412,18 +3410,19 @@ class GestureWorker(QObject):
         # Async engine path: dispatch to runner thread and return
         # immediately. The runner runs engine.process_frame on its
         # own thread; the result fires _on_engine_result via a
-        # queued Qt signal back to the main thread. With
-        # decoupled display (raw_frame_ready emitted ABOVE before
-        # this dispatch), the user-visible video updates at camera
-        # fps regardless of engine completion time — the engine
-        # result is consumed for state updates (gesture chip,
-        # volume, app routing) on its own cadence.
-        self._async_result_pending = True
-        if self._engine_runner.submit(frame):
-            return
-        # Runner refused — fall back to inline so we don't drop
-        # the frame entirely.
-        self._async_result_pending = False
+        # queued Qt signal back to the main thread. With decoupled
+        # display (raw_frame_ready emitted ABOVE before this
+        # dispatch), the user-visible video updates at camera fps
+        # regardless of engine completion time. Async here frees
+        # the main thread for ~7-17 ms per cycle (the engine wall
+        # time), which lifts the GpuVideoWidget's paint rate from
+        # the ~25 fps cap (engine-blocked) toward the camera's
+        # 30 fps.
+        if self._engine_runner.is_running:
+            self._async_result_pending = True
+            if self._engine_runner.submit(frame):
+                return
+            self._async_result_pending = False
         try:
             result = self.engine.process_frame(frame)
         except Exception:
