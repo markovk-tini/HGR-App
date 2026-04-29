@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QCursor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ...config.app_config import AppConfig
+from .gpu_video_widget import GpuVideoWidget
 
 
 class MiniLiveViewer(QWidget):
@@ -76,11 +77,14 @@ class MiniLiveViewer(QWidget):
         header_layout.addWidget(self.close_button)
         layout.addWidget(self.header)
 
-        self.video_label = QLabel("Press START to begin live gesture tracking.")
-        self.video_label.setObjectName("miniVideo")
-        self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setWordWrap(True)
+        # GPU-backed video panel. Replaces the previous QLabel +
+        # cv2.cvtColor + cv2.resize + QImage + QPixmap.fromImage +
+        # setPixmap path. Frames go from BGR numpy → QImage(BGR888)
+        # → GL texture → fragment shader sampler → screen, with
+        # only one CPU memcpy along the way.
+        self.video_label = GpuVideoWidget()
         self.video_label.setMinimumSize(220, 140)
+        self.video_label.clear_video("Press START to begin live gesture tracking.")
         layout.addWidget(self.video_label, 1)
 
         self.gesture_chip = QLabel("Gesture: neutral")
@@ -188,11 +192,21 @@ class MiniLiveViewer(QWidget):
                 self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
             except Exception:
                 pass
+            try:
+                self._worker.raw_frame_ready.disconnect(self._on_worker_raw_frame)
+            except Exception:
+                pass
+            try:
+                self._worker.engine_landmarks_ready.disconnect(self._on_worker_landmarks)
+            except Exception:
+                pass
         self._worker = worker
         if self._worker is None:
             self._set_idle_state()
             return
         try:
+            self._worker.raw_frame_ready.connect(self._on_worker_raw_frame)
+            self._worker.engine_landmarks_ready.connect(self._on_worker_landmarks)
             self._worker.debug_frame_ready.connect(self._on_worker_debug_frame)
         except Exception:
             self._worker = None
@@ -200,6 +214,10 @@ class MiniLiveViewer(QWidget):
 
     def detach_from_worker(self) -> None:
         if self._worker is not None:
+            try:
+                self._worker.raw_frame_ready.disconnect(self._on_worker_raw_frame)
+            except Exception:
+                pass
             try:
                 self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
             except Exception:
@@ -225,27 +243,55 @@ class MiniLiveViewer(QWidget):
             geometry.bottom() - self.height() - margin,
         )
 
-    def _on_worker_debug_frame(self, frame, payload) -> None:
-        self._last_frame = frame.copy() if frame is not None else None
+    def _on_worker_raw_frame(self, frame, capture_ts: float = 0.0) -> None:
+        # Fast display path — paints the camera frame at camera fps,
+        # before the engine has even started processing it.
+        # `capture_ts` is the monotonic time the reader thread
+        # decoded this frame; mini viewer doesn't display it, but
+        # we accept the arg so the signal connection lines up with
+        # the live view's signature.
+        if not self.isVisible() or frame is None:
+            return
+        self._last_frame = frame
         self._render_frame()
+
+    def _on_worker_landmarks(self, hands_xy_norm) -> None:
+        # Engine-completed landmark overlay. Goes to the GPU widget
+        # which paints them via QPainter on top of the texture.
+        if not self.isVisible():
+            return
+        try:
+            self.video_label.update_landmarks(hands_xy_norm)
+        except Exception:
+            pass
+
+    def _on_worker_debug_frame(self, frame, payload) -> None:
+        # Engine-completion path. The frame here is the engine-
+        # annotated version (with landmark overlays drawn by the
+        # worker post-engine). We IGNORE the frame and use the
+        # payload only — the live-view widget is painted from
+        # raw_frame_ready, not from this signal, to keep display
+        # latency at camera fps. Updating the gesture-chip text
+        # from here keeps the chip in sync with what the engine
+        # actually saw, even though the chip may lag the visible
+        # hand position by ~1 frame's worth of engine time.
+        if not self.isVisible():
+            return
         self.gesture_chip.setText(str(payload.get("gesture_chip", "Gesture: neutral")))
 
     def _set_idle_state(self) -> None:
         self._last_frame = None
-        self.video_label.clear()
-        self.video_label.setText("Press START to begin live gesture tracking.")
+        self.video_label.clear_video("Press START to begin live gesture tracking.")
         self.gesture_chip.setText("Gesture: neutral")
 
     def _render_frame(self) -> None:
+        # GPU paint: hand the BGR frame straight to the OpenGL
+        # widget. Texture upload + scaling + BGR→RGB swizzle all
+        # happen on the GPU. No cv2.cvtColor / cv2.resize on the
+        # main thread.
         if self._last_frame is None:
             return
-        frame_rgb = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = frame_rgb.shape
-        image = QImage(frame_rgb.data, width, height, channels * width, QImage.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(image)
-        self.video_label.setPixmap(
-            pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        self.video_label.update_frame(self._last_frame)
 
     def _handle_close(self) -> None:
         self.hide()

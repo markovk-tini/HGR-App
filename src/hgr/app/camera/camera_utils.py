@@ -9,6 +9,8 @@ from typing import List, Optional, Tuple
 
 import cv2
 
+from .threaded_cv_capture import ThreadedCvCapture
+
 
 @dataclass(frozen=True)
 class CameraInfo:
@@ -208,7 +210,16 @@ def open_camera_by_index(index: int, max_index: int = 8) -> Tuple[Optional[Camer
                 backend_name=backend_name(backend),
                 display_name=f"Camera {index} ({backend_name(backend)})",
             )
-            return info, cap
+            # Wrap the synchronous cv2.VideoCapture in a reader-thread
+            # shim so cap.read() returns immediately with the latest
+            # buffered frame instead of blocking ~33 ms (a 30 fps
+            # frame interval) on the main thread. Without this, the
+            # gesture loop's main-thread cap.read call itself was the
+            # dominant cycle cost on the OpenCV fallback path,
+            # capping FPS at the camera's frame rate AND starving
+            # other Qt events of the main thread for the duration of
+            # each blocking read.
+            return info, ThreadedCvCapture(cap)
     return None, None
 
 
@@ -250,7 +261,10 @@ def open_phone_camera_url(url: str) -> Tuple[Optional[CameraInfo], Optional[cv2.
         backend_name="Phone",
         display_name=f"Phone Camera ({url})",
     )
-    return info, cap
+    # Same async-reader wrap as open_camera_by_index — phone-URL
+    # captures are over the network and read() can block well past
+    # one frame interval if the phone hiccups. Off-main-thread.
+    return info, ThreadedCvCapture(cap)
 
 
 def open_preferred_or_first_available(preferred_index: Optional[int], max_index: int = 8) -> Tuple[Optional[CameraInfo], Optional[cv2.VideoCapture]]:

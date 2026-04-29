@@ -1,0 +1,227 @@
+"""GPU-backed video display widget.
+
+Why this exists:
+The QLabel.setPixmap path used to display the camera feed ran on
+every frame:
+
+    cv2.cvtColor(BGR→RGB)   ~3 ms at 720p
+    cv2.resize(INTER_AREA)   ~1-2 ms
+    QImage.copy()            ~1-2 ms
+    QPixmap.fromImage()      ~1 ms (allocates GPU texture)
+    setPixmap + paint event  ~1-2 ms
+
+That's ~7-10 ms of CPU work per frame just to put a camera image on
+screen. This widget skips all of it: it constructs a QImage with
+Format_BGR888 (no CPU colour conversion — the GPU's texture sampler
+handles BGR natively) and uses Qt's raster paint engine (D3D-backed
+on Windows, GPU-accelerated by default) to draw image + landmarks.
+
+We do NOT use QOpenGLWidget — that adds an OpenGL/ANGLE driver path
+that on some Windows setups silently coalesces frames and produces
+~9 fps perceived display rate even when the worker is running at
+30+ fps. The default QWidget raster engine is already GPU-backed
+through Qt's D3D11 paint backend, with much less driver-stack risk.
+
+Includes a paint-rate counter that logs `[gpu_video] paint rate: N
+fps` every 2 s, so display rate can be observed independently of
+the worker's `actual self._fps`.
+"""
+from __future__ import annotations
+
+import sys
+import time
+from typing import Iterable, List, Optional, Sequence, Tuple
+
+import numpy as np
+from PySide6.QtCore import QPointF, QRect, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPaintEvent, QPen
+from PySide6.QtWidgets import QSizePolicy, QWidget
+
+# MediaPipe's 21-landmark hand connections (pairs of indices).
+# Same topology the cv2-based draw_hand_overlay used to draw on the
+# BGR frame — we now draw it on the GPU instead.
+_HAND_CONNECTIONS: Tuple[Tuple[int, int], ...] = (
+    (0, 1), (1, 2), (2, 3), (3, 4),         # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),         # index
+    (5, 9), (9, 10), (10, 11), (11, 12),    # middle
+    (9, 13), (13, 14), (14, 15), (15, 16),  # ring
+    (13, 17), (17, 18), (18, 19), (19, 20), # pinky
+    (0, 17),                                # palm base to pinky
+)
+
+
+class GpuVideoWidget(QWidget):
+    """Drop-in replacement for the QLabel video panel.
+
+    Public API (used by mini_live_viewer / live_view_window):
+      - update_frame(bgr_numpy)  → schedule GPU repaint with new frame
+      - update_landmarks(hands)  → list of per-hand normalized [(x,y), ...]
+      - clear_video(idle_text)   → drop the frame, optionally show idle text
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._image: Optional[QImage] = None
+        self._image_w: int = 0
+        self._image_h: int = 0
+        self._landmarks: List[Sequence[Tuple[float, float]]] = []
+        self._idle_text: str = ""
+        self._idle_font = QFont("Segoe UI", 10)
+        self._landmark_pen = QPen(QColor(29, 233, 182), 2)
+        self._connection_pen = QPen(QColor(29, 233, 182, 200), 2)
+        self._idle_color = QColor(180, 200, 220)
+        self._background = QColor(7, 19, 29)
+        # Paint-rate diagnostic — prints `[gpu_video] paint rate:`
+        # every 2 s so we can see whether the actual on-screen
+        # update rate matches the worker's emit rate. If they
+        # diverge, paint events are coalescing somewhere.
+        self._paint_count = 0
+        self._paint_log_at = 0.0
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumSize(220, 140)
+        # Disable Qt's automatic background fill — we paint the
+        # whole rect ourselves in paintEvent.
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+    # ----- public API used by the receivers ------------------
+
+    def update_frame(self, bgr_frame: np.ndarray) -> None:
+        """Hand the widget a new BGR frame. The GPU paint will pick
+        it up on the next paintGL. We `.copy()` so the worker's
+        reader thread can safely overwrite its source buffer."""
+        if bgr_frame is None or bgr_frame.size == 0:
+            return
+        try:
+            h, w = bgr_frame.shape[:2]
+        except Exception:
+            return
+        if h <= 0 or w <= 0:
+            return
+        # Format_BGR888 stores 3 bytes/pixel B,G,R in that order
+        # — same as the cv2 numpy buffer. Qt's GL paint engine
+        # handles the BGR-vs-RGB sampler swizzle on the GPU, so
+        # we skip the CPU cv2.cvtColor pass entirely.
+        self._image = QImage(
+            bgr_frame.data, w, h, 3 * w, QImage.Format_BGR888
+        ).copy()
+        self._image_w = w
+        self._image_h = h
+        self._idle_text = ""
+        self.update()
+
+    def update_landmarks(self, hands_xy_norm: Optional[Iterable]) -> None:
+        """Store landmarks for the next paintGL. Each hand is a
+        list of (x, y) tuples in [0, 1] image-normalized space.
+        `update()` is NOT called here — the next `update_frame`
+        will schedule the repaint, which keeps landmarks in sync
+        with the frame they belong to."""
+        if hands_xy_norm is None:
+            self._landmarks = []
+            return
+        normalised: List[Sequence[Tuple[float, float]]] = []
+        for hand in hands_xy_norm:
+            if hand is None:
+                continue
+            pts: List[Tuple[float, float]] = []
+            for pt in hand:
+                if pt is None:
+                    continue
+                try:
+                    pts.append((float(pt[0]), float(pt[1])))
+                except Exception:
+                    continue
+            if pts:
+                normalised.append(pts)
+        self._landmarks = normalised
+
+    def clear_video(self, idle_text: str = "") -> None:
+        self._image = None
+        self._image_w = 0
+        self._image_h = 0
+        self._landmarks = []
+        self._idle_text = str(idle_text or "")
+        self.update()
+
+    # ----- paint -------------------------------------------------
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        # Qt's raster paint engine — D3D11-backed on Windows, so
+        # already GPU-accelerated. drawImage with Format_BGR888
+        # uploads to a texture and samples on the GPU; no CPU
+        # colour conversion needed.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.fillRect(self.rect(), self._background)
+        target = self._aspect_target()
+        if self._image is not None and not self._image.isNull():
+            painter.drawImage(target, self._image)
+            self._draw_landmarks(painter, target)
+        elif self._idle_text:
+            painter.setPen(QPen(self._idle_color, 1))
+            painter.setFont(self._idle_font)
+            painter.drawText(
+                self.rect(),
+                Qt.AlignCenter | Qt.TextWordWrap,
+                self._idle_text,
+            )
+        painter.end()
+        # Paint-rate diagnostic. Prints actual on-screen update
+        # rate every 2 s so we can confirm whether the display is
+        # tracking the worker's emit rate or coalescing.
+        self._paint_count += 1
+        now = time.monotonic()
+        if self._paint_log_at == 0.0:
+            self._paint_log_at = now
+        elif now - self._paint_log_at >= 2.0:
+            rate = self._paint_count / (now - self._paint_log_at)
+            try:
+                sys.stderr.write(
+                    f"[gpu_video] paint rate: {rate:.1f} fps "
+                    f"(widget={self.objectName() or type(self).__name__})\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+            self._paint_count = 0
+            self._paint_log_at = now
+
+    def _aspect_target(self) -> QRect:
+        if self._image_w <= 0 or self._image_h <= 0:
+            return self.rect()
+        wa = max(1, self.width())
+        ha = max(1, self.height())
+        scale = min(wa / float(self._image_w), ha / float(self._image_h))
+        if scale <= 0:
+            return self.rect()
+        tw = max(1, int(self._image_w * scale))
+        th = max(1, int(self._image_h * scale))
+        x = (wa - tw) // 2
+        y = (ha - th) // 2
+        return QRect(x, y, tw, th)
+
+    def _draw_landmarks(self, painter: QPainter, target: QRect) -> None:
+        if not self._landmarks:
+            return
+        for hand in self._landmarks:
+            if not hand:
+                continue
+            # Connections (skeleton) first so the joint dots paint
+            # on top.
+            painter.setPen(self._connection_pen)
+            for a, b in _HAND_CONNECTIONS:
+                if a >= len(hand) or b >= len(hand):
+                    continue
+                ax, ay = hand[a][0], hand[a][1]
+                bx, by = hand[b][0], hand[b][1]
+                p1 = QPointF(ax * target.width() + target.x(),
+                             ay * target.height() + target.y())
+                p2 = QPointF(bx * target.width() + target.x(),
+                             by * target.height() + target.y())
+                painter.drawLine(p1, p2)
+            # Joints
+            painter.setPen(self._landmark_pen)
+            for pt in hand:
+                px = pt[0] * target.width() + target.x()
+                py = pt[1] * target.height() + target.y()
+                painter.drawPoint(QPointF(px, py))

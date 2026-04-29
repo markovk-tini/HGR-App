@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -149,11 +150,18 @@ class _OnnxPalmDetector:
         self._nms_threshold = float(nms_threshold)
         self._top_k = int(top_k)
         self._input_name = session.get_inputs()[0].name
+        # Inference timing samples (seconds). Logged externally; we
+        # just collect here so the runner-thread diagnostic can split
+        # palm-detect vs hand-landmark cost. Critical for diagnosing
+        # silent DML-to-CPU per-op fallback inside an InferenceSession.
+        self._last_inference_seconds: float = 0.0
 
     def detect(self, rgb_frame: np.ndarray) -> list[dict[str, Any]]:
         h, w = rgb_frame.shape[:2]
         blob, pad_bias, ratio = self._preprocess(rgb_frame)
+        _t0 = time.perf_counter()
         outputs = self._session.run(None, {self._input_name: blob})
+        self._last_inference_seconds = time.perf_counter() - _t0
         # outputs ordering matches the ONNX model: Identity (boxes
         # + keypoint deltas), Identity_1 (scores).
         return self._postprocess(outputs, np.array([w, h]), pad_bias, ratio)
@@ -268,6 +276,10 @@ class _OnnxHandLandmarker:
         self._session = session
         self._conf_threshold = float(conf_threshold)
         self._input_name = session.get_inputs()[0].name
+        # See _OnnxPalmDetector — same timing instrumentation, used
+        # to attribute hand-landmark inference cost separately from
+        # palm-detect.
+        self._last_inference_seconds: float = 0.0
 
     def detect(self, rgb_frame: np.ndarray, palm: dict[str, Any]) -> dict[str, Any] | None:
         crop, rotated_palm_bbox, angle, rotation_matrix, pad_bias = self._preprocess(
@@ -275,7 +287,9 @@ class _OnnxHandLandmarker:
         )
         if crop is None:
             return None
+        _t0 = time.perf_counter()
         outputs = self._session.run(None, {self._input_name: crop})
+        self._last_inference_seconds = time.perf_counter() - _t0
         return self._postprocess(outputs, rotated_palm_bbox, angle, rotation_matrix, pad_bias)
 
     def _crop_and_pad_from_palm(
@@ -513,6 +527,29 @@ class _OnnxHands:
         # fully tracked the moment palm-detect succeeds once.
         self._scan_for_extra_hands_every = 30
         self._frames_since_last_scan = 0
+        # Per-stage timing aggregation — sampled every process()
+        # call, logged every ~2 seconds. Lets us tell DML inference
+        # (palm: ~2 ms, landmark: ~3 ms expected) from silent CPU
+        # fallback (palm: ~5 ms, landmark: ~12 ms+). Without this
+        # split the only knob the upstream timing log shows is total
+        # engine wall time, which mixes inference, signal-queue
+        # wait, and per-op CPU/GPU placement.
+        self._palm_samples_seconds: list[float] = []
+        self._landmark_samples_seconds: list[float] = []
+        self._stage_log_last_at: float = 0.0
+        # Aggregate Stage-1 (tracking) outcomes across all process()
+        # calls inside the 2-second log window so we can see exactly
+        # why tracking is or isn't holding from frame to frame.
+        self._stage1_attempts_total: int = 0
+        self._stage1_lost_crop_total: int = 0
+        self._stage1_lost_conf_total: int = 0
+        self._stage1_ok_total: int = 0
+        # Per-frame snapshots of Stage-1 outcomes — set inside
+        # _process_locked, drained by _process_locked_with_stats.
+        self._last_stage1_attempts: int = 0
+        self._last_stage1_lost_crop: int = 0
+        self._last_stage1_lost_conf: int = 0
+        self._last_stage1_ok: int = 0
 
     def process(self, rgb_frame: np.ndarray) -> _HandsResult:
         # Serialise concurrent processes per session — the two
@@ -520,7 +557,93 @@ class _OnnxHands:
         # backends and gestures don't gain anything from parallel
         # frame inference.
         with self._lock:
-            return self._process_locked(rgb_frame)
+            result, stage1_stats = self._process_locked_with_stats(rgb_frame)
+        # Sample after the lock so the log lines never block the
+        # gesture loop.
+        self._stage1_attempts_total += stage1_stats[0]
+        self._stage1_lost_crop_total += stage1_stats[1]
+        self._stage1_lost_conf_total += stage1_stats[2]
+        self._stage1_ok_total += stage1_stats[3]
+        self._record_stage_samples()
+        return result
+
+    def _process_locked_with_stats(
+        self, rgb_frame: np.ndarray
+    ) -> tuple[_HandsResult, tuple[int, int, int, int]]:
+        # Wrapper that returns Stage-1 outcome counters alongside
+        # the result so they can be logged from process() without
+        # mutating self under the lock.
+        result = self._process_locked(rgb_frame)
+        stats = (
+            self._last_stage1_attempts,
+            self._last_stage1_lost_crop,
+            self._last_stage1_lost_conf,
+            self._last_stage1_ok,
+        )
+        return result, stats
+
+    def _record_stage_samples(self) -> None:
+        # Drain-and-zero the per-detector last-inference timer so each
+        # value is sampled exactly once. Prior version re-sampled the
+        # last positive value on every process() call, inflating the
+        # palm-detect sample count by ~25x and making it look like
+        # palm-detect was firing every frame when it was actually
+        # firing only every 30 frames as designed.
+        palm_t = float(getattr(self._palm, "_last_inference_seconds", 0.0))
+        lm_t = float(getattr(self._landmarker, "_last_inference_seconds", 0.0))
+        if palm_t > 0.0:
+            self._palm_samples_seconds.append(palm_t)
+            self._palm._last_inference_seconds = 0.0  # type: ignore[attr-defined]
+        if lm_t > 0.0:
+            self._landmark_samples_seconds.append(lm_t)
+            self._landmarker._last_inference_seconds = 0.0  # type: ignore[attr-defined]
+        now = time.monotonic()
+        if self._stage_log_last_at == 0.0:
+            self._stage_log_last_at = now
+            return
+        if now - self._stage_log_last_at < 2.0:
+            return
+        if len(self._palm_samples_seconds) + len(self._landmark_samples_seconds) < 4:
+            return
+        self._stage_log_last_at = now
+        palm_samples = self._palm_samples_seconds
+        lm_samples = self._landmark_samples_seconds
+        self._palm_samples_seconds = []
+        self._landmark_samples_seconds = []
+        try:
+            palm_avg = (sum(palm_samples) / len(palm_samples) * 1000.0) if palm_samples else 0.0
+            lm_avg = (sum(lm_samples) / len(lm_samples) * 1000.0) if lm_samples else 0.0
+            stage1_a = self._stage1_attempts_total
+            stage1_lc = self._stage1_lost_crop_total
+            stage1_lp = self._stage1_lost_conf_total
+            stage1_ok = self._stage1_ok_total
+            self._stage1_attempts_total = 0
+            self._stage1_lost_crop_total = 0
+            self._stage1_lost_conf_total = 0
+            self._stage1_ok_total = 0
+            gate_scan = getattr(self, "_gate_fire_scan_due", 0)
+            gate_nos = getattr(self, "_gate_fire_no_survivors", 0)
+            gate_dis = getattr(self, "_gate_fire_disabled", 0)
+            tp0 = getattr(self, "_gate_fire_tp0", 0)
+            tp1 = getattr(self, "_gate_fire_tp1", 0)
+            tpN = getattr(self, "_gate_fire_tpN", 0)
+            self._gate_fire_scan_due = 0
+            self._gate_fire_no_survivors = 0
+            self._gate_fire_disabled = 0
+            self._gate_fire_tp0 = 0
+            self._gate_fire_tp1 = 0
+            self._gate_fire_tpN = 0
+            sys.stderr.write(
+                f"[onnx_runtime] palm-detect avg={palm_avg:.1f}ms ({len(palm_samples)}) "
+                f"hand-landmark avg={lm_avg:.1f}ms ({len(lm_samples)}) "
+                f"track1[attempts={stage1_a} ok={stage1_ok} "
+                f"lost_crop_or_None={stage1_lc} lost_conf={stage1_lp}] "
+                f"gate[scan={gate_scan} no_surv={gate_nos} dis={gate_dis}] "
+                f"tp_at_fire[0={tp0} 1={tp1} N={tpN}]\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
 
     def _process_locked(self, rgb_frame: np.ndarray) -> _HandsResult:
         h, w = rgb_frame.shape[:2]
@@ -541,13 +664,33 @@ class _OnnxHands:
         landmark_results: list[_NormalizedLandmarkList] = []
         handedness_results: list[_ClassificationList] = []
         survivors: list[dict[str, Any]] = []
+        # Stage-1 outcome counters — periodic stderr log so we can
+        # see whether tracking is succeeding (palm-detect should
+        # then fire only every 30 frames) or failing (which forces
+        # palm-detect to re-fire every frame, blowing the GPU
+        # speedup). Buckets: lost_crop = preprocess clipped to
+        # zero area; lost_conf = inference returned None or
+        # presence below threshold; ok = track survived.
+        stage1_attempts = 0
+        stage1_lost_crop = 0
+        stage1_lost_conf = 0
+        stage1_ok = 0
         if not self._tracking_disabled and self._tracked_palms:
             for prev in self._tracked_palms:
+                stage1_attempts += 1
                 lm = self._landmarker.detect(rgb_frame, prev)
-                if lm is None or lm["presence_score"] < self._tracking_threshold:
-                    # Track lost — skip; we'll re-run palm-detect
-                    # for any visible hands at the end of this frame.
+                if lm is None:
+                    # Could be crop=None OR conf below threshold;
+                    # the landmarker collapses both into None so we
+                    # can't tell apart here without instrumenting it
+                    # directly. Treat as crop-loss bucket — we'll
+                    # widen the diagnostic if needed.
+                    stage1_lost_crop += 1
                     continue
+                if lm["presence_score"] < self._tracking_threshold:
+                    stage1_lost_conf += 1
+                    continue
+                stage1_ok += 1
                 next_palm = self._derive_palm_from_landmarks(lm["landmarks"])
                 # Carry the previously-resolved handedness on the
                 # track. Re-running the landmark model produces a
@@ -577,14 +720,32 @@ class _OnnxHands:
         # waste the whole tracking speedup; the user would never
         # see the engine= cost drop below ~13 ms even when the
         # hand was steady-tracked.
-        run_palm_detect = (
-            self._tracking_disabled
-            or not survivors
-            or (
-                len(survivors) < self._max_num_hands
-                and self._frames_since_last_scan >= self._scan_for_extra_hands_every
-            )
+        cond_disabled = bool(self._tracking_disabled)
+        cond_no_survivors = not survivors
+        cond_scan = (
+            len(survivors) < self._max_num_hands
+            and self._frames_since_last_scan >= self._scan_for_extra_hands_every
         )
+        run_palm_detect = cond_disabled or cond_no_survivors or cond_scan
+        # Aggregate gate-fire reasons across the 2-second log
+        # window. Diagnoses the "palm-detect fires every frame
+        # despite tracking succeeding" case by attributing each
+        # fire to its triggering condition (disabled/no_survivors/
+        # scan_due). One of these MUST be true on every fire — the
+        # one with count = N (frame count) is the leak.
+        if run_palm_detect:
+            if cond_scan:
+                self._gate_fire_scan_due = getattr(self, "_gate_fire_scan_due", 0) + 1
+            if cond_no_survivors:
+                self._gate_fire_no_survivors = getattr(self, "_gate_fire_no_survivors", 0) + 1
+            if cond_disabled:
+                self._gate_fire_disabled = getattr(self, "_gate_fire_disabled", 0) + 1
+            # Also track tracked_palms entry count per fire so we
+            # can see whether tracked_palms is empty when gate fires
+            # (which would explain no_survivors=True every frame).
+            self._gate_fire_tp0 = getattr(self, "_gate_fire_tp0", 0) + (1 if not self._tracked_palms else 0)
+            self._gate_fire_tp1 = getattr(self, "_gate_fire_tp1", 0) + (1 if len(self._tracked_palms) == 1 else 0)
+            self._gate_fire_tpN = getattr(self, "_gate_fire_tpN", 0) + (1 if len(self._tracked_palms) > 1 else 0)
         if run_palm_detect:
             self._frames_since_last_scan = 0
             palms = self._palm.detect(rgb_frame)
@@ -611,6 +772,12 @@ class _OnnxHands:
             self._frames_since_last_scan += 1
 
         self._tracked_palms = [] if self._tracking_disabled else survivors
+        # Snapshot Stage-1 counters for this frame so process() can
+        # aggregate them across the 2-second log window.
+        self._last_stage1_attempts = stage1_attempts
+        self._last_stage1_lost_crop = stage1_lost_crop
+        self._last_stage1_lost_conf = stage1_lost_conf
+        self._last_stage1_ok = stage1_ok
         return _HandsResult(landmark_results, handedness_results)
 
     def _append_landmark_result(
@@ -645,19 +812,28 @@ class _OnnxHands:
         next call — the speedup that makes this whole class worth
         having.
 
-        bbox = tight (xy-min, xy-max) over all 21 landmarks, padded
-        slightly so a fast hand-motion between frames doesn't fall
-        out of the ROI. The landmark detector's _preprocess re-
-        applies its own enlarge factor on top, so we don't need to
-        be aggressive here.
+        Critical sizing detail: the landmark preprocess applies a
+        4x pre-enlarge for rotation alignment and then a 3x enlarge
+        on the rotated bbox (PALM_BOX_PRE_ENLARGE_FACTOR /
+        PALM_BOX_ENLARGE_FACTOR). The palm detector's output bbox is
+        sized for those enlarges. If we feed in a whole-hand bbox
+        (from min/max of all 21 landmarks — finger TIPS to wrist)
+        the post-enlarge crop falls well outside the frame, the
+        landmark model sees mostly black padding, presence_score
+        collapses below the tracking threshold, and tracking is
+        dropped every single frame — defeating the entire tracking
+        speedup. The fix: bound only the palm-region landmarks
+        (wrist + finger BASE knuckles + thumb base), which matches
+        the palm-only bbox shape the palm detector emits.
 
         keypoints = the 7 palm landmarks the rotation step uses
         (indices 0, 5, 9, 13, 17, 1, 2)."""
         xy = landmarks[:, :2].astype(np.float32, copy=False)
-        x_min = float(np.min(xy[:, 0]))
-        y_min = float(np.min(xy[:, 1]))
-        x_max = float(np.max(xy[:, 0]))
-        y_max = float(np.max(xy[:, 1]))
+        palm_xy = xy[list(self._PALM_LANDMARK_INDICES)]
+        x_min = float(np.min(palm_xy[:, 0]))
+        y_min = float(np.min(palm_xy[:, 1]))
+        x_max = float(np.max(palm_xy[:, 0]))
+        y_max = float(np.max(palm_xy[:, 1]))
         # Pad bbox by 10 % of its size to absorb fast inter-frame
         # motion. Below this threshold the next-frame landmark
         # detector's enlarge factor (3x) easily covers any hand
@@ -668,10 +844,7 @@ class _OnnxHands:
             [x_min - pad_x, y_min - pad_y, x_max + pad_x, y_max + pad_y],
             dtype=np.float32,
         )
-        keypoints = np.asarray(
-            [xy[i] for i in self._PALM_LANDMARK_INDICES],
-            dtype=np.float32,
-        )
+        keypoints = palm_xy.astype(np.float32, copy=True)
         return {"bbox": bbox, "keypoints": keypoints, "score": 0.99}
 
     @staticmethod

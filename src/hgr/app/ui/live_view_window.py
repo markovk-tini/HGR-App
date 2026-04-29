@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
 from ...config.app_config import AppConfig
+from .gpu_video_widget import GpuVideoWidget
 
 
 class LiveViewWindow(QMainWindow):
@@ -91,12 +92,24 @@ class LiveViewWindow(QMainWindow):
         video_layout.setContentsMargins(10, 10, 10, 10)
         video_layout.setSpacing(8)
 
-        self.video_label = QLabel("Press START in the app to begin live gesture tracking.")
-        self.video_label.setObjectName("videoLabel")
-        self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setWordWrap(True)
+        # GPU-backed video display. See gpu_video_widget.py and
+        # MiniLiveViewer for the rationale — this replaces the
+        # previous QLabel + CPU pixmap pipeline.
+        self.video_label = GpuVideoWidget()
         self.video_label.setMinimumSize(280, 180)
+        self.video_label.clear_video("Press START in the app to begin live gesture tracking.")
         video_layout.addWidget(self.video_label, 1)
+
+        # Live latency readout: time from camera-frame decode to
+        # this very paint, in milliseconds. EWMA-smoothed so the
+        # display number doesn't strobe. Sits between the video
+        # and the gesture chip so it's visible at a glance.
+        self.latency_label = QLabel("Display lag: --")
+        self.latency_label.setObjectName("latencyChip")
+        self.latency_label.setAlignment(Qt.AlignCenter)
+        video_layout.addWidget(self.latency_label, 0, Qt.AlignCenter)
+        # Per-paint EWMA state.
+        self._lag_ms_smoothed: float = 0.0
 
         self.gesture_chip = QLabel("Gesture: neutral")
         self.gesture_chip.setObjectName("gestureChip")
@@ -243,6 +256,16 @@ class LiveViewWindow(QMainWindow):
                 padding: 6px 10px;
                 font-weight: 800;
             }}
+            QLabel#latencyChip {{
+                background-color: rgba(255, 200, 60, 0.14);
+                color: #FFCB66;
+                border: 1px solid rgba(255, 200, 60, 0.40);
+                border-radius: 10px;
+                padding: 3px 10px;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.3px;
+            }}
             QLabel#debugLiteBadge {{
                 background-color: rgba(96,165,250,0.18);
                 color: #93C5FD;
@@ -301,11 +324,21 @@ class LiveViewWindow(QMainWindow):
                 self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
             except Exception:
                 pass
+            try:
+                self._worker.raw_frame_ready.disconnect(self._on_worker_raw_frame)
+            except Exception:
+                pass
+            try:
+                self._worker.engine_landmarks_ready.disconnect(self._on_worker_landmarks)
+            except Exception:
+                pass
         self._worker = worker
         if self._worker is None:
             self._set_idle_state()
             return
         try:
+            self._worker.raw_frame_ready.connect(self._on_worker_raw_frame)
+            self._worker.engine_landmarks_ready.connect(self._on_worker_landmarks)
             self._worker.debug_frame_ready.connect(self._on_worker_debug_frame)
         except Exception:
             self._worker = None
@@ -313,6 +346,10 @@ class LiveViewWindow(QMainWindow):
 
     def detach_from_worker(self) -> None:
         if self._worker is not None:
+            try:
+                self._worker.raw_frame_ready.disconnect(self._on_worker_raw_frame)
+            except Exception:
+                pass
             try:
                 self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
             except Exception:
@@ -332,19 +369,77 @@ class LiveViewWindow(QMainWindow):
     def _handle_close(self) -> None:
         self.hide()
 
-    def _on_worker_debug_frame(self, frame, payload) -> None:
-        self._last_frame = frame.copy() if frame is not None else None
+    def _on_worker_raw_frame(self, frame, capture_ts: float = 0.0) -> None:
+        # Decoupled-display paint path — see MiniLiveViewer for
+        # rationale. Renders the camera frame at camera fps,
+        # bypasses the engine pipeline.
+        if not self.isVisible() or frame is None:
+            return
+        self._last_frame = frame
         self._render_frame()
+        # Update the latency + display-rate readout. The label
+        # shows BOTH so we can spot the case where lag looks low
+        # (frames flow into the slot quickly) but display is
+        # actually low fps (paint events are coalescing or driver
+        # is back-pressuring). The two together = honest user-
+        # visible truth.
+        import time as _time
+        now = _time.monotonic()
+        # Lag (capture → here)
+        if capture_ts > 0.0:
+            instant_ms = max(0.0, (now - capture_ts) * 1000.0)
+            if self._lag_ms_smoothed <= 0.0:
+                self._lag_ms_smoothed = instant_ms
+            else:
+                self._lag_ms_smoothed = 0.8 * self._lag_ms_smoothed + 0.2 * instant_ms
+        # Display rate (slot fires per second — note this is the
+        # frame ARRIVAL rate, not the paint rate; the GpuVideoWidget
+        # logs actual paint rate to stderr separately).
+        if not hasattr(self, "_arrival_count"):
+            self._arrival_count = 0
+            self._arrival_window_start = now
+            self._arrival_rate_smoothed = 0.0
+        self._arrival_count += 1
+        elapsed = now - self._arrival_window_start
+        if elapsed >= 1.0:
+            instant_rate = self._arrival_count / elapsed
+            if self._arrival_rate_smoothed <= 0.0:
+                self._arrival_rate_smoothed = instant_rate
+            else:
+                self._arrival_rate_smoothed = 0.7 * self._arrival_rate_smoothed + 0.3 * instant_rate
+            self._arrival_count = 0
+            self._arrival_window_start = now
+        self.latency_label.setText(
+            f"Display lag: {self._lag_ms_smoothed:.0f} ms  |  "
+            f"Frames in: {self._arrival_rate_smoothed:.0f}/s"
+        )
 
+    def _on_worker_landmarks(self, hands_xy_norm) -> None:
+        # GPU landmark overlay path. Same rationale as in
+        # MiniLiveViewer.
+        if not self.isVisible():
+            return
+        try:
+            self.video_label.update_landmarks(hands_xy_norm)
+        except Exception:
+            pass
+
+    def _on_worker_debug_frame(self, frame, payload) -> None:
+        # Engine-result path — payload only. The live-view pixmap
+        # is painted from raw_frame_ready above, not from here, so
+        # the display stays at camera fps regardless of engine
+        # processing time. We use this signal exclusively for
+        # state widgets that mirror engine-derived information
+        # (gesture chip, info lines, volume readout).
+        if not self.isVisible():
+            return
         self.gesture_chip.setText(str(payload.get("gesture_chip", "Gesture: neutral")))
-
         info_lines = list(payload.get("info_lines", []))
         for index, label in enumerate(self.info_labels):
             if index < len(info_lines):
                 label.setText(str(info_lines[index]))
             else:
                 label.setText("-")
-
         self._volume_level = float(payload.get("volume_level_scalar", 0.0) or 0.0)
         self._volume_muted = bool(payload.get("volume_muted", False))
         self._volume_active = bool(payload.get("volume_active", False))
@@ -352,8 +447,7 @@ class LiveViewWindow(QMainWindow):
 
     def _set_idle_state(self) -> None:
         self._last_frame = None
-        self.video_label.clear()
-        self.video_label.setText("Press START in the app to begin live gesture tracking.")
+        self.video_label.clear_video("Press START in the app to begin live gesture tracking.")
         self.gesture_chip.setText("Gesture: neutral")
         defaults = (
             "Camera: waiting",
@@ -395,15 +489,10 @@ class LiveViewWindow(QMainWindow):
         self._update_volume_widgets()
 
     def _render_frame(self) -> None:
+        # GPU paint — hand the BGR frame to the OpenGL widget.
         if self._last_frame is None:
             return
-        frame_rgb = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = frame_rgb.shape
-        image = QImage(frame_rgb.data, width, height, channels * width, QImage.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(image)
-        self.video_label.setPixmap(
-            pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        self.video_label.update_frame(self._last_frame)
 
     def _update_volume_widgets(self) -> None:
         level = max(0.0, min(1.0, float(self._volume_level)))

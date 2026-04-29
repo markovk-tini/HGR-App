@@ -14,7 +14,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import Qt, QObject, QTimer, Signal
 
 from ...debug.chrome_controller import ChromeController
 from ...debug.chrome_gesture_router import ChromeGestureRouter
@@ -46,7 +46,7 @@ from ...voice.grammar_corrector import CorrectionResult, GrammarCorrector
 from ...voice.llama_server import LlamaServer
 from ...voice.whisper_refiner import RefinementResult, WhisperRefiner
 from ..camera.camera_utils import open_camera_by_index, open_phone_camera_url, open_preferred_or_first_available
-from ..camera.ffmpeg_capture import FfmpegMjpegCapture, resolve_dshow_device_for_index
+from ..camera.ffmpeg_capture import FfmpegMjpegCapture, open_ffmpeg_cap_with_fps_fallback, resolve_dshow_device_for_index
 
 
 _DICTATION_HALLUCINATION_STOPWORDS = {
@@ -280,6 +280,146 @@ _UNDO_LABEL_PAIRS = {
 }
 
 
+class _EngineRunner:
+    # Runs engine.process_frame on a background Python thread so the
+    # heaviest CPU step in the gesture loop (12-25 ms with MediaPipe,
+    # 2-7 ms with ONNX/DirectML GPU) doesn't block the main-thread Qt
+    # event loop. Without this decoupling, paint events from receivers
+    # (mini viewer + live view, ~25-50 ms across both at 720p) push the
+    # next QTimer fire out to 35-75 ms per cycle, capping `actual
+    # self._fps` at 16-26 even when per-tick wall time is healthy.
+    #
+    # MediaPipe and ONNX both release the GIL inside their C++/native
+    # inference paths, so we get true parallelism across the engine
+    # call and the main thread's post-processing.
+    #
+    # Coordination: caller checks `busy` before submitting; caller
+    # holds an external "in-flight" view by reading `busy` and
+    # treating True as back-pressure (skip this tick). When inference
+    # finishes, the runner invokes `result_callback(frame, result)` on
+    # the runner thread — the callback is responsible for getting back
+    # to the GUI thread (typically by emitting a Qt signal connected
+    # via auto/queued connection).
+    #
+    # `set_engine` is guarded by a lock so mid-session engine swaps
+    # (Lite Mode toggle, GPU Mode toggle) don't race with an in-flight
+    # process_frame call.
+    def __init__(self, name: str = "GestureEngineRunner") -> None:
+        self._name = name
+        self._request_queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=1)
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._engine_lock = threading.Lock()
+        self._current_engine: GestureRecognitionEngine | None = None
+        self._busy = False
+        self._result_callback = None
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, result_callback) -> None:
+        if self.is_running:
+            return
+        self._result_callback = result_callback
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name=self._name
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop_event.set()
+        try:
+            self._request_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        thread = self._thread
+        self._thread = None
+        if thread is not None:
+            thread.join(timeout=timeout)
+        self._busy = False
+        self._result_callback = None
+
+    def set_engine(self, engine: "GestureRecognitionEngine | None") -> None:
+        with self._engine_lock:
+            self._current_engine = engine
+
+    def submit(self, frame) -> bool:
+        if self._busy or not self.is_running:
+            return False
+        try:
+            self._request_queue.put_nowait(frame)
+        except queue.Full:
+            return False
+        self._busy = True
+        return True
+
+    def _run(self) -> None:
+        # Rolling samples of (real_inference_seconds, found_hand_bool)
+        # so we can attribute the "engine" timing in the main-thread
+        # diagnostic to true inference vs main-thread queue-wait.
+        # Logged every ~2 s alongside hand-in-frame ratio.
+        log_samples: list[tuple[float, bool]] = []
+        last_log_at = time.monotonic()
+        while not self._stop_event.is_set():
+            try:
+                frame = self._request_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if frame is None:
+                break
+            result = None
+            inference_start = time.perf_counter()
+            try:
+                # Hold the engine lock for the entire process_frame
+                # call — main-thread mode-swap callers acquire the
+                # same lock via set_engine(), so they will block until
+                # this in-flight inference returns. That guarantees
+                # the engine the swap is closing isn't being touched
+                # at the moment of close().
+                with self._engine_lock:
+                    engine = self._current_engine
+                    if engine is not None:
+                        result = engine.process_frame(frame)
+            except Exception:
+                traceback.print_exc()
+                result = None
+            finally:
+                self._busy = False
+            inference_seconds = time.perf_counter() - inference_start
+            found = bool(getattr(result, "found", False)) if result is not None else False
+            log_samples.append((inference_seconds, found))
+            now = time.monotonic()
+            if now - last_log_at >= 2.0 and len(log_samples) >= 8:
+                last_log_at = now
+                with_hand = [s[0] for s in log_samples if s[1]]
+                no_hand = [s[0] for s in log_samples if not s[1]]
+                try:
+                    msg = (
+                        f"[engine_runner] real-inference avg "
+                        f"hand={(sum(with_hand) / len(with_hand) * 1000.0) if with_hand else 0.0:.1f}ms "
+                        f"({len(with_hand)} samples) "
+                        f"no_hand={(sum(no_hand) / len(no_hand) * 1000.0) if no_hand else 0.0:.1f}ms "
+                        f"({len(no_hand)} samples)\n"
+                    )
+                    sys.stderr.write(msg)
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                log_samples.clear()
+            cb = self._result_callback
+            if cb is not None:
+                try:
+                    cb(frame, result)
+                except Exception:
+                    traceback.print_exc()
+
+
 class GestureWorker(QObject):
     status_changed = Signal(str)
     command_detected = Signal(str)
@@ -290,6 +430,33 @@ class GestureWorker(QObject):
     save_prompt_completed = Signal(object)
     action_history_changed = Signal(object)
     dictation_stream_ready = Signal(str)
+    # Decoupled display path. Emitted from `_tick` immediately after
+    # the camera read + flip + prepare step, BEFORE the engine
+    # dispatch. Receivers connect to this for the live-view paint
+    # so display latency is "camera frame interval + paint" rather
+    # than "camera + engine + post-engine + paint". `debug_frame_ready`
+    # still fires later with the engine-annotated frame for callers
+    # that want it (legacy compatibility), but the live-view
+    # widgets ignore the frame in `debug_frame_ready` and only use
+    # its payload for text widgets / state.
+    # Carries (frame_bgr, capture_monotonic_ts). The timestamp is the
+    # `time.monotonic()` value at the moment the reader thread
+    # finished decoding this frame — receivers subtract it from
+    # `time.monotonic()` at paint time to get end-to-end pipeline
+    # latency (camera → display).
+    raw_frame_ready = Signal(object, float)
+    # Engine-extracted landmark coordinates per hand. Each hand is a
+    # list of (x, y) tuples in [0, 1] normalized image space — same
+    # space the cv2 overlay code used. Receivers feed these into
+    # GpuVideoWidget.update_landmarks for GPU-side overlay rendering;
+    # we no longer draw landmarks on the BGR frame on the CPU.
+    engine_landmarks_ready = Signal(object)
+    # Internal: runner-thread → main-thread bridge for engine results.
+    # Emitted from the _EngineRunner thread when inference completes;
+    # the Auto/Queued connection delivers the slot call on the
+    # GestureWorker's owning (main) thread, so all post-processing —
+    # including overlay widget mutations — stays on the GUI thread.
+    _engine_result_ready = Signal(object, object)
 
     _LOW_FPS_AUTO_THRESHOLD = 18.0
     _LOW_FPS_AUTO_ENTER_SECONDS = 4.0
@@ -611,9 +778,47 @@ class GestureWorker(QObject):
         self._save_prompt_active = False
         self._save_prompt_text = "Where would you like to save this file?"
 
+        # Fallback timer: re-kicks the loop if a tick exits early
+        # (cap.read failure, engine shutdown race) and never gets
+        # rescheduled by the result-driven path. The hot path (and
+        # the one that actually paces the gesture loop) is the
+        # singleShot scheduled at the end of every _on_engine_result.
+        # That path lets the next tick fire as soon as the previous
+        # cycle ends, instead of waiting for a 15-ms-aligned timer
+        # event — which we were observing get missed whenever a
+        # cycle's work ran past its slot, capping FPS at 27 even
+        # when per-cycle work measured under 12 ms.
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.PreciseTimer)
         self._timer.setInterval(15)
         self._timer.timeout.connect(self._tick)
+
+        # Background-thread engine runner. The main-thread `_tick`
+        # dispatches a frame here and returns immediately; inference
+        # runs in parallel, and `_engine_result_ready` fires the
+        # post-engine handler back on the main thread when done. See
+        # `_EngineRunner` docstring for the full rationale — short
+        # version: per-frame inference is the single heaviest CPU
+        # step (12-25 ms MP / 2-7 ms GPU) and was the dominant chunk
+        # of main-thread work, capping `actual self._fps` at 16-26
+        # even with the GPU port. With this off-main, the QTimer can
+        # fire as fast as the camera feeds frames.
+        self._engine_runner = _EngineRunner()
+        self._engine_result_ready.connect(self._on_engine_result)
+        # Per-tick timing markers shared between _tick and
+        # _on_engine_result — needed because the engine call now
+        # returns asynchronously, so the post-engine handler can't
+        # see _tick's local `t0`, `t_read`, `t_prep`. Format:
+        # (debug_timing_enabled, t0, t_read, t_prep).
+        self._tick_timing_state: tuple[bool, float, float, float] | None = None
+        # Set True once a frame is submitted to the runner; cleared
+        # when the queued result signal lands in _on_engine_result.
+        # Together with the runner's `busy` flag this prevents a
+        # second _tick from firing between "runner clears busy" and
+        # "main thread handles the previous result", which would let
+        # tick N+1 see stale `_last_result_had_hand` and make a wrong
+        # skip-frame decision.
+        self._async_result_pending: bool = False
 
         # Per-frame timing samples used by the Lite Mode diagnostic
         # in _tick. Empty when Lite Mode is off; sampled at every
@@ -653,15 +858,18 @@ class GestureWorker(QObject):
         # for_emit` flips True when a new action gets recorded so
         # the next emit fires regardless of the rate-limit cooldown,
         # keeping toasts / overlays punctual.
-        # 20 Hz cap (was 30 Hz). The mini viewer + live view each
-        # do cv2.cvtColor + QImage + QPixmap + scaled-with-smooth-
-        # transformation per emit on the main thread (~25-50 ms of
-        # work for a 720p frame across both receivers). Capping at
-        # 30 Hz would let the Qt cross-thread queue grow during any
-        # busy stretch (draw mode, gesture spikes) and bleed lag
-        # back into the live view for several seconds after the
-        # loop catches up. 20 Hz gives the receivers margin.
-        self._emit_min_interval_seconds: float = 1.0 / 20.0
+        # 30 Hz emit cap. Earlier we throttled to 20 Hz because the
+        # receivers' cvtColor + QImage + QPixmap.scaled(Smooth)
+        # pipeline cost ~25-50 ms per emit at 720p across mini +
+        # live view, and 30 Hz let the Qt cross-thread queue grow
+        # during busy stretches. Two changes since make 30 Hz safe:
+        # (1) hidden receivers short-circuit before any conversion
+        # work, so closed previews cost nothing; (2) the visible
+        # receivers now resize via cv2.INTER_AREA on the source
+        # BGR before cvtColor, dropping per-emit cost from ~6 ms
+        # to <1 ms. 30 Hz gives noticeably less perceived motion
+        # smear without re-introducing the queue-growth lag.
+        self._emit_min_interval_seconds: float = 1.0 / 30.0
         self._last_emit_monotonic: float = 0.0
         self._action_history_dirty_for_emit: bool = False
 
@@ -2308,14 +2516,28 @@ class GestureWorker(QObject):
         self._fullscreen_foreground_active = active
         self._fullscreen_foreground_process = process
 
-    def _engage_auto_low_fps(self) -> None:
-        self._low_fps_auto_engaged = True
-        if self.engine is not None:
+    def _swap_engine_safely(self) -> None:
+        # Build the new engine first, then hand it to the runner; the
+        # runner's set_engine call acquires the engine lock, blocking
+        # briefly until any in-flight inference returns. ONLY THEN is
+        # it safe to close() the old engine — closing while the runner
+        # thread is mid-call would crash the MediaPipe / ONNX session.
+        # All mid-session engine rebuilds (Lite Mode toggle, GPU Mode
+        # toggle, auto-low-fps engage/disengage, set_low_fps_mode) go
+        # through here for that reason.
+        new_engine = self._build_engine_for_fps_mode()
+        old_engine = self.engine
+        self._engine_runner.set_engine(new_engine)
+        self.engine = new_engine
+        if old_engine is not None:
             try:
-                self.engine.close()
+                old_engine.close()
             except Exception:
                 pass
-        self.engine = self._build_engine_for_fps_mode()
+
+    def _engage_auto_low_fps(self) -> None:
+        self._low_fps_auto_engaged = True
+        self._swap_engine_safely()
         if self._cap is not None:
             self._apply_low_fps_capture_tuning(self._cap)
 
@@ -2323,12 +2545,7 @@ class GestureWorker(QObject):
         self._low_fps_auto_engaged = False
         self._low_fps_below_since = None
         self._low_fps_above_since = None
-        if self.engine is not None:
-            try:
-                self.engine.close()
-            except Exception:
-                pass
-        self.engine = self._build_engine_for_fps_mode()
+        self._swap_engine_safely()
         if self._cap is not None and not self._low_fps_active:
             self._restore_normal_capture_tuning(self._cap)
 
@@ -2495,12 +2712,7 @@ class GestureWorker(QObject):
             self._low_fps_above_since = None
         self._low_fps_last_process = 0.0
         if self._running:
-            if self.engine is not None:
-                try:
-                    self.engine.close()
-                except Exception:
-                    pass
-            self.engine = self._build_engine_for_fps_mode()
+            self._swap_engine_safely()
             self._fps = 0.0
             if self._cap is not None:
                 if self._low_fps_active:
@@ -2521,12 +2733,7 @@ class GestureWorker(QObject):
         self.config.lite_mode = bool(enabled)
         if not self._running:
             return
-        if self.engine is not None:
-            try:
-                self.engine.close()
-            except Exception:
-                pass
-        self.engine = self._build_engine_for_fps_mode()
+        self._swap_engine_safely()
         self._fps = 0.0
         if self._cap is None or self._low_fps_active:
             return
@@ -2558,13 +2765,10 @@ class GestureWorker(QObject):
                 old_cap.release()
             except Exception:
                 pass
-            ffmpeg_cap = FfmpegMjpegCapture(
-                device_name,
-                width=1280,
-                height=720,
-                fps=60,
+            ffmpeg_cap = open_ffmpeg_cap_with_fps_fallback(
+                device_name, width=1280, height=720
             )
-            if ffmpeg_cap.isOpened():
+            if ffmpeg_cap is not None and ffmpeg_cap.isOpened():
                 self._cap = ffmpeg_cap
                 return
             # ffmpeg failed — fall back to a fresh OpenCV cap so the
@@ -2602,12 +2806,7 @@ class GestureWorker(QObject):
         self.config.gpu_mode = bool(enabled)
         if not self._running:
             return
-        if self.engine is not None:
-            try:
-                self.engine.close()
-            except Exception:
-                pass
-        self.engine = self._build_engine_for_fps_mode()
+        self._swap_engine_safely()
         self._fps = 0.0
         # Don't re-swap the camera if Lite Mode is also on — set_lite
         # _mode already manages the ffmpeg cap and we'd just thrash
@@ -2646,16 +2845,17 @@ class GestureWorker(QObject):
                 old_cap.release()
             except Exception:
                 pass
-            ffmpeg_cap = FfmpegMjpegCapture(
-                device_name, width=1280, height=720, fps=60
+            ffmpeg_cap = open_ffmpeg_cap_with_fps_fallback(
+                device_name, width=1280, height=720
             )
-            if ffmpeg_cap.isOpened():
+            if ffmpeg_cap is not None and ffmpeg_cap.isOpened():
                 self._cap = ffmpeg_cap
                 return
-            try:
-                ffmpeg_cap.release()
-            except Exception:
-                pass
+            if ffmpeg_cap is not None:
+                try:
+                    ffmpeg_cap.release()
+                except Exception:
+                    pass
             recovered = open_camera_by_index(int(index), max_index=self.config.camera_scan_limit)
             if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
                 self._cap = recovered[1]
@@ -2693,6 +2893,15 @@ class GestureWorker(QObject):
             return
         self._shutdown_runtime(emit_signal=False)
         self.engine = self._build_engine_for_fps_mode()
+        # Spin up the background-thread engine runner. The lambda
+        # bridge translates the runner-thread callback into a
+        # cross-thread Qt signal emit, which auto-queues the result
+        # delivery onto the GUI thread.
+        self._engine_runner.set_engine(self.engine)
+        if not self._engine_runner.is_running:
+            self._engine_runner.start(
+                result_callback=lambda f, r: self._engine_result_ready.emit(f, r)
+            )
         self._volume_message = self.volume_controller.message
         self._volume_level = self.volume_controller.refresh_cache().level_scalar
         self._volume_mode_active = False
@@ -2791,6 +3000,24 @@ class GestureWorker(QObject):
 
     def _shutdown_runtime(self, *, emit_signal: bool) -> None:
         self._timer.stop()
+        # Stop the background engine runner BEFORE closing the engine,
+        # otherwise an in-flight process_frame call could touch a
+        # closed MediaPipe / ONNX session and crash. The runner's stop
+        # joins its thread (up to 2 s), guaranteeing no further calls
+        # into the engine after this returns.
+        try:
+            self._engine_runner.stop()
+        except Exception:
+            pass
+        # Drop the engine reference inside the runner so it doesn't
+        # keep the soon-to-be-closed engine alive.
+        self._engine_runner.set_engine(None)
+        # Reset async-result bookkeeping. A queued signal still in
+        # flight will be a no-op once it lands (because _running flips
+        # to False below), but clearing the flag here means a fresh
+        # start() begins from a known-clean state.
+        self._async_result_pending = False
+        self._tick_timing_state = None
         if self._cap is not None:
             # Don't release the phone-camera-QR capture — it's owned by the
             # MainWindow/PhoneCameraServer and must survive engine restarts
@@ -2974,20 +3201,18 @@ class GestureWorker(QObject):
             cap.release()
         except Exception:
             pass
-        ffmpeg_cap = FfmpegMjpegCapture(
-            device_name,
-            width=1280,
-            height=720,
-            fps=60,
+        ffmpeg_cap = open_ffmpeg_cap_with_fps_fallback(
+            device_name, width=1280, height=720
         )
-        if ffmpeg_cap.isOpened():
+        if ffmpeg_cap is not None and ffmpeg_cap.isOpened():
             _log("ffmpeg cap engaged")
             return (info, ffmpeg_cap)
         _log("ffmpeg cap startup failed — falling back to a fresh OpenCV cap")
-        try:
-            ffmpeg_cap.release()
-        except Exception:
-            pass
+        if ffmpeg_cap is not None:
+            try:
+                ffmpeg_cap.release()
+            except Exception:
+                pass
         recovered = open_camera_by_index(index_int, max_index=self.config.camera_scan_limit)
         if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
             return recovered
@@ -3097,6 +3322,16 @@ class GestureWorker(QObject):
     def _tick(self) -> None:
         if not self._running or self._cap is None or self.engine is None:
             return
+        # Back-pressure: if the engine runner is still chewing on the
+        # previous frame, OR a runner result is queued waiting for the
+        # main thread to handle it, drop this tick. The next tick
+        # (15 ms away) will pick up a fresh camera frame. Skipping
+        # here keeps the request queue at depth=1, avoids the
+        # perceived-display-lag that an unbounded backlog would cause,
+        # and guarantees `_last_result_had_hand` is current before the
+        # skip-frame decision below reads it.
+        if self._engine_runner.busy or self._async_result_pending:
+            return
         tick_now = time.time()
         if self._should_skip_forced_fps_tick(tick_now):
             return
@@ -3111,6 +3346,15 @@ class GestureWorker(QObject):
         ok, frame = self._cap.read()
         t_read = time.perf_counter() if debug_timing else 0.0
         if not ok:
+            # Camera stalled briefly (ffmpeg pipe between frames,
+            # No fresh frame this poll — let the periodic 15 ms
+            # QTimer drive the next attempt. Tight singleShot(0)
+            # rescheduling here previously starved Qt's paint
+            # event dispatcher on the main thread (paint rate
+            # collapsed to ~2 fps even though the worker fired
+            # emits at 30+ fps), because the event loop never got
+            # enough idle time between ticks to process the
+            # queued paint events.
             return
         # Touchless normally mirrors the camera feed so the user sees the
         # "selfie" view a webcam gives by convention. If the source already
@@ -3122,6 +3366,18 @@ class GestureWorker(QObject):
             frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
         t_prep = time.perf_counter() if debug_timing else 0.0
+        # Decoupled display path: emit the raw frame for receivers
+        # to paint NOW, before the engine dispatch below. The
+        # display refreshes at camera fps independently of engine
+        # completion. Carry the capture timestamp so receivers can
+        # measure end-to-end pipeline latency at paint time.
+        try:
+            capture_ts = float(getattr(self._cap, "_last_consumed_ts", 0.0) or 0.0)
+            if capture_ts <= 0.0:
+                capture_ts = time.monotonic()
+            self.raw_frame_ready.emit(frame, capture_ts)
+        except Exception:
+            pass
         # Smart skip-frame inference: when Lite Mode is on AND we
         # know the previous frame was empty (no hand), skip MediaPipe
         # this tick and synthesise a "no hand" result. Never skip two
@@ -3139,13 +3395,68 @@ class GestureWorker(QObject):
             and not self._last_result_had_hand
             and not self._inference_skipped_last
         )
+        # Stash timing context so _on_engine_result can finish the
+        # debug breakdown using the same per-tick start markers, even
+        # when the engine call returns asynchronously from the runner
+        # thread.
+        self._tick_timing_state = (debug_timing, t0, t_read, t_prep)
         if skip_inference:
+            # neutral_result_for_frame is a cheap helper (no detector
+            # call) — keep it inline so we don't pay a thread hop for
+            # what would otherwise be a sub-millisecond operation.
             result = self.engine.neutral_result_for_frame(frame)
             self._inference_skipped_last = True
-        else:
+            self._on_engine_result(frame, result)
+            return
+        self._inference_skipped_last = False
+        # Async engine path: dispatch to runner thread and return
+        # immediately. The runner runs engine.process_frame on its
+        # own thread; the result fires _on_engine_result via a
+        # queued Qt signal back to the main thread. With
+        # decoupled display (raw_frame_ready emitted ABOVE before
+        # this dispatch), the user-visible video updates at camera
+        # fps regardless of engine completion time — the engine
+        # result is consumed for state updates (gesture chip,
+        # volume, app routing) on its own cadence.
+        self._async_result_pending = True
+        if self._engine_runner.submit(frame):
+            return
+        # Runner refused — fall back to inline so we don't drop
+        # the frame entirely.
+        self._async_result_pending = False
+        try:
             result = self.engine.process_frame(frame)
-            self._inference_skipped_last = False
-            self._last_result_had_hand = bool(result.found)
+        except Exception:
+            traceback.print_exc()
+            return
+        self._on_engine_result(frame, result)
+
+    def _on_engine_result(self, frame, result) -> None:
+        # Runs on the GUI (main) thread. Reached via three paths:
+        #   1. Direct call from _tick for the skip-inference fast path
+        #      (synthetic neutral result, no thread hop needed).
+        #   2. Direct call from _tick when the runner couldn't accept
+        #      a submission and we fell back to inline inference.
+        #   3. Queued signal from the _EngineRunner thread when async
+        #      inference completes — Qt's auto-connection routes the
+        #      cross-thread emit through the GUI thread's event loop,
+        #      so widget mutations below are safe.
+        # Clear the async-pending guard up front so the next _tick is
+        # free to dispatch even if the bail-outs below trigger. The
+        # skip-inference / inline-fallback paths set this flag to
+        # False before calling us, so this is a no-op for them.
+        self._async_result_pending = False
+        # If the worker stopped between dispatch and result delivery
+        # (Stop button hit while a frame was in flight), drop the
+        # result silently — the receivers have already detached.
+        if not self._running or result is None:
+            return
+        debug_timing, t0, t_read, t_prep = self._tick_timing_state or (False, 0.0, 0.0, 0.0)
+        # Always reflect the current result's hand-presence in
+        # _last_result_had_hand. neutral_result_for_frame always
+        # reports found=False, so the skip-frame state machine still
+        # behaves identically to the pre-async implementation.
+        self._last_result_had_hand = bool(result.found)
         t_engine = time.perf_counter() if debug_timing else 0.0
         self._drawing_secondary_hand_reading = getattr(result, "secondary_hand_reading", None)
         now = time.time()
@@ -3163,6 +3474,29 @@ class GestureWorker(QObject):
                 pass
         monotonic_now = time.monotonic()
         result = self._normalize_result_right_primary(result)
+        # Emit landmark coordinates for GPU-side overlay rendering.
+        # Receivers feed these into GpuVideoWidget.update_landmarks
+        # which draws connections + joints via the OpenGL paint
+        # engine, replacing the CPU cv2 draw_hand_overlay path that
+        # used to mutate the display BGR buffer every frame.
+        try:
+            hands_landmarks: list = []
+            if result.found and result.tracked_hand is not None:
+                lm = getattr(result.tracked_hand, "landmarks", None)
+                if lm is not None:
+                    hands_landmarks.append(
+                        [(float(p[0]), float(p[1])) for p in lm]
+                    )
+            secondary_for_lm = getattr(result, "secondary_tracked_hand", None)
+            if secondary_for_lm is not None:
+                lm2 = getattr(secondary_for_lm, "landmarks", None)
+                if lm2 is not None:
+                    hands_landmarks.append(
+                        [(float(p[0]), float(p[1])) for p in lm2]
+                    )
+            self.engine_landmarks_ready.emit(hands_landmarks)
+        except Exception:
+            pass
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None
         # MediaPipe occasionally labels a single visible right hand
         # as "Left" when only one hand is in frame and the silhouette
@@ -3228,30 +3562,20 @@ class GestureWorker(QObject):
         self.voice_status_overlay.tick(monotonic_now)
         self._update_runtime_status()
         t_wheels = time.perf_counter() if debug_timing else 0.0
-        display_frame = draw_hand_overlay(result.annotated_frame, result)
-        self._draw_window_control_overlay(display_frame)
+        # GPU display path: the live-view widgets paint the raw
+        # camera frame on the GPU and overlay landmarks via
+        # QPainter on top of the texture. We no longer draw
+        # landmarks / wheels / mouse monitor / low-fps badge into
+        # the BGR frame on the CPU — that pipeline was the single
+        # biggest CPU cost in the post-engine path (~10-15 ms per
+        # frame in heavy modes). `display_frame` is still emitted
+        # as a fallback for any consumer that wants the annotated
+        # version, but we skip the cv2 mutations to save the cost.
+        # Camera-drawing canvas state still has to track frame
+        # shape so brush strokes line up — that's cheap (no
+        # drawing), just a shape lookup.
+        display_frame = result.annotated_frame
         self._update_camera_drawing_canvas(display_frame.shape)
-        self._blend_camera_drawing_overlay(display_frame)
-        draw_mouse_control_box_overlay(
-            display_frame,
-            debug_state=self.mouse_tracker.debug_state,
-            mode_enabled=self._mouse_mode_enabled,
-        )
-        # Desktop-Map panel only paints when Mouse Mode is on. It
-        # was always drawn before, costing ~5-7 ms per frame for a
-        # panel the user can't even use unless mouse mode is
-        # engaged. That's a free 5-7 ms back to the gesture loop
-        # for everyone not currently controlling the mouse with
-        # gestures.
-        if self._mouse_mode_enabled:
-            draw_mouse_monitor_overlay(
-                display_frame,
-                mouse_controller=self.mouse_controller,
-                debug_state=self.mouse_tracker.debug_state,
-                mode_enabled=self._mouse_mode_enabled,
-            )
-        if self._low_fps_active:
-            self._draw_low_fps_badge(display_frame)
         payload = self._build_debug_payload(result, monotonic_now)
         if debug_timing:
             t_draw = time.perf_counter()
@@ -3317,6 +3641,15 @@ class GestureWorker(QObject):
                     sys.stderr.flush()
                 except Exception:
                     pass
+        # Loop pacing comes from the periodic 15 ms QTimer. We
+        # used to chain singleShot(0, self._tick) here for tighter
+        # cadence, but in practice that starved Qt's paint event
+        # dispatcher — the on-screen update rate collapsed to
+        # ~2 fps while the worker kept firing at 30+ fps because
+        # the event loop never got enough idle time between ticks
+        # for paint events to be processed. The 15 ms periodic
+        # timer naturally interleaves paint dispatch and worker
+        # execution, which is what keeps the live view smooth.
 
     def _handle_volume_control(self, result, now: float, *, hand_handedness: str | None) -> None:
         if not self.volume_controller.available:

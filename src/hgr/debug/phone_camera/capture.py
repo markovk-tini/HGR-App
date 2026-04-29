@@ -23,6 +23,10 @@ class PhoneCameraCapture:
         self._frame: Optional[np.ndarray] = None
         self._frame_age_hint = 0.0  # monotonic ts of latest frame
         self._last_read_stamp = 0.0
+        # Pipeline-latency exposure for the engine. Set by read()
+        # to the monotonic ts at which the most-recently-consumed
+        # frame was decoded, so callers can compute display lag.
+        self._last_consumed_ts: float = 0.0
         self._closed = False
         self._opened = True
         self._wait_seconds = float(wait_seconds)
@@ -44,37 +48,55 @@ class PhoneCameraCapture:
         with self._lock:
             self._frame = frame
             self._frame_age_hint = time.monotonic()
+        # Wake any consumer that's currently waiting on read(). The
+        # event is consume-and-clear (cleared by read() once it has
+        # taken the frame) so the next read() call blocks until the
+        # NEXT push, instead of returning the same frame repeatedly.
         self._wait_event.set()
 
     def has_fresh_frame(self) -> bool:
         with self._lock:
-            return self._frame is not None and self._frame_age_hint > self._last_read_stamp
+            return self._frame is not None
 
     def isOpened(self) -> bool:  # noqa: N802 (cv2 API parity)
         return not self._closed
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:  # noqa: D401
-        """Return the newest frame, blocking briefly if none has arrived yet.
+        """Return the newest *fresh* frame, or (False, None) if no
+        push lands within a brief wait window.
 
-        Returning quickly when frames haven't arrived avoids starving the
-        engine tick — the engine's `_tick()` tolerates an occasional
-        missed read by returning early.
+        Each phone-pushed frame is returned EXACTLY ONCE.
+        Without consume-once semantics, a fast gesture loop
+        (singleShot pacing) re-processes the same frame many times
+        between phone pushes, surfacing as content-duplication lag.
+
+        Brief 5 ms wait when no frame is buffered — gives the
+        push-handler thread GIL scheduling time so it doesn't get
+        starved by the main thread's tight-loop polling.
         """
         if self._closed:
             return False, None
-        deadline = time.monotonic() + self._wait_seconds
-        while True:
-            with self._lock:
-                frame = self._frame
-            if frame is not None:
-                with self._lock:
-                    self._last_read_stamp = self._frame_age_hint
-                return True, frame.copy()
-            if time.monotonic() >= deadline:
-                return False, None
-            # Short wait for the next push.
-            self._wait_event.wait(timeout=max(0.002, deadline - time.monotonic()))
+        with self._lock:
+            frame = self._frame
+            self._frame = None
             self._wait_event.clear()
+            if frame is not None:
+                self._last_read_stamp = self._frame_age_hint
+                self._last_consumed_ts = self._frame_age_hint
+        if frame is not None:
+            return True, frame
+        if not self._wait_event.wait(timeout=0.005):
+            return False, None
+        with self._lock:
+            frame = self._frame
+            self._frame = None
+            self._wait_event.clear()
+            if frame is not None:
+                self._last_read_stamp = self._frame_age_hint
+                self._last_consumed_ts = self._frame_age_hint
+        if frame is None:
+            return False, None
+        return True, frame
 
     def set(self, *_args, **_kwargs) -> bool:  # cv2.VideoCapture.set no-op for us
         return True

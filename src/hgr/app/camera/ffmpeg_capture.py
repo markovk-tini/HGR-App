@@ -129,6 +129,59 @@ def resolve_dshow_device_for_index(index: int, qt_name_hint: str = "") -> str | 
     return None
 
 
+def open_ffmpeg_cap_with_fps_fallback(
+    device_name: str,
+    *,
+    width: int = 1280,
+    height: int = 720,
+    fps_candidates: tuple[int, ...] = (60, 30),
+) -> "FfmpegMjpegCapture | None":
+    """Try opening the ffmpeg MJPG cap at decreasing frame rates.
+
+    Many consumer webcams advertise 1280x720 MJPG but only at 30 fps —
+    requesting 60 fps causes ffmpeg to emit "Could not set video
+    options" and exit before producing any frame. Rather than failing
+    over to OpenCV (which forces YUY2 and adds main-thread copy cost),
+    we just retry with the next fps in the list. 30 fps MJPG is still
+    a major win over OpenCV's YUY2 — the hand-tracking loop sees fresh
+    decompressed BGR frames without the per-frame uncompress cost
+    YUY2 carries.
+
+    Returns the opened capture, or None if every candidate failed.
+    The caller should fall through to the OpenCV path on None.
+    """
+    for fps in fps_candidates:
+        cap = FfmpegMjpegCapture(
+            device_name,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+        if cap.isOpened():
+            try:
+                print(
+                    f"[ffmpeg_capture] engaged at {width}x{height} @ {fps} fps MJPG",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception:
+                pass
+            return cap
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            print(
+                f"[ffmpeg_capture] {fps} fps unsupported by camera — trying next candidate",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
+    return None
+
+
 class FfmpegMjpegCapture:
     """A `cv2.VideoCapture`-shaped wrapper around an ffmpeg subprocess.
 
@@ -175,7 +228,29 @@ class FfmpegMjpegCapture:
         self._stop_event = threading.Event()
         self._frame_lock = threading.Lock()
         self._latest_frame: Optional[np.ndarray] = None
+        # Wall-clock time (time.monotonic) at which the reader
+        # thread finished decoding _latest_frame. Used by callers
+        # to measure end-to-end pipeline latency (capture → display).
+        # Set every time _latest_frame is overwritten.
+        self._latest_frame_ts: float = 0.0
+        # Snapshot of _latest_frame_ts at the moment of the most
+        # recent successful read(). The caller can query this AFTER
+        # read() returns to know "when was THIS frame decoded".
+        self._last_consumed_ts: float = 0.0
+        # Set when ffmpeg has produced any frame at all — used by
+        # _start to know "the pipe is alive". Stays set forever
+        # after the first frame.
         self._first_frame_event = threading.Event()
+        # Set every time a NEW frame lands in _latest_frame, cleared
+        # by read() before it waits. Lets read() block exactly until
+        # the next fresh frame arrives (capping at camera fps)
+        # instead of busy-returning False whenever the consumer
+        # outpaces the producer. Without this, a fast main-thread
+        # loop (singleShot pacing post engine-async) would call
+        # read() faster than 60 fps, see None, return False, and
+        # exit _tick early — capping the gesture loop at the
+        # 15-ms periodic timer fallback (~27 fps).
+        self._fresh_frame_event = threading.Event()
         self._opened = False
         self._read_error = False
         # Capture ffmpeg's stderr to a memory buffer + a stderr
@@ -194,12 +269,27 @@ class FfmpegMjpegCapture:
 
     def _start(self) -> bool:
         if not self._ffmpeg_path:
+            print(
+                "[ffmpeg_capture] _start aborted: no ffmpeg binary found "
+                "(locate_ffmpeg returned None and no override passed)",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
         if not sys.platform.startswith("win"):
-            # The dshow input is Windows-only. No fallback platform
-            # for this module yet — caller will fall through to OpenCV.
+            print(
+                f"[ffmpeg_capture] _start aborted: platform is "
+                f"{sys.platform!r} (dshow input is Windows-only)",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
         if not self._device_name:
+            print(
+                "[ffmpeg_capture] _start aborted: empty device name",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
         # rtbufsize=32M: ffmpeg keeps a large input MJPG buffer so it
         # can decode + write BGR to pipe at full camera rate without
@@ -213,33 +303,60 @@ class FfmpegMjpegCapture:
         # hidden by the consumer always reading the freshest frame
         # from latest_frame and dropping older ones — see
         # FfmpegMjpegCapture.read.
-        # rtbufsize lowered from 32M -> 4M and -fflags +discardcorrupt
-        # added so ffmpeg DROPS input frames when the consumer can't
-        # keep up, instead of queueing seconds of stale ones in the
-        # buffer. 32M held ~30 MJPG frames (~1 s at 30 fps). After
-        # any temporary consumer slowdown (Spotify HTTP, drawing-
-        # mode blend), the consumer would then spend the next second
-        # processing those stale frames — visible to the user as a
-        # 1-2 s lag in the live view *even though* the per-tick
-        # diagnostic looked normal because the loop itself was fast.
-        # Better to drop a frame than to display a second-old one.
+        # rtbufsize 512K: bounds input queue at ~5 frames worst
+        # case (1280x720 MJPG at typical compression). Combined
+        # with +discardcorrupt, frames that pile up while the
+        # reader is briefly behind get dropped instead of waiting
+        # in queue — which is exactly what we want for low-latency
+        # display. Tighter than 1M (better latency on transient
+        # consumer slowdowns) but loose enough that ffmpeg doesn't
+        # backpressure the camera into stalling.
         cmd = [
             self._ffmpeg_path,
             "-hide_banner",
             "-loglevel", "error",
-            "-fflags", "nobuffer+discardcorrupt",
+            # Demuxer-side: don't buffer or hold back corrupt
+            # packets. `+flush_packets` forces the muxer to flush
+            # after each frame so packets don't sit in muxer queue.
+            "-fflags", "nobuffer+discardcorrupt+flush_packets",
             "-flags", "low_delay",
-            "-rtbufsize", "4M",
+            # Capture-side input buffer (bounded — see comments
+            # above the cmd assignment).
+            "-rtbufsize", "512K",
+            # `-thread_queue_size 1` shrinks the input-thread queue
+            # so frames don't pile up between the dshow read and
+            # the encoder; combined with `-vsync 0` (don't normalize
+            # framerate, just pass frames through as captured) we
+            # eliminate ffmpeg's internal frame queue almost
+            # entirely. Without these, a brief consumer slowdown
+            # (Spotify launch, focus change, etc.) lets ffmpeg
+            # accumulate seconds of frames internally and the user
+            # sees a persistent 2-3 s lag for several seconds
+            # after the slowdown ends.
+            "-thread_queue_size", "1",
             "-f", "dshow",
             "-vcodec", "mjpeg",
             "-framerate", str(self._fps),
             "-video_size", f"{self._width}x{self._height}",
             "-i", f"video={self._device_name}",
+            "-vsync", "0",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "pipe:1",
         ]
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # Echo the resolved ffmpeg path + full command at startup so
+        # we can rule out path-resolution issues (silently using a
+        # different ffmpeg.exe than expected) and command-line typos
+        # when investigating "startup failed" reports.
+        try:
+            print(
+                f"[ffmpeg_capture] launching ffmpeg: path={self._ffmpeg_path!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -250,6 +367,14 @@ class FfmpegMjpegCapture:
                 bufsize=0,
             )
         except Exception as exc:
+            try:
+                print(
+                    f"[ffmpeg_capture] Popen failed: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception:
+                pass
             self._stderr_log.append(f"Popen failed: {exc!s}")
             self._proc = None
             return False
@@ -271,19 +396,68 @@ class FfmpegMjpegCapture:
         # user staring at a blank live view. We surface ffmpeg's own
         # stderr on failure so the user can see whether the device
         # was busy, the format was rejected, etc.
-        if self._first_frame_event.wait(timeout=self._startup_timeout):
+        # Wait for the reader thread to either decode the first
+        # frame OR signal a fatal read error / EOF on the pipe (the
+        # reader sets `_first_frame_event` in both cases so this
+        # call wakes up promptly instead of always sitting through
+        # the full 8-second timeout). If the wakeup came from the
+        # error path, fall through to the diagnostic block below —
+        # NOT return True — so the caller's OpenCV fallback fires
+        # AND we surface why ffmpeg's pipe died (which is what was
+        # being silently masked before).
+        woke = self._first_frame_event.wait(timeout=self._startup_timeout)
+        if woke and not self._read_error:
             return True
-        self._teardown_proc()
-        try:
-            tail = "".join(self._stderr_log[-12:]).strip()
-        except Exception:
-            tail = ""
-        if tail:
+        if woke and self._read_error:
             try:
-                sys.stderr.write(f"[ffmpeg_capture] startup stderr tail: {tail}\n")
-                sys.stderr.flush()
+                print(
+                    "[ffmpeg_capture] reader signalled error/EOF before any "
+                    "frame decoded — see stderr tail below for the actual cause",
+                    file=sys.stderr,
+                    flush=True,
+                )
             except Exception:
                 pass
+        # Build the diagnostic FIRST so even if anything below it
+        # raises (teardown errors, etc.), we still surface the
+        # information about why startup failed.
+        proc_alive: bool | None = None
+        proc_returncode: int | None = None
+        try:
+            proc = self._proc
+            if proc is not None:
+                proc_returncode = proc.poll()
+                proc_alive = proc_returncode is None
+        except Exception:
+            pass
+        try:
+            tail_pre = "".join(self._stderr_log[-12:]).strip()
+        except Exception:
+            tail_pre = ""
+        try:
+            print(
+                f"[ffmpeg_capture] startup failed after {self._startup_timeout:.1f}s: "
+                f"proc_alive={proc_alive} returncode={proc_returncode} "
+                f"stderr_lines={len(self._stderr_log)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if tail_pre:
+                print(f"[ffmpeg_capture] stderr tail: {tail_pre}", file=sys.stderr, flush=True)
+            else:
+                print(
+                    "[ffmpeg_capture] stderr was EMPTY — ffmpeg subprocess "
+                    "produced no diagnostic output. Common cause: camera "
+                    "driver held by another process and DSHOW open hung.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as exc:
+            try:
+                print(f"[ffmpeg_capture] diagnostic-print failed: {exc!r}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+        self._teardown_proc()
         return False
 
     def _stderr_loop(self) -> None:
@@ -307,39 +481,65 @@ class FfmpegMjpegCapture:
         if self._proc is None or self._proc.stdout is None:
             return
         frame_bytes = self._width * self._height * 3
+        # `_read_exact` for a 2.76 MB frame at 30 fps takes ~10 ms
+        # at steady state (camera-paced). If a read returns in
+        # significantly less time than the camera frame interval,
+        # the pipe was already full when we asked — i.e. ffmpeg's
+        # internal queue had a backlog. In that case we discard
+        # the frame and read the next one, walking the queue down
+        # to a single buffered frame as fast as the pipe lets us.
+        # That's what kills the "persistent 2-3 s lag after
+        # Spotify launch" symptom: instead of processing every
+        # backed-up frame in order (which the user perceives as
+        # the live view crawling forward through old content for
+        # seconds), we jump straight to the most recent frame.
+        camera_interval_s = 1.0 / max(1.0, float(self._fps))
+        # Threshold: reads completing in <40% of the frame
+        # interval are flagged as "pipe was already full."
+        backlog_threshold = camera_interval_s * 0.4
+        # Bound the drain so we always make progress even on a
+        # weird steady-state where reads consistently come back
+        # too fast (shouldn't happen but defensive).
+        drain_limit_per_iter = 16
+        last_read_done = 0.0
         while not self._stop_event.is_set():
+            drained = 0
+            chunk: bytes | None = None
+            while True:
+                try:
+                    raw = self._read_exact(self._proc.stdout, frame_bytes)
+                except Exception:
+                    self._read_error = True
+                    self._first_frame_event.set()
+                    return
+                if raw is None:
+                    self._read_error = True
+                    self._first_frame_event.set()
+                    return
+                now = time.monotonic()
+                # If this is the very first read, just take it.
+                # Otherwise check whether the pipe was prefilled.
+                if last_read_done > 0.0 and (now - last_read_done) < backlog_threshold and drained < drain_limit_per_iter:
+                    # Pipe still has more data ready — discard
+                    # this frame and grab the next one.
+                    last_read_done = now
+                    drained += 1
+                    continue
+                last_read_done = now
+                chunk = raw
+                break
             try:
-                chunk = self._read_exact(self._proc.stdout, frame_bytes)
-            except Exception:
-                self._read_error = True
-                self._first_frame_event.set()
-                return
-            if chunk is None:
-                # ffmpeg ended (process exit / EOF on pipe). Mark
-                # failure so the engine can drop us and try again.
-                self._read_error = True
-                self._first_frame_event.set()
-                return
-            try:
-                # `np.frombuffer` over an immutable `bytes` object
-                # makes the result `writeable=False`. Several
-                # OpenCV operations inside MediaPipe end up doing
-                # an *internal* copy on read-only inputs, which
-                # actually pushed `engine=` from ~19 ms to ~30 ms
-                # in testing — slower than just doing one
-                # explicit copy here ourselves. So we copy into a
-                # writable buffer up front. This is the only copy
-                # in the camera→engine path now (we already
-                # dropped the engine-side and overlay-side
-                # copies).
                 frame = np.frombuffer(chunk, dtype=np.uint8).reshape(
                     (self._height, self._width, 3)
                 ).copy()
             except Exception:
                 continue
+            decoded_at = time.monotonic()
             with self._frame_lock:
                 self._latest_frame = frame
+                self._latest_frame_ts = decoded_at
             self._first_frame_event.set()
+            self._fresh_frame_event.set()
 
     @staticmethod
     def _read_exact(stream, size: int) -> bytes | None:
@@ -368,20 +568,30 @@ class FfmpegMjpegCapture:
             return False, None
         with self._frame_lock:
             frame = self._latest_frame
+            ts = self._latest_frame_ts
             self._latest_frame = None
+            self._fresh_frame_event.clear()
+        if frame is not None:
+            self._last_consumed_ts = ts
+            return True, frame
+        # Wait briefly for the reader thread to produce a fresh
+        # frame. 5 ms timeout — enough that the reader gets
+        # guaranteed GIL scheduling time (otherwise the main
+        # thread's singleShot(0) tight-loop polling pattern starves
+        # the reader, frames pile up in ffmpeg's pipe, and the
+        # user-visible pipeline lag grows unbounded into the
+        # multi-second range). 5 ms is short enough that the main
+        # thread's other Qt events still fire smoothly.
+        if not self._fresh_frame_event.wait(timeout=0.002):
+            return False, None
+        with self._frame_lock:
+            frame = self._latest_frame
+            ts = self._latest_frame_ts
+            self._latest_frame = None
+            self._fresh_frame_event.clear()
         if frame is None:
-            # No new frame since the last read. Wait briefly so
-            # callers polling at MediaPipe inference rate (typically
-            # 35-60 Hz) don't busy-spin when ffmpeg's stream is
-            # paused or temporarily stalled.
-            woke = self._first_frame_event.wait(timeout=0.1)
-            if not woke:
-                return False, None
-            with self._frame_lock:
-                frame = self._latest_frame
-                self._latest_frame = None
-            if frame is None:
-                return False, None
+            return False, None
+        self._last_consumed_ts = ts
         return True, frame
 
     def release(self) -> None:  # cv2.VideoCapture API parity
