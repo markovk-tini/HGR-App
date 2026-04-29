@@ -44,6 +44,16 @@ logs/
 
 # Model weights (downloaded / cached locally; user has a model dir)
 models/
+# Exception: the small (~16 MB total) MediaPipe-equivalent ONNX
+# models for the GPU hand-tracking path. These ship with the app
+# (auto-bundled by PyInstaller via the assets/ glob) so the GPU
+# Mode toggle works on a fresh install without a separate download
+# step. The .task file is the original MediaPipe bundle the .onnx
+# files were sourced against — kept for reproducibility.
+!assets/models/
+!assets/models/*.onnx
+!assets/models/*.npy
+!assets/models/*.task
 
 # Third-party source + built artifacts (fetched/rebuilt via scripts in builder/)
 whisper.cpp/

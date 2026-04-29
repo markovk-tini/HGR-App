@@ -11,6 +11,23 @@ comtypes
 sounddevice
 faster-whisper
 
+# GPU-accelerated hand tracking (Settings -> Camera -> "GPU Mode").
+# onnxruntime-directml ships the DmlExecutionProvider, which uses
+# DirectX 12 for inference — works on any modern NVIDIA / AMD /
+# Intel GPU on Windows 10+. The corresponding ONNX models live in
+# assets/models/ (palm_detector.onnx + hand_landmark.onnx + the
+# 2016-row anchor table palm_anchors.npy). Same model weights as
+# the default MediaPipe CPU path so accuracy is identical; the
+# whole point of the swap is the ~25x palm-detect speedup
+# (15-25 ms CPU -> 0.8 ms GPU). The runtime falls back to CPU
+# MediaPipe transparently if the DML provider isn't reachable on
+# a particular machine, so this stays an opt-in toggle.
+#
+# IMPORTANT: do NOT also have `onnxruntime` (the CPU-only wheel)
+# installed alongside this — they share the same `onnxruntime`
+# import name and will silently shadow each other. Pick one.
+onnxruntime-directml
+
 # Optional — only needed by the experimental Live API agent
 # (src/hgr/live_api). The rest of the app launches fine without it;
 # clicking "Test Live API" in the UI shows a friendly install hint.

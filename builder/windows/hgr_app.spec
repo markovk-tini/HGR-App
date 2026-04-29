@@ -22,6 +22,25 @@ for package_name in ("PySide6", "shiboken6", "mediapipe"):
     binaries += pkg_binaries
     hiddenimports += pkg_hiddenimports
 
+# onnxruntime-directml: ships native DLLs (DirectML.dll, the DML
+# execution provider, the providers_shared shim, plus a few
+# Microsoft.AI.MachineLearning runtime files). PyInstaller's
+# automatic detection misses some of these because they're loaded
+# via LoadLibrary from C++. collect_all picks them up reliably and
+# also includes the pure-Python `onnxruntime.capi`,
+# `onnxruntime.providers` etc. submodules the runtime touches when
+# initialising a DML session. Skip silently if the package isn't
+# installed (some dev machines build CPU-only); the runtime
+# already falls back to MediaPipe CPU when DML isn't reachable, so
+# a missing wheel here just means GPU Mode is a no-op on that build.
+try:
+    ort_datas, ort_binaries, ort_hidden = collect_all("onnxruntime")
+    datas += ort_datas
+    binaries += ort_binaries
+    hiddenimports += ort_hidden
+except Exception:
+    pass
+
 # The app uses several dynamic imports and optional Windows-only controllers.
 hiddenimports += collect_submodules("hgr")
 hiddenimports += [

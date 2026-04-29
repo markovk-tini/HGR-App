@@ -102,9 +102,44 @@ def _try_load_gpu_runtime() -> HandRuntime | None:
             except Exception:
                 pass
 
-    # Path 2 — onnxruntime-directml on a custom palm-detect +
-    # landmark pipeline. Reserved for future release if too many
-    # users report Tasks-API GPU silently running on CPU.
+    # Path 2 — onnxruntime + DirectML on a custom palm-detect +
+    # landmark pipeline. Real Windows GPU path. We try this AFTER
+    # Tasks-API because Tasks-API would be lower-effort if it
+    # worked, but in practice on Windows it raises
+    # NotImplementedError so we end up here for any actual GPU.
+    if probe.onnxruntime_importable and probe.onnxruntime_directml_provider:
+        try:
+            from .onnx_runtime import build_onnx_directml_runtime
+
+            hands_module = build_onnx_directml_runtime()
+            if hands_module is not None:
+                try:
+                    sys.stderr.write(
+                        "[hand_runtime] gpu_mode active: ONNX Runtime + DirectML "
+                        "selected. Palm detection + hand landmark inference run on "
+                        "the GPU. Accuracy matches MediaPipe CPU (same model weights "
+                        "from OpenCV Zoo).\n"
+                    )
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                hand_connections = getattr(hands_module, "HAND_CONNECTIONS", None)
+                return HandRuntime(
+                    hands_module=hands_module,
+                    drawing_utils=None,
+                    hand_connections=hand_connections,
+                    backend="onnx-directml",
+                )
+        except Exception as exc:
+            try:
+                sys.stderr.write(
+                    f"[hand_runtime] ONNX/DirectML path construction failed: "
+                    f"{type(exc).__name__}: {exc!s}. Falling back to MediaPipe CPU.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+
     return None
 
 
