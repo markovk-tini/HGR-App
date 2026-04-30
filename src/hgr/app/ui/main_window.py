@@ -3320,7 +3320,7 @@ class MainWindow(QMainWindow):
     def _build_instructions_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Instructions",
-            "Touchless lets you control Spotify, Chrome, mouse input, volume, and voice features from a live camera feed. Use this page as the quick start, Control Guide for the full gesture + voice command map, and Tutorial for the guided walkthrough.",
+            "Touchless turns a live camera feed into hands-free control of Spotify, Chrome, the mouse, system volume, voice dictation, and an on-screen drawing canvas. Use this page as the quick start, Control Guide for the full gesture + voice command map, and Tutorial for the guided walkthrough.",
         )
         info_box = QFrame()
         info_box.setObjectName("innerCard")
@@ -3328,12 +3328,15 @@ class MainWindow(QMainWindow):
         info_layout.setContentsMargins(16, 16, 16, 16)
         info_layout.setSpacing(10)
         items = [
-            "1. Press Start to begin live tracking with the selected camera. Touchless then reads your hand pose in real time and routes gestures to the active control context.",
-            "2. Use Live View whenever you want to watch the hand skeleton, gesture label, voice state, volume state, and current app routing.",
-            "3. Right-hand gestures handle Spotify, Chrome, wheels, and volume. Left-hand gestures handle voice, dictation, and mouse mode.",
-            "4. Spotify actions work while Spotify is running on this device. Chrome wheel actions only work while Chrome is already open and active.",
-            "5. Mouse mode is a separate control mode. Turn it on with the left hand, control the pointer with the right hand, then turn it off again when finished.",
-            "6. Tutorial is the best place to learn the main motions. It now uses the same live gesture and voice runtime as the app, so the actions you practice there are the real actions the app will run.",
+            "1. Press Start to begin live tracking with the selected camera. Touchless reads both hands in real time and routes gestures to whatever control context is active (Spotify, Chrome, mouse, volume, voice, drawing).",
+            "2. Live View shows the camera feed with the hand skeleton, gesture label per hand (red box default, green when a gesture is recognized), voice state, volume state, and current app routing. Open it whenever you want to verify what Touchless is seeing.",
+            "3. Right-hand gestures drive Spotify, Chrome, the gesture wheels, drawing, and volume. Left-hand gestures drive voice / dictation, the mouse-mode toggle, the YouTube wheel toggle (left 'four'), and Spotify-side controls during a save prompt.",
+            "4. Spotify actions work while Spotify is running on this device. Chrome wheel actions only work while Chrome is already open and active. The right-hand 'two' gesture will open or focus Spotify if it isn't running.",
+            "5. Mouse mode is a separate control mode. Turn it on with the left hand, control the pointer with the right hand, then turn it off again when finished. While mouse mode is on, drawing and the gesture wheels are disabled.",
+            "6. Drawing mode (right-hand gesture) lets you sketch directly over the camera feed. Open thumb for ~0.2s lifts the pen; left-hand pinch + stretch resizes a captured stroke; swipe right clears the canvas, swipe left undoes one stroke. Color, thickness, and eraser type persist across sessions; shape mode does not — it always starts off when you re-enter drawing mode.",
+            "7. Use your phone as the camera (and optionally the microphone) by opening Settings -> Camera, scanning the QR code with your phone, and tapping 'Use phone camera'. The phone streams video over your local Wi-Fi to Touchless and bypasses any laptop webcam. Phone microphone is a separate toggle in Settings -> Microphone.",
+            "8. Three camera-performance modes live in Settings -> Camera. Low FPS auto-engages on slower hardware (drops to 0.34/0.22 confidence + lite landmark model). Lite Mode is a manual switch to MediaPipe model_complexity=0 for ~2.5x faster CPU inference. GPU Mode routes the hand-detection model through ONNX Runtime + DirectML on any DX12 GPU (NVIDIA / AMD / Intel) and falls back to CPU MediaPipe if the GPU path is unreachable. Toggle whichever combination keeps your machine at ~30 fps.",
+            "9. Tutorial is the best place to learn the main motions. It uses the same live gesture and voice runtime as the app, so the actions you practice there are the real actions the app will run.",
         ]
         for item in items:
             lbl = QLabel(item)
@@ -4815,6 +4818,7 @@ class MainWindow(QMainWindow):
             "Part 3: use the right-hand fist gesture to actually pause and play Spotify so you can verify the app control is working.",
             "Part 4: use the wheel pose to open the real Spotify gesture wheel. There is also a separate Google Chrome gesture wheel in the full app.",
             "Part 5: turn mouse mode on, learn how the right hand controls the cursor, click the tutorial targets, then turn mouse mode off again.",
+            "Part 6: hold left-hand 'one' to start the voice listener, then speak a command. The tutorial confirms each phrase before advancing — a quick check that your microphone is wired up and the listener trigger feels right.",
         ]
         for item in items:
             lbl = QLabel(f"• {item}")
@@ -4939,30 +4943,155 @@ class MainWindow(QMainWindow):
         self._updates_history_layout.insertWidget(0, loading)
         self._updates_history_fetcher.start()
 
+    @staticmethod
+    def _builtin_release_history() -> list:
+        # Built-in fallback list. Used to backfill any version not
+        # present in the GitHub release feed (older releases that
+        # were never published as GitHub Releases, or releases
+        # published without a body) and as a complete substitute
+        # when GitHub itself can't be reached. Sorted newest-first
+        # in the dataclass list — the merge step below preserves
+        # that order for any version the GitHub fetch didn't cover.
+        from ..updater import ReleaseHistoryEntry
+        from ... import __version__ as RUNNING_VERSION
+
+        def make(version: str, published: str, body: str) -> "ReleaseHistoryEntry":
+            return ReleaseHistoryEntry(
+                version=version,
+                body=body.strip(),
+                published_at=published,
+                html_url=f"https://github.com/markovk-tini/Touchless/releases/tag/v{version}",
+                is_current=(version == RUNNING_VERSION),
+            )
+
+        return [
+            make("1.0.8", "2026-04-15", """
+- **Lite Mode** end-to-end: manual switch to MediaPipe model_complexity=0 for ~2.5x faster CPU inference at the same gesture quality.
+- **GPU Mode foundation**: tasks_runtime adapter + harder runtime probe + .task asset bundling so the GPU path can engage on first install.
+- **Spotify launcher** now resolves the Microsoft Store install correctly (URI handler tried first), and the auto-launch policy waits for a real client window before declaring success.
+- **Touchless-themed Save popup** for camera + microphone selection: matching title-bar color, surface background, and accent buttons.
+- **Updates panel** got a "skip this version" memory and a "Launching {x}..." overlay during install.
+- Numerous **clip-recording fixes**: off-thread export, processing pill never gets stuck, save prompt always lands on the GUI thread.
+- **Control Guide** rename (formerly Gesture Guide) plus a dedicated Voice Commands section.
+- **Drawing**: pen-lift detection rewritten with a 0.2s thumb-open hold; tilt + rotation tolerance; quadratic-Bezier-through-midpoints stroke smoothing.
+"""),
+            make("1.0.7", "2026-03-09", """
+- **Phone toast notifications** when the PC detects a gesture or voice command, so you can confirm input was received without looking at the laptop.
+- **Spotify** play/pause/repeat/shuffle now handle non-JSON 200 responses (Spotify Web API occasionally returns empty bodies).
+- **Voice listener** trigger works one-handed again, with a short stability gate so ambiguous Left labels don't fire spuriously.
+- **Camera hot-swap** continuity: swapping cameras via Save no longer blanks the mini viewer; the live frame stream stays on-screen across the swap.
+- **Phone QR toggle** uses the same hot-swap path as Save Camera, so flipping between local and phone camera is seamless.
+- Verbose Spotify error logs to make device-routing problems easier to diagnose from the user's side.
+"""),
+            make("1.0.6", "2026-02-12", """
+- **Phone camera over Wi-Fi**: scan a QR code, the phone streams video to Touchless via embedded HTTPS, with persistent pairing and a "Use phone camera" toggle.
+- **Phone microphone**: stream phone audio for voice commands and dictation via /audio POST. AudioWorklet-side boost + user-gain support for quiet phones.
+- **In-app auto-updater** matures into a hybrid release model: GitHub for metadata, Cloudflare for the full installer payload. Per-user install path means no UAC prompt on update.
+- **Quality of life**: Settings -> Camera dropdown shows real device names, scrollable Microphone panel, Touchless-themed dialogs across the board.
+- **Single-instance lock** (clicking the desktop shortcut while running just refocuses the existing window).
+- Updates panel landed: live version, manual check, release history list.
+- Several phone-mic stability fixes: clipping, end-of-speech detection, recording cutoff, save-mic responsiveness.
+- LICENSE switched to GPL v3.
+"""),
+            make("1.0.1", "2025-12-20", """
+- **In-app auto-updater** (initial cut). Touchless can now check GitHub for newer releases on launch and install them with a single click — no separate download step.
+- Foundation work for the Updates panel: version display, manual "Check for Updates" button, dialog wired to the silent installer.
+"""),
+            make("1.0.0", "2025-12-01", """
+- **Initial Touchless release.**
+- Real-time hand gesture recognition via MediaPipe Hands.
+- Spotify control (play / pause / next / previous / shuffle / repeat) over the Web API.
+- Chrome control (back / forward / refresh / new-tab / close-tab / pin / mute) via window-level keyboard automation.
+- System volume + mute via the Windows Audio Session API.
+- Voice listener with whisper.cpp-backed dictation.
+- Mouse-mode pointer control + click via gestures.
+- On-screen drawing canvas overlay.
+- Six-part guided tutorial.
+"""),
+        ]
+
+    def _merge_with_builtin_release_history(self, github_entries: list) -> list:
+        """Augment the GitHub-fetched list with built-in entries for
+        any version GitHub doesn't have (or has but with empty
+        notes), and refresh is_current on every entry against the
+        currently-running version. Result is sorted newest-first by
+        published_at, with GitHub-sourced entries preferred when
+        both have the same version + non-empty body."""
+        from ..updater import ReleaseHistoryEntry
+        from ... import __version__ as RUNNING_VERSION
+
+        merged: dict[str, "ReleaseHistoryEntry"] = {}
+        for entry in github_entries:
+            try:
+                version = entry.version
+            except Exception:
+                continue
+            merged[version] = entry
+        for builtin in self._builtin_release_history():
+            existing = merged.get(builtin.version)
+            if existing is None or not (existing.body or "").strip():
+                merged[builtin.version] = builtin
+        # Re-stamp is_current — GitHub data may be stale relative
+        # to a freshly-installed build.
+        results = []
+        for entry in merged.values():
+            if entry.is_current != (entry.version == RUNNING_VERSION):
+                entry = ReleaseHistoryEntry(
+                    version=entry.version,
+                    body=entry.body,
+                    published_at=entry.published_at,
+                    html_url=entry.html_url,
+                    is_current=(entry.version == RUNNING_VERSION),
+                )
+            results.append(entry)
+        # Sort newest-first by published_at; entries without dates
+        # fall to the bottom.
+        results.sort(key=lambda e: (e.published_at or ""), reverse=True)
+        return results
+
     def _on_updates_history_loaded(self, entries: list) -> None:
         self._updates_history_loaded = True
         self._clear_updates_history_widgets()
-        if not entries:
+        merged = self._merge_with_builtin_release_history(entries or [])
+        if not merged:
             empty = QLabel("No releases published yet.")
             empty.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; padding: 8px;")
             self._updates_history_layout.insertWidget(0, empty)
             return
-        for entry in entries:
+        for entry in merged:
             self._updates_history_layout.insertWidget(
                 self._updates_history_layout.count() - 1,
                 self._build_release_entry_widget(entry),
             )
 
     def _on_updates_history_failed(self, reason: str) -> None:
+        # GitHub unreachable — fall back to the built-in history so
+        # the user still has something useful (offline machine, GH
+        # outage, network blocked). Show a small dim note above so
+        # they know the list isn't live.
         self._updates_history_loaded = False
         self._clear_updates_history_widgets()
-        err = QLabel(
-            f"Couldn't load release history: {reason}.\n"
-            f"Check your internet connection or open the Releases page on GitHub directly."
-        )
-        err.setWordWrap(True)
-        err.setStyleSheet("color: rgba(255,140,140,0.85); font-size: 12px; padding: 8px;")
-        self._updates_history_layout.insertWidget(0, err)
+        builtin = self._merge_with_builtin_release_history([])
+        if builtin:
+            note = QLabel(
+                f"Couldn't reach GitHub ({reason}) — showing the built-in release history instead."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: rgba(255,200,140,0.80); font-size: 11px; padding: 6px 8px;")
+            self._updates_history_layout.insertWidget(0, note)
+            for entry in builtin:
+                self._updates_history_layout.insertWidget(
+                    self._updates_history_layout.count() - 1,
+                    self._build_release_entry_widget(entry),
+                )
+        else:
+            err = QLabel(
+                f"Couldn't load release history: {reason}.\n"
+                f"Check your internet connection or open the Releases page on GitHub directly."
+            )
+            err.setWordWrap(True)
+            err.setStyleSheet("color: rgba(255,140,140,0.85); font-size: 12px; padding: 8px;")
+            self._updates_history_layout.insertWidget(0, err)
         # Clear the fetcher reference so a re-open of the panel
         # triggers a fresh fetch (e.g. user reconnected to wifi).
         self._updates_history_fetcher = None
