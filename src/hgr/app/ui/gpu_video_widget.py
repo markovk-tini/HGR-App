@@ -70,7 +70,10 @@ class GpuVideoWidget(QWidget):
         #   handedness: "Left" / "Right" / ""
         #   label:     gesture name string (empty when inactive)
         #   active:    bool — toggles bbox to green
-        #   secondary: bool — secondary hand uses amber, never goes green
+        # Both hands are equal — the engine produces a separate
+        # prediction per hand and either can drive its own active
+        # state independently. There is no "primary" / "secondary"
+        # distinction in the display.
         self._hands_info: List[dict] = []
         self._idle_text: str = ""
         self._idle_font = QFont("Segoe UI", 10)
@@ -78,12 +81,10 @@ class GpuVideoWidget(QWidget):
         self._banner_font.setBold(True)
         self._landmark_pen = QPen(QColor(29, 233, 182), 2)
         self._connection_pen = QPen(QColor(29, 233, 182, 200), 2)
-        # Bbox colors — primary inactive: red. primary active: green.
-        # secondary: amber so two hands in the frame are visually
-        # distinct even when both are "neutral".
+        # Bbox colors — red default, green when that hand has a
+        # recognized gesture.
         self._bbox_inactive_color = QColor(232, 72, 72, 235)
         self._bbox_active_color = QColor(70, 220, 130, 235)
-        self._bbox_secondary_color = QColor(255, 180, 60, 235)
         self._banner_bg_color = QColor(0, 0, 0, 150)
         self._banner_text_color = QColor(248, 250, 252, 250)
         self._idle_color = QColor(180, 200, 220)
@@ -150,7 +151,6 @@ class GpuVideoWidget(QWidget):
                 handedness = str(entry.get("handedness") or "")
                 label = str(entry.get("label") or "")
                 active = bool(entry.get("active"))
-                secondary = bool(entry.get("secondary"))
             else:
                 # Legacy: bare list of (x, y) tuples.
                 pts_raw = entry
@@ -158,7 +158,6 @@ class GpuVideoWidget(QWidget):
                 handedness = ""
                 label = ""
                 active = False
-                secondary = False
             pts: List[Tuple[float, float]] = []
             for pt in pts_raw:
                 if pt is None:
@@ -175,7 +174,6 @@ class GpuVideoWidget(QWidget):
                 "handedness": handedness,
                 "label": label,
                 "active": active,
-                "secondary": secondary,
             })
         self._hands_info = normalised
 
@@ -263,12 +261,7 @@ class GpuVideoWidget(QWidget):
             bbox = hand.get("bbox")
             if bbox is None:
                 continue
-            if hand.get("secondary"):
-                color = self._bbox_secondary_color
-            elif hand.get("active"):
-                color = self._bbox_active_color
-            else:
-                color = self._bbox_inactive_color
+            color = self._bbox_active_color if hand.get("active") else self._bbox_inactive_color
             bx, by, bw, bh = bbox
             rx = bx * tw + tx
             ry = by * th + ty
@@ -279,15 +272,12 @@ class GpuVideoWidget(QWidget):
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(rect)
 
-            # Banner text: handedness ("Right") for primary inactive,
-            # "Right | gesture" for primary active, "Right (2nd)"
-            # for the secondary hand. Empty handedness prints just
-            # the label (or nothing).
+            # Banner: "Right | gesture" when the hand has a
+            # recognized gesture, "Right" when neutral. Empty
+            # handedness falls back to just the label (or nothing).
             handedness = hand.get("handedness", "") or ""
             label = hand.get("label", "") or ""
-            if hand.get("secondary"):
-                banner = f"{handedness} (2nd)" if handedness else "(2nd)"
-            elif label:
+            if label:
                 banner = f"{handedness} | {label}" if handedness else label
             else:
                 banner = handedness

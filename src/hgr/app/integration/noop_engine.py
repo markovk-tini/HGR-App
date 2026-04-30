@@ -2647,12 +2647,25 @@ class GestureWorker(QObject):
         return True
 
     @staticmethod
+    def _gesture_banner_label(prediction) -> tuple[str, bool]:
+        # Stable label when non-neutral, else fall back to raw.
+        # Matches the original draw_hand_overlay banner logic.
+        # "active" (green box) = the chosen label is non-neutral.
+        if prediction is None:
+            return "", False
+        stable = str(getattr(prediction, "stable_label", "neutral") or "neutral")
+        raw = str(getattr(prediction, "raw_label", "neutral") or "neutral")
+        chosen = stable if stable != "neutral" else raw
+        if chosen == "neutral":
+            return "", False
+        return chosen, True
+
+    @staticmethod
     def _build_hand_overlay_info(
         tracked_hand,
         *,
         label: str,
         active: bool,
-        secondary: bool,
     ) -> dict:
         # Pack a per-hand display payload for GpuVideoWidget. Tuples
         # / floats only — the dict crosses the Qt signal queue so we
@@ -2680,7 +2693,6 @@ class GestureWorker(QObject):
             "handedness": handedness,
             "label": str(label or ""),
             "active": bool(active),
-            "secondary": bool(secondary),
         }
 
     def _normalize_result_right_primary(self, result):
@@ -3750,37 +3762,36 @@ class GestureWorker(QObject):
         # + joints via the Qt paint engine, replacing the CPU cv2
         # draw_hand_overlay path that used to mutate the display
         # BGR buffer every frame.
+        #
+        # Both hands are treated equally: each hand's box is red by
+        # default and turns green when THAT hand's own prediction
+        # is non-neutral. There is no primary/secondary distinction
+        # in the display — _normalize_result_right_primary above
+        # only re-routes which hand the existing right-hand-specific
+        # internal logic operates on; the engine produces a
+        # prediction for each hand independently (result.prediction
+        # for tracked_hand, result.secondary_prediction for
+        # secondary_tracked_hand).
         try:
             hands_info: list = []
-            primary_label = ""
-            primary_active = False
-            if result.prediction is not None:
-                stable = str(getattr(result.prediction, "stable_label", "neutral") or "neutral")
-                raw = str(getattr(result.prediction, "raw_label", "neutral") or "neutral")
-                # Match the original draw_hand_overlay banner logic:
-                # show stable when non-neutral, else fall back to raw.
-                # "Active" (green box) = the chosen label is non-neutral.
-                chosen = stable if stable != "neutral" else raw
-                if chosen != "neutral":
-                    primary_label = chosen
-                    primary_active = True
             if result.found and result.tracked_hand is not None:
+                label, active = self._gesture_banner_label(result.prediction)
                 hands_info.append(
                     self._build_hand_overlay_info(
                         result.tracked_hand,
-                        label=primary_label,
-                        active=primary_active,
-                        secondary=False,
+                        label=label,
+                        active=active,
                     )
                 )
-            secondary_for_lm = getattr(result, "secondary_tracked_hand", None)
-            if secondary_for_lm is not None:
+            secondary_hand = getattr(result, "secondary_tracked_hand", None)
+            if secondary_hand is not None:
+                sec_pred = getattr(result, "secondary_prediction", None)
+                label, active = self._gesture_banner_label(sec_pred)
                 hands_info.append(
                     self._build_hand_overlay_info(
-                        secondary_for_lm,
-                        label="",
-                        active=False,
-                        secondary=True,
+                        secondary_hand,
+                        label=label,
+                        active=active,
                     )
                 )
             self.engine_landmarks_ready.emit(hands_info)
