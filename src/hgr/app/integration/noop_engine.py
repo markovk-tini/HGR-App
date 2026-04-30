@@ -1411,8 +1411,30 @@ class GestureWorker(QObject):
             self._drawing_control_text = f"drawing hover ({self._drawing_render_target})"
             self._camera_draw_last_point = None
             return
+        # Pen-lift trigger: open the thumb for >= 0.20 s and the
+        # pen lifts. Compute thumb_open_now FIRST so the draw
+        # / erase pose detectors below can be overridden — the
+        # _drawing_thumb_foldedish helper accepts openness <= 0.80,
+        # so a clearly-open thumb at openness ~0.79 was still
+        # reading as "folded" and keeping draw_active = True every
+        # frame. The lift logic was firing (it cancels grace) but
+        # the SAME frame's draw_active = True extended grace right
+        # back. Solution: when the thumb is decisively open, force
+        # draw_active and erase_active to False.
+        thumb = hand_reading.fingers.get("thumb")
+        thumb_open_now = thumb is not None and (
+            getattr(thumb, "state", None) == "fully_open"
+            or float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.55
+        )
+
         erase_active = self._drawing_erase_pose_active(prediction, hand_reading)
         draw_active = self._drawing_draw_pose_active(prediction, hand_reading)
+        if thumb_open_now:
+            # Decisive thumb-open invalidates draw / erase pose
+            # immediately, regardless of finger geometry. The user
+            # has clearly indicated they're not gripping a pen.
+            draw_active = False
+            erase_active = False
 
         # Track sustained draw-pose intent. Single-frame draw_active
         # blips (e.g. dropping an open hand briefly reads as draw
@@ -1440,33 +1462,10 @@ class GestureWorker(QObject):
             # passing hand-drop can't start an unintended stroke.
             self._drawing_draw_grace_until = now + 0.40
 
-        # Pen-lift trigger: open the thumb for >= 0.20 s and the
-        # pen lifts. Previous implementations failed for two
-        # reasons:
-        #
-        #   - The fast-stop required `not draw_active`, which
-        #     meant the user had to also extend their other
-        #     fingers before the open-thumb check could start.
-        #   - The openness threshold (0.78 / 0.88) was higher
-        #     than what the underlying classifier needs to call
-        #     the thumb "fully_open" (>=0.48). So a thumb that
-        #     visually read as fully open in the live view was
-        #     rejected because openness was only ~0.55.
-        #
-        # New behaviour:
-        #   - Open if state == "fully_open" (the classifier's
-        #     definitive open call) OR openness >= 0.55
-        #     (numeric fallback for ambiguous classifications).
-        #   - No gate on draw_active; works thumb-only.
-        #   - Time-based 0.20 s hold (deterministic across fps);
-        #     brief wobble that drops the open detection for a
-        #     single frame resets the timer, so we don't false-
-        #     fire on rotation jitter.
-        thumb = hand_reading.fingers.get("thumb")
-        thumb_open_now = thumb is not None and (
-            getattr(thumb, "state", None) == "fully_open"
-            or float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.55
-        )
+        # Time-based pen-lift hold. First open frame stamps
+        # _drawing_thumb_open_since; first not-open frame resets
+        # it. When elapsed >= hold, commit any in-flight stroke
+        # and cancel both grace windows.
         if thumb_open_now:
             if self._drawing_thumb_open_since <= 0.0:
                 self._drawing_thumb_open_since = now
