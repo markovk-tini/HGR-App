@@ -375,18 +375,23 @@ class LiveViewWindow(QMainWindow):
         # bypasses the engine pipeline.
         if not self.isVisible() or frame is None:
             return
-        # Backlog detection (see MiniLiveViewer for full
-        # rationale). Drop this frame only if the daemon reader
-        # has already produced a strictly newer one — meaning a
-        # fresher raw_frame_ready is queued behind us. 0.05 s
-        # tolerance for the normal one-frame race between emit
-        # and slot-fire.
+        # Two-stage drop (see MiniLiveViewer for full rationale):
+        #   (a) Backlog detection: drop if daemon already decoded
+        #       a strictly newer frame (with 0.05 s tolerance).
+        #   (b) Absolute age cap at 0.12 s as a safety net for
+        #       the case where daemon AND slot are both slowed by
+        #       GPU contention so backlog detection alone doesn't
+        #       fire.
         if capture_ts > 0.0 and self._worker is not None:
             cap = getattr(self._worker, "_cap", None)
             if cap is not None:
                 latest_ts = float(getattr(cap, "_latest_frame_ts", 0.0) or 0.0)
                 if latest_ts > capture_ts + 0.05:
                     return
+        if capture_ts > 0.0:
+            import time as _time
+            if (_time.monotonic() - capture_ts) > 0.12:
+                return
         self._last_frame = frame
         self._render_frame()
         # Update the latency + display-rate readout. The label

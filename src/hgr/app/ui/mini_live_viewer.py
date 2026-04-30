@@ -250,25 +250,33 @@ class MiniLiveViewer(QWidget):
         # decoded this frame.
         if not self.isVisible() or frame is None:
             return
-        # Backlog detection: only drop this frame if the daemon
-        # reader has ALREADY decoded a strictly newer one. A
-        # newer raw_frame_ready is then queued behind us and will
-        # render fresher content — there's no value in painting
-        # the older frame first. Earlier versions used an
-        # absolute "now - capture_ts" threshold, but that
-        # measured slot delay (how long the main thread has been
-        # busy) rather than frame staleness, and rejected every
-        # frame during sustained mild contention — freezing the
-        # display instead of letting it track the freshest
-        # available frame. The 0.05 s tolerance accounts for the
-        # normal one-frame race between emit and slot-fire
-        # (~33 ms at 30 fps).
+        # Two-stage drop:
+        #   (a) Backlog detection: drop this frame if the daemon
+        #       reader has ALREADY decoded a strictly newer one
+        #       (with 0.05 s tolerance for the normal one-frame
+        #       race between emit and slot-fire). A fresher
+        #       raw_frame_ready is queued behind us and will
+        #       render better content.
+        #   (b) Absolute age cap: drop if the frame is older than
+        #       0.12 s regardless. (a) only fires when the daemon
+        #       outpaces the slot — but if BOTH the daemon AND
+        #       the slot are slowed by GPU contention, frames can
+        #       pile in the queue each only marginally newer than
+        #       the prior, all collectively stale. (b) is the
+        #       safety net for that case. 0.12 s = ~3.5 frames at
+        #       30 fps; tight enough to limit visible lag, loose
+        #       enough that normal sub-100 ms pipeline jitter
+        #       doesn't starve the display.
         if capture_ts > 0.0 and self._worker is not None:
             cap = getattr(self._worker, "_cap", None)
             if cap is not None:
                 latest_ts = float(getattr(cap, "_latest_frame_ts", 0.0) or 0.0)
                 if latest_ts > capture_ts + 0.05:
                     return
+        if capture_ts > 0.0:
+            import time as _time
+            if (_time.monotonic() - capture_ts) > 0.12:
+                return
         self._last_frame = frame
         self._render_frame()
 

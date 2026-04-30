@@ -9100,13 +9100,71 @@ class MainWindow(QMainWindow):
     def _sync_button_visual_state(self, button: QPushButton) -> None:
         if button is None:
             return
-        hovered = button.isVisible() and button.rect().contains(button.mapFromGlobal(QCursor.pos()))
+        # Treat disabled / off-screen buttons as not-hovered so any
+        # leftover hgrHover from before the disable is cleared on
+        # the first sync. Without isEnabled() the start_engine
+        # flow (Start click -> setEnabled(False) -> camera picker
+        # covers the button) leaves hgrHover stuck True; Qt then
+        # doesn't deliver another HoverLeave because the button is
+        # now disabled, so the glow stays.
+        try:
+            on_screen = bool(button.window() and button.window().isVisible())
+        except Exception:
+            on_screen = True
+        hovered = (
+            button.isVisible()
+            and button.isEnabled()
+            and on_screen
+            and button.rect().contains(button.mapFromGlobal(QCursor.pos()))
+        )
         pressed = bool(button.isDown())
         if button.property("hgrHover") != hovered:
             button.setProperty("hgrHover", hovered)
         if button.property("hgrPressed") != pressed:
             button.setProperty("hgrPressed", pressed)
         self._refresh_button_hover_visual(button)
+
+    def _sync_all_button_hover_states(self) -> None:
+        # Walk every tracked QPushButton and force a re-sync.
+        # Acts as a watchdog for cases where Qt doesn't deliver
+        # a per-button hover event:
+        #   - cursor leaves the main window entirely
+        #   - a modal dialog covered a button and stole its
+        #     pending HoverLeave, then closed
+        #   - a button got setEnabled(False) without an event
+        #     reaching it first
+        #   - the splash sequence shows the window off-screen
+        #     briefly (WA_DontShowOnScreen) before the real
+        #     show, leaving stale hover from the off-screen pose
+        for btn in self.findChildren(QPushButton):
+            self._sync_button_visual_state(btn)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # Splash flow shows the window with WA_DontShowOnScreen,
+        # paints once, hides, then shows for real. The off-screen
+        # show pass can leave a button with hgrHover=True if the
+        # cursor's global position happened to fall inside an
+        # off-screen-positioned button's rect. Force re-sync once
+        # the window is actually visible so any stale True is
+        # corrected.
+        QTimer.singleShot(0, self._sync_all_button_hover_states)
+
+    def leaveEvent(self, event):  # noqa: N802
+        super().leaveEvent(event)
+        # Cursor crossed outside the main window — any sticky
+        # hgrHover that didn't get cleared by a per-button
+        # HoverLeave (modal dialogs, fast cursor motion, focus
+        # transitions) gets resolved here.
+        self._sync_all_button_hover_states()
+
+    def changeEvent(self, event):  # noqa: N802
+        super().changeEvent(event)
+        # Re-sync on activation transitions so a popup closing
+        # and re-activating the main window can't leave a button
+        # with stale hover styling.
+        if event.type() == QEvent.ActivationChange:
+            self._sync_all_button_hover_states()
 
     def eventFilter(self, obj, event):  # noqa: N802
         if isinstance(obj, QPushButton) and not isinstance(obj, WindowControlButton):
@@ -9120,6 +9178,13 @@ class MainWindow(QMainWindow):
                 QEvent.MouseButtonPress,
                 QEvent.MouseButtonRelease,
                 QEvent.Show,
+                QEvent.Hide,
+                # EnabledChange covers the start_engine path:
+                # button.setEnabled(False) when a click kicks off
+                # engine startup. Without this we relied on a
+                # stale hover event arriving after the disable,
+                # which often never came on Windows.
+                QEvent.EnabledChange,
             ):
                 QTimer.singleShot(0, lambda b=obj: self._sync_button_visual_state(b))
         return super().eventFilter(obj, event)
@@ -10351,13 +10416,71 @@ def _stop_screen_recording(self) -> bool:
     def _sync_button_visual_state(self, button: QPushButton) -> None:
         if button is None:
             return
-        hovered = button.isVisible() and button.rect().contains(button.mapFromGlobal(QCursor.pos()))
+        # Treat disabled / off-screen buttons as not-hovered so any
+        # leftover hgrHover from before the disable is cleared on
+        # the first sync. Without isEnabled() the start_engine
+        # flow (Start click -> setEnabled(False) -> camera picker
+        # covers the button) leaves hgrHover stuck True; Qt then
+        # doesn't deliver another HoverLeave because the button is
+        # now disabled, so the glow stays.
+        try:
+            on_screen = bool(button.window() and button.window().isVisible())
+        except Exception:
+            on_screen = True
+        hovered = (
+            button.isVisible()
+            and button.isEnabled()
+            and on_screen
+            and button.rect().contains(button.mapFromGlobal(QCursor.pos()))
+        )
         pressed = bool(button.isDown())
         if button.property("hgrHover") != hovered:
             button.setProperty("hgrHover", hovered)
         if button.property("hgrPressed") != pressed:
             button.setProperty("hgrPressed", pressed)
         self._refresh_button_hover_visual(button)
+
+    def _sync_all_button_hover_states(self) -> None:
+        # Walk every tracked QPushButton and force a re-sync.
+        # Acts as a watchdog for cases where Qt doesn't deliver
+        # a per-button hover event:
+        #   - cursor leaves the main window entirely
+        #   - a modal dialog covered a button and stole its
+        #     pending HoverLeave, then closed
+        #   - a button got setEnabled(False) without an event
+        #     reaching it first
+        #   - the splash sequence shows the window off-screen
+        #     briefly (WA_DontShowOnScreen) before the real
+        #     show, leaving stale hover from the off-screen pose
+        for btn in self.findChildren(QPushButton):
+            self._sync_button_visual_state(btn)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # Splash flow shows the window with WA_DontShowOnScreen,
+        # paints once, hides, then shows for real. The off-screen
+        # show pass can leave a button with hgrHover=True if the
+        # cursor's global position happened to fall inside an
+        # off-screen-positioned button's rect. Force re-sync once
+        # the window is actually visible so any stale True is
+        # corrected.
+        QTimer.singleShot(0, self._sync_all_button_hover_states)
+
+    def leaveEvent(self, event):  # noqa: N802
+        super().leaveEvent(event)
+        # Cursor crossed outside the main window — any sticky
+        # hgrHover that didn't get cleared by a per-button
+        # HoverLeave (modal dialogs, fast cursor motion, focus
+        # transitions) gets resolved here.
+        self._sync_all_button_hover_states()
+
+    def changeEvent(self, event):  # noqa: N802
+        super().changeEvent(event)
+        # Re-sync on activation transitions so a popup closing
+        # and re-activating the main window can't leave a button
+        # with stale hover styling.
+        if event.type() == QEvent.ActivationChange:
+            self._sync_all_button_hover_states()
 
     def eventFilter(self, obj, event):  # noqa: N802
         if isinstance(obj, QPushButton) and not isinstance(obj, WindowControlButton):
@@ -10371,6 +10494,13 @@ def _stop_screen_recording(self) -> bool:
                 QEvent.MouseButtonPress,
                 QEvent.MouseButtonRelease,
                 QEvent.Show,
+                QEvent.Hide,
+                # EnabledChange covers the start_engine path:
+                # button.setEnabled(False) when a click kicks off
+                # engine startup. Without this we relied on a
+                # stale hover event arriving after the disable,
+                # which often never came on Windows.
+                QEvent.EnabledChange,
             ):
                 QTimer.singleShot(0, lambda b=obj: self._sync_button_visual_state(b))
         return super().eventFilter(obj, event)
