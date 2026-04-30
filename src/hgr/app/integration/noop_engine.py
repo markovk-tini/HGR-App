@@ -472,6 +472,12 @@ class GestureWorker(QObject):
     # so the gesture decisions still feel as solid as before.
     _LITE_MODE_PROCESS_WIDTH = 384
     _FULLSCREEN_POLL_INTERVAL = 1.0
+    # Drawing pen-lift hold duration. When the user opens their
+    # thumb, the pen lifts after this many seconds of continuous
+    # open-thumb detection. 0.20 s is short enough to feel
+    # immediate (~6 frames at 30 fps) but long enough that brief
+    # rotation wobble during a stroke can't trigger a false lift.
+    _DRAWING_THUMB_OPEN_HOLD_SECONDS = 0.20
     # Suggestion overlay: triggered when measured FPS stays below 15 for
     # longer than 10 seconds. After the user dismisses (X, left-fist, or
     # auto-dismiss), we wait this many seconds before re-offering.
@@ -720,7 +726,14 @@ class GestureWorker(QObject):
         self._drawing_shape_mode = False
         self._drawing_draw_grace_until = 0.0
         self._drawing_erase_grace_until = 0.0
-        self._drawing_thumb_open_streak = 0
+        self._drawing_thumb_open_streak = 0  # legacy counter, no longer used
+        # Time-based pen-lift trigger. Stamped to monotonic_now the
+        # first frame the thumb reads as open; reset to 0 the first
+        # frame it doesn't. When the elapsed time exceeds
+        # _DRAWING_THUMB_OPEN_HOLD_SECONDS, the pen lifts. Time-based
+        # (vs frame-counted) so the hold duration is deterministic
+        # across variable fps.
+        self._drawing_thumb_open_since: float = 0.0
         # Anti-misfire: a new stroke only starts after 2 consecutive
         # draw-pose frames. Single-frame jitter (e.g. dropping the
         # hand from an open position briefly reads as draw pose for
@@ -1427,37 +1440,56 @@ class GestureWorker(QObject):
             # passing hand-drop can't start an unintended stroke.
             self._drawing_draw_grace_until = now + 0.40
 
-        # Fast-stop: open the thumb and the pen lifts. The previous
-        # implementation required state == "fully_open" AND openness
-        # >= 0.88 AND `not draw_active`, which collectively meant
-        # the user had to also extend their other fingers (so the
-        # hand stopped reading as draw_pose) before the open-thumb
-        # streak could even start counting. That's why the user had
-        # to "open my full hand" to lift the pen.
+        # Pen-lift trigger: open the thumb for >= 0.20 s and the
+        # pen lifts. Previous implementations failed for two
+        # reasons:
         #
-        # New behaviour: detect a decisively open thumb (state in
-        # {fully_open, partially_curled} AND openness >= 0.78)
-        # WITHOUT gating on draw_active. So thumb-only opening is
-        # now sufficient. Streak still =2 frames so a brief
-        # rotation-induced thumb misread doesn't cancel a stroke.
+        #   - The fast-stop required `not draw_active`, which
+        #     meant the user had to also extend their other
+        #     fingers before the open-thumb check could start.
+        #   - The openness threshold (0.78 / 0.88) was higher
+        #     than what the underlying classifier needs to call
+        #     the thumb "fully_open" (>=0.48). So a thumb that
+        #     visually read as fully open in the live view was
+        #     rejected because openness was only ~0.55.
+        #
+        # New behaviour:
+        #   - Open if state == "fully_open" (the classifier's
+        #     definitive open call) OR openness >= 0.55
+        #     (numeric fallback for ambiguous classifications).
+        #   - No gate on draw_active; works thumb-only.
+        #   - Time-based 0.20 s hold (deterministic across fps);
+        #     brief wobble that drops the open detection for a
+        #     single frame resets the timer, so we don't false-
+        #     fire on rotation jitter.
         thumb = hand_reading.fingers.get("thumb")
-        thumb_open_now = (
-            thumb is not None
-            and getattr(thumb, "state", None) in {"fully_open", "partially_curled"}
-            and float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.78
+        thumb_open_now = thumb is not None and (
+            getattr(thumb, "state", None) == "fully_open"
+            or float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.55
         )
         if thumb_open_now:
-            self._drawing_thumb_open_streak += 1
+            if self._drawing_thumb_open_since <= 0.0:
+                self._drawing_thumb_open_since = now
         else:
-            self._drawing_thumb_open_streak = 0
-        if self._drawing_thumb_open_streak >= 2:
-            if self._drawing_render_target == "camera" and self._camera_draw_active_stroke_points:
+            self._drawing_thumb_open_since = 0.0
+        if (
+            self._drawing_thumb_open_since > 0.0
+            and (now - self._drawing_thumb_open_since)
+            >= self._DRAWING_THUMB_OPEN_HOLD_SECONDS
+        ):
+            if (
+                self._drawing_render_target == "camera"
+                and self._camera_draw_active_stroke_points
+            ):
                 self._commit_camera_draw_stroke()
             self._drawing_draw_grace_until = 0.0
             self._drawing_erase_grace_until = 0.0
-            # Reset the draw-pose streak too so re-acquiring the
-            # pen requires the same 2-frame anti-misfire start.
             self._drawing_draw_active_streak = 0
+            # Reset the timer so a single hold counts as one lift
+            # event, not a continuously-firing one. The user has to
+            # close the thumb (or its openness drops below 0.55)
+            # and re-open to trigger another lift.
+            self._drawing_thumb_open_since = 0.0
 
         if erase_active or now < self._drawing_erase_grace_until:
             self._drawing_tool = "erase"
