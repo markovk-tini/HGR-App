@@ -432,17 +432,22 @@ class StartTutorialDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.addStretch(1)
 
+        # Yes is the primary action: positioned first (right side
+        # of the row, since the leading addStretch pushes everything
+        # right) and styled with the accent palette so it's
+        # visibly the emphasized choice. No keeps the neutral
+        # secondary styling.
+        self.yes_button = QPushButton("Yes")
+        self.yes_button.setObjectName("startDialogPrimaryButton")
+        self.yes_button.clicked.connect(self._choose_tutorial)
+        self.yes_button.setDefault(True)
+
         self.no_button = QPushButton("No")
         self.no_button.setObjectName("startDialogButton")
         self.no_button.clicked.connect(self._choose_start)
 
-        self.yes_button = QPushButton("Yes")
-        self.yes_button.setObjectName("startDialogButton")
-        self.yes_button.clicked.connect(self._choose_tutorial)
-        self.yes_button.setDefault(True)
-
-        button_row.addWidget(self.no_button)
         button_row.addWidget(self.yes_button)
+        button_row.addWidget(self.no_button)
         root.addLayout(button_row)
 
     def _apply_theme(self) -> None:
@@ -494,8 +499,75 @@ class StartTutorialDialog(QDialog):
                 background-color: {self.config.accent_color};
                 color: #001B24;
             }}
+            QPushButton#startDialogPrimaryButton {{
+                background-color: {self.config.accent_color};
+                color: #001B24;
+                border: 1px solid {self.config.accent_color};
+                border-radius: 12px;
+                padding: 10px 18px;
+                min-width: 86px;
+                font-weight: 900;
+            }}
+            QPushButton#startDialogPrimaryButton:hover {{
+                background-color: rgba(29,233,182,0.92);
+                border: 1px solid #6BFFE0;
+            }}
+            QPushButton#startDialogPrimaryButton:pressed {{
+                background-color: rgba(29,233,182,0.78);
+                color: #001B24;
+            }}
             """
         )
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API name)
+        super().showEvent(event)
+        # Color the OS title bar to match the Touchless app theme so
+        # the popup looks like a native Touchless window. Same DWM
+        # path TouchlessNotice uses — silently no-ops on Windows 10
+        # (the API only exists on Windows 11 build 22000+) which is
+        # acceptable since the dialog body is themed regardless.
+        try:
+            self._apply_dwm_caption_color()
+        except Exception:
+            pass
+
+    def _apply_dwm_caption_color(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return
+        hwnd = int(self.winId())
+        if not hwnd:
+            return
+        # DWMWA_CAPTION_COLOR = 35, DWMWA_TEXT_COLOR = 36
+        # COLORREF is 0x00BBGGRR. Touchless primary blue is #0B3D91
+        # → R=0x0B, G=0x3D, B=0x91 → COLORREF=0x00913D0B.
+        # Caption text #E5F6FF → 0x00FFF6E5.
+        DWMWA_CAPTION_COLOR = 35
+        DWMWA_TEXT_COLOR = 36
+        caption = ctypes.c_uint32(0x00913D0B)
+        text = ctypes.c_uint32(0x00FFF6E5)
+        try:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint32(DWMWA_CAPTION_COLOR),
+                ctypes.byref(caption),
+                ctypes.sizeof(caption),
+            )
+        except Exception:
+            pass
+        try:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint32(DWMWA_TEXT_COLOR),
+                ctypes.byref(text),
+                ctypes.sizeof(text),
+            )
+        except Exception:
+            pass
 
     def _choose_tutorial(self) -> None:
         self.choice = "tutorial"

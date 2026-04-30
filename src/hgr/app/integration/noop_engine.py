@@ -1210,6 +1210,17 @@ class GestureWorker(QObject):
         self._drawing_stretch_initial_points = None
         self._drawing_stretch_centroid = None
         self._drawing_stretch_history_pushed = False
+        # Shape mode is a per-session toggle: it doesn't survive
+        # leaving drawing mode (so re-entering drawing mode always
+        # starts on plain freehand, the most common state) and it
+        # doesn't survive an app restart (the field is re-initialized
+        # to False in __init__; nothing persists it to config). The
+        # tools that DO persist — color, thickness, eraser kind —
+        # are owned by AppConfig, not the engine runtime, so they
+        # are unaffected by this reset.
+        if self._drawing_shape_mode:
+            self._drawing_shape_mode = False
+            self._queue_drawing_request("shape_off")
         self._drawing_control_text = "drawing mode on" if self._drawing_mode_enabled else "drawing mode off"
 
     def _toggle_drawing_mode(self, now: float) -> None:
@@ -1219,6 +1230,15 @@ class GestureWorker(QObject):
         self._drawing_cursor_norm = None
         self._drawing_tool = "hidden"
         self._camera_draw_last_point = None
+        # Shape mode is per-session: any time we leave drawing mode
+        # we clear it so re-entering always starts on plain freehand.
+        # It also can never survive an app restart (the field is
+        # initialised to False in __init__ and not persisted to
+        # config). Color, thickness, and eraser kind ARE persisted
+        # via AppConfig — they're not touched here.
+        if not self._drawing_mode_enabled and self._drawing_shape_mode:
+            self._drawing_shape_mode = False
+            self._queue_drawing_request("shape_off")
         self._reset_drawing_wheel(clear_cooldown=False)
         self._reset_chrome_wheel(clear_cooldown=False)
         self._reset_spotify_wheel(clear_cooldown=False)
