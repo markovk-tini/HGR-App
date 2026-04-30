@@ -7581,6 +7581,217 @@ class MainWindow(QMainWindow):
             if cropped.shape[1] != expected_w or cropped.shape[0] != expected_h:
                 cropped = cv2.resize(cropped, (expected_w, expected_h), interpolation=cv2.INTER_AREA)
             return cropped
+    def _run_clip_export_ffmpeg(
+        self, duration_seconds: int, target_region: QRect
+    ) -> tuple[bool, Path | None, float]:
+        """Thread-safe variant of _export_recent_clip_ffmpeg that
+        does NOT touch any QWidget or worker state — used from the
+        background clip-export thread. Returns
+        (success, output_path, actual_seconds_written). The GUI
+        callback handles label/save-prompt updates."""
+        was_active = (
+            self._clip_cache_backend == "ffmpeg" and self._clip_cache_process is not None
+        )
+        if was_active:
+            self._stop_clip_cache_ffmpeg(delete_files=False)
+        try:
+            entries = self._parse_ffmpeg_clip_manifest()
+            if not entries:
+                return (False, None, 0.0)
+            selected: list[dict] = []
+            covered = 0.0
+            for entry in reversed(entries):
+                segment_seconds = max(
+                    1e-3,
+                    float(entry.get("end_time", 0.0))
+                    - float(entry.get("start_time", 0.0)),
+                )
+                selected.append(entry)
+                covered += segment_seconds
+                if covered >= float(duration_seconds):
+                    break
+            if not selected:
+                return (False, None, 0.0)
+            selected.reverse()
+            total_duration = sum(
+                max(
+                    1e-3,
+                    float(entry.get("end_time", 0.0))
+                    - float(entry.get("start_time", 0.0)),
+                )
+                for entry in selected
+            )
+            start_trim = max(0.0, total_duration - float(duration_seconds))
+            output_path = self._clip_output_specs(duration_seconds)[0][0]
+            capture_region = (
+                QRect(self._clip_cache_region)
+                if self._clip_cache_region is not None
+                else QRect(self._screens_union_geometry())
+            )
+            inputs: list[str] = []
+            for entry in selected:
+                inputs.extend(["-i", str(Path(entry["path"]).resolve())])
+            n = len(selected)
+            concat_in = "".join(f"[{i}:v]" for i in range(n))
+            filter_chain = [f"{concat_in}concat=n={n}:v=1:a=0"]
+            crop_filter = self._clip_crop_filter(capture_region, target_region)
+            if crop_filter:
+                filter_chain.append(crop_filter)
+            filter_chain.append(
+                f"trim=start={start_trim:.3f}:duration={float(duration_seconds):.3f}"
+            )
+            filter_chain.append("setpts=PTS-STARTPTS")
+            filter_complex = ",".join(filter_chain) + "[vout]"
+            command = [
+                self._ffmpeg_path,
+                "-hide_banner", "-loglevel", "error", "-y",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-an",
+                *self._ffmpeg_encoder_args(
+                    purpose="clip_export", fps=self._clip_cache_fps
+                ),
+                str(output_path),
+            ]
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if (
+                completed.returncode == 0
+                and output_path.exists()
+                and output_path.stat().st_size > 1024
+            ):
+                actual_seconds = min(float(duration_seconds), max(0.0, total_duration))
+                return (True, output_path, actual_seconds)
+            return (False, None, 0.0)
+        finally:
+            self._cleanup_ffmpeg_clip_cache_files()
+            if (
+                was_active
+                and self._worker is not None
+                and getattr(self._worker, "is_running", False)
+            ):
+                # subprocess.Popen + attribute writes only — no
+                # QWidget / QObject calls, so safe from a thread.
+                self._start_clip_cache_ffmpeg()
+
+    def _run_clip_export_opencv(
+        self, duration_seconds: int, target_region: QRect
+    ) -> tuple[bool, Path | None, float]:
+        """Thread-safe variant of _export_recent_clip_opencv. Same
+        contract as _run_clip_export_ffmpeg.
+
+        Note: this path uses cv2.VideoCapture for reading cached
+        segments, which opens a new fd per file inside the worker
+        thread — fine. The output writer is also opened+closed
+        inside this method on the worker thread."""
+        if self._clip_cache_segment_writer is not None:
+            # Caller path may have an in-progress writer; rotate
+            # to flush it. _rotate_clip_cache_segment is invoked
+            # by the cv2-based capture timer normally; calling it
+            # from a worker thread is OK because it's just file
+            # I/O + a writer release.
+            self._rotate_clip_cache_segment()
+        segments = [
+            meta
+            for meta in self._clip_cache_segments
+            if Path(meta.get("path")).exists()
+            and int(meta.get("frame_count", 0) or 0) > 0
+        ]
+        if not segments:
+            return (False, None, 0.0)
+        selected_segments: list[tuple[dict, int]] = []
+        covered_seconds = 0.0
+        for meta in reversed(segments):
+            frame_count = int(meta.get("frame_count", 0) or 0)
+            if frame_count <= 0:
+                continue
+            start_time = float(meta.get("start_time", 0.0) or 0.0)
+            end_time = float(meta.get("end_time", start_time) or start_time)
+            segment_seconds = max(1e-3, end_time - start_time)
+            if covered_seconds + segment_seconds <= float(duration_seconds):
+                selected_segments.append((meta, 0))
+                covered_seconds += segment_seconds
+                continue
+            needed_seconds = max(0.0, float(duration_seconds) - covered_seconds)
+            keep_ratio = min(1.0, max(0.0, needed_seconds / segment_seconds))
+            keep_frames = max(1, int(round(frame_count * keep_ratio)))
+            skip_frames = max(0, frame_count - keep_frames)
+            selected_segments.append((meta, skip_frames))
+            covered_seconds += min(segment_seconds, needed_seconds)
+            break
+        if not selected_segments:
+            return (False, None, 0.0)
+        selected_segments.reverse()
+        estimated_frames = sum(
+            max(0, int(meta.get("frame_count", 0) or 0) - int(skip))
+            for meta, skip in selected_segments
+        )
+        output_fps = max(
+            1.0,
+            min(30.0, float(estimated_frames) / max(1e-3, covered_seconds)),
+        )
+        output_writer = None
+        output_path: Path | None = None
+        for candidate_path, codec_name in self._clip_output_specs(duration_seconds):
+            candidate_writer = self._open_video_writer(
+                candidate_path,
+                codec_name,
+                target_region.width(),
+                target_region.height(),
+                output_fps,
+            )
+            if candidate_writer is not None:
+                output_writer = candidate_writer
+                output_path = candidate_path
+                break
+        if output_writer is None or output_path is None:
+            return (False, None, 0.0)
+        written = 0
+        try:
+            for meta, skip_frames in selected_segments:
+                path = Path(meta.get("path"))
+                capture_region = (
+                    meta.get("region")
+                    or self._clip_cache_region
+                    or self._screens_union_geometry()
+                )
+                capture_region = QRect(capture_region)
+                cap = cv2.VideoCapture(str(path))
+                local_index = 0
+                try:
+                    while True:
+                        ok, frame = cap.read()
+                        if not ok or frame is None:
+                            break
+                        if local_index >= int(skip_frames):
+                            cropped = self._crop_cached_frame_to_region(
+                                frame, capture_region, target_region
+                            )
+                            if cropped is not None:
+                                output_writer.write(cropped)
+                                written += 1
+                        local_index += 1
+                finally:
+                    cap.release()
+        finally:
+            try:
+                output_writer.release()
+            except Exception:
+                pass
+        if (
+            written > 0
+            and output_path.exists()
+            and output_path.stat().st_size > 1024
+        ):
+            actual_seconds = written / float(output_fps) if output_fps > 0 else 0.0
+            return (True, output_path, actual_seconds)
+        return (False, None, 0.0)
+
     def _export_recent_clip_ffmpeg(self, duration_seconds: int, target_region: QRect) -> bool:
         was_active = self._clip_cache_backend == "ffmpeg" and self._clip_cache_process is not None
         if was_active:
@@ -7791,19 +8002,20 @@ class MainWindow(QMainWindow):
 
     def _export_clip_async(self, duration_seconds: int, region: QRect) -> None:
         # Off-main-thread clip export. The ffmpeg subprocess for a
-        # 60 s concat + crop + trim + encode takes 3-8 s, which
-        # used to freeze the UI completely (and let the monitor
-        # picker dialog hang on screen during the freeze). Now:
+        # 60 s concat + crop + trim + encode takes 3-8 s; running
+        # it inline used to freeze the UI completely. Now:
         #
-        #   1. The picker dialog is already closed by the time we
-        #      get here (caller used singleShot(0) to defer this).
-        #   2. We show a "Processing clip" overlay immediately.
-        #   3. The ffmpeg run goes onto a daemon thread; main
-        #      thread keeps the event loop free for the gesture
-        #      worker, paint events, etc.
-        #   4. When the thread finishes, it queues a finish-on-GUI
-        #      callback that hides the overlay and updates the
-        #      "Last action" label.
+        #   1. The picker dialog is closed by the time we get here
+        #      (caller used singleShot(0) to defer this).
+        #   2. Processing overlay shown immediately.
+        #   3. ffmpeg runs on a daemon thread; main thread free.
+        #   4. Worker thread NEVER touches QWidgets or worker state
+        #      — it stashes its result on `self._clip_export_result`
+        #      (a dict capturing success + path + actual_seconds +
+        #      error) and bounces a finish callback to GUI thread.
+        #   5. GUI callback hides the overlay, updates the label,
+        #      and fires the save-location prompt (which involves
+        #      starting voice capture — must be main-thread).
         if self._clip_export_thread is not None and self._clip_export_thread.is_alive():
             self.last_action_label.setText("Last action: clip already exporting")
             return
@@ -7816,30 +8028,70 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        def _finish_on_gui(success: bool) -> None:
+        # Reset shared result slot for this run. Worker thread
+        # writes here; GUI callback reads.
+        self._clip_export_result = {
+            "success": False,
+            "output_path": None,
+            "actual_seconds": 0.0,
+            "error": None,
+        }
+
+        def _finish_on_gui() -> None:
             try:
                 self.processing_overlay.hide_processing()
             except Exception:
                 pass
-            if not success:
+            result = dict(getattr(self, "_clip_export_result", {}) or {})
+            success = bool(result.get("success", False))
+            output_path = result.get("output_path")
+            actual_seconds = float(result.get("actual_seconds", 0.0) or 0.0)
+            error = result.get("error")
+            if error:
+                self.last_action_label.setText(
+                    f"Last action: clip export failed ({error})"
+                )
+                return
+            if not success or output_path is None:
                 self.last_action_label.setText("Last action: no recent clip available yet")
-            # On success, _export_recent_clip_*() already set the
-            # "saved … to <path>" text from the worker thread —
-            # leave it alone.
+                return
+            self.last_action_label.setText(
+                f"Last action: saved {actual_seconds:.1f}s clip to {output_path}"
+            )
+            # Save-location voice prompt — ALWAYS from GUI thread,
+            # because internally it starts voice capture and that
+            # touches sounddevice + QObject state which the worker
+            # owns on the main thread. Calling this from the export
+            # thread previously crashed the app.
+            try:
+                self._queue_post_action_save_prompt("clips", Path(output_path))
+            except Exception:
+                pass
 
         def _runner() -> None:
-            success = False
             try:
                 if self._ffmpeg_ready() and self._clip_cache_backend == "ffmpeg":
-                    success = self._export_recent_clip_ffmpeg(duration_seconds, target)
+                    success, output_path, actual_seconds = self._run_clip_export_ffmpeg(
+                        duration_seconds, target
+                    )
                 else:
-                    success = self._export_recent_clip_opencv(duration_seconds, target)
-            except Exception:
-                success = False
-            # Bounce back to the GUI thread for overlay teardown
-            # and label update — these touch QWidgets, which must
-            # only be touched on the main thread.
-            QTimer.singleShot(0, lambda ok=success: _finish_on_gui(ok))
+                    success, output_path, actual_seconds = self._run_clip_export_opencv(
+                        duration_seconds, target
+                    )
+                self._clip_export_result = {
+                    "success": bool(success),
+                    "output_path": output_path,
+                    "actual_seconds": float(actual_seconds or 0.0),
+                    "error": None,
+                }
+            except Exception as exc:
+                self._clip_export_result = {
+                    "success": False,
+                    "output_path": None,
+                    "actual_seconds": 0.0,
+                    "error": f"{type(exc).__name__}: {exc!s}",
+                }
+            QTimer.singleShot(0, _finish_on_gui)
 
         self._clip_export_thread = threading.Thread(
             target=_runner, name="hgr-clip-export", daemon=True

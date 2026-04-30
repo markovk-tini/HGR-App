@@ -6,7 +6,7 @@ from itertools import cycle
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
@@ -712,17 +712,24 @@ class RecordingIndicatorOverlay(QWidget):
 
 
 class ProcessingOverlay(QWidget):
-    """Centered "Processing ..." indicator with animated dots.
+    """Bottom-center "Processing ..." pill with animated dots.
 
-    Used while a heavy synchronous-ish operation runs (ffmpeg clip
-    export, etc.). Mouse-transparent so the user can still click
-    through to other windows. Lifecycle:
+    Visual idiom matches VoiceStatusOverlay (blue translucent
+    panel, teal border, light text), so the user reads them as
+    the same family. Mouse-transparent.
 
         overlay = ProcessingOverlay()
-        overlay.show_processing("Processing clip")
-        # ... do work, ideally on a worker thread ...
+        overlay.show_processing("Processing 60s clip")
+        # ... do work on a worker thread ...
         overlay.hide_processing()
     """
+
+    # Pill geometry (the overlay window itself is sized to this
+    # plus a small margin; we don't paint over the full screen).
+    _PILL_WIDTH = 360
+    _PILL_HEIGHT = 56
+    _SCREEN_MARGIN_X = 16
+    _SCREEN_MARGIN_BOTTOM = 80
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -736,19 +743,29 @@ class ProcessingOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._label = "Processing"
         self._dot_count = 0
-        # 380 ms cadence — slow enough not to look frantic, fast
-        # enough that the indicator clearly conveys "still working."
         self._timer = QTimer(self)
         self._timer.setInterval(380)
         self._timer.timeout.connect(self._advance_dots)
-        self._resize_to_primary_screen()
+        self.resize(self._PILL_WIDTH + 2 * self._SCREEN_MARGIN_X,
+                    self._PILL_HEIGHT + 2 * self._SCREEN_MARGIN_X)
 
-    def _resize_to_primary_screen(self) -> None:
-        screen = QGuiApplication.primaryScreen()
+    def _place_on_screen(self) -> None:
+        # Bottom-center of the primary screen — same pattern the
+        # voice status overlay uses, so the user reads them as
+        # related.
+        screen = self.screen() or QGuiApplication.primaryScreen()
         if screen is None:
-            self.setGeometry(0, 0, 1280, 720)
+            self.move(40, 40)
             return
-        self.setGeometry(screen.geometry())
+        geo = screen.availableGeometry()
+        # Re-fit the window to a known size so we can position
+        # deterministically regardless of any prior resize.
+        w = self._PILL_WIDTH + 2 * self._SCREEN_MARGIN_X
+        h = self._PILL_HEIGHT + 2 * self._SCREEN_MARGIN_X
+        self.resize(w, h)
+        x = geo.center().x() - w // 2
+        y = geo.bottom() - h - self._SCREEN_MARGIN_BOTTOM + self._SCREEN_MARGIN_X
+        self.move(x, y)
 
     def _advance_dots(self) -> None:
         self._dot_count = (self._dot_count + 1) % 4
@@ -758,7 +775,7 @@ class ProcessingOverlay(QWidget):
     def show_processing(self, label: str = "Processing") -> None:
         self._label = str(label or "Processing")
         self._dot_count = 0
-        self._resize_to_primary_screen()
+        self._place_on_screen()
         self.show()
         self.raise_()
         self._timer.start()
@@ -770,24 +787,28 @@ class ProcessingOverlay(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        text = f"{self._label}{'.' * self._dot_count}"
-        # Size the pill horizontally based on text width so it
-        # looks balanced regardless of label length.
-        font = QFont('Arial', 22, QFont.Bold)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        # Same palette as VoiceStatusOverlay's command panel —
+        # translucent blue body, teal border, light foreground.
+        panel = QColor(25, 73, 143, 164)
+        border = QColor(29, 233, 182, 210)
+        text_color = QColor(232, 246, 255, 238)
+
+        rect = QRectF(self._SCREEN_MARGIN_X, self._SCREEN_MARGIN_X,
+                      self._PILL_WIDTH, self._PILL_HEIGHT)
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(panel)
+        painter.drawRoundedRect(rect, 18.0, 18.0)
+
+        font = QFont("Segoe UI", 12)
+        font.setBold(True)
         painter.setFont(font)
-        metrics = painter.fontMetrics()
-        # Reserve room for the longest possible suffix (3 dots) so
-        # the pill width doesn't pulse with the dot count.
-        widest = metrics.horizontalAdvance(f"{self._label}...")
-        box_width = max(280, widest + 80)
-        box_height = 86
-        rect = QRect(0, 0, box_width, box_height)
-        rect.moveCenter(QPoint(self.rect().center().x(), self.rect().center().y()))
-        painter.setPen(QPen(QColor(255, 255, 255, 80), 1.4))
-        painter.setBrush(QColor(10, 18, 26, 200))
-        painter.drawRoundedRect(rect, 18, 18)
-        painter.setPen(QColor('#F4FAFF'))
+        painter.setPen(QPen(text_color))
+        text = f"{self._label}{'.' * self._dot_count}"
         painter.drawText(rect, Qt.AlignCenter, text)
 
 
