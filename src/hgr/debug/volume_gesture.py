@@ -108,7 +108,7 @@ class VolumeGestureTracker:
 
         self._last_seen_time = now
         pose_score = float((candidate_scores or {}).get('volume_pose', 0.0))
-        pose_valid = self._is_volume_ready_pose(features, pose_score, stable_gesture, active=self._active)
+        pose_valid = self._is_volume_ready_pose(features, landmarks, pose_score, stable_gesture, active=self._active)
         if pose_valid:
             self._last_pose_valid_time = now
         control_y = float((landmarks[8][1] + landmarks[12][1]) * 0.5)
@@ -198,22 +198,39 @@ class VolumeGestureTracker:
         if status != 'idle':
             self._message = status
 
-    def _is_volume_ready_pose(self, features, pose_score: float, stable_gesture: str, *, active: bool) -> bool:
+    def _is_volume_ready_pose(self, features, landmarks, pose_score: float, stable_gesture: str, *, active: bool) -> bool:
         open_scores = features.open_scores
         spread_states = getattr(features, 'spread_states', {})
-        spread_distances = getattr(features, 'spread_ratios', {})
-        together_strength = float(features.spread_together_strengths.get('index_middle', 0.0))
-        apart_strength = float(features.spread_apart_strengths.get('index_middle', 0.0))
-        spread_distance = float(spread_distances.get('index_middle', 1.0))
-        disallowed_stable = {'open_hand', 'four', 'finger_apart', 'mute'}
+        # Disallowed stable gestures dropped from the previous
+        # allow-list: 'two' was being treated as compatible with
+        # volume control, so a peace sign with clearly separated
+        # fingers kept the volume tracker active and let the user
+        # change volume just by tilting their hand. The user
+        # explicitly reported this as a bug. Peace sign now
+        # disqualifies regardless of state, just like open_hand /
+        # four / finger_apart / mute already did.
+        disallowed_stable = {'open_hand', 'four', 'finger_apart', 'mute', 'two'}
         if not active and stable_gesture in disallowed_stable:
             return False
         if features.finger_count_open > 2:
             return False
+        # Direct tip-to-tip closeness check, mirroring the engine's
+        # _volume_pose_ready gate. The blended spread.distance
+        # ratio is too loose at the base of a V (PIP joints sit
+        # close anatomically regardless of spread), so we measure
+        # landmark 8 -> 12 directly and require <= 0.22 * palm_scale.
+        # That admits real volume_pose (fingers tip-to-tip) and
+        # rejects any visible gap.
+        try:
+            palm_scale = max(float(features.palm_scale), 1e-6)
+            dx = float(landmarks[8][0]) - float(landmarks[12][0])
+            dy = float(landmarks[8][1]) - float(landmarks[12][1])
+            tip_distance_ratio = (dx * dx + dy * dy) ** 0.5 / palm_scale
+        except Exception:
+            tip_distance_ratio = 1.0
         index_middle_close = (
             spread_states.get('index_middle') == 'together'
-            or spread_distance <= 0.44
-            or (spread_distance <= 0.48 and together_strength >= 0.30 and apart_strength <= 0.52)
+            and tip_distance_ratio <= 0.22
         )
         structural_ready = (
             self._is_volume_primary_open(features, 'index')
@@ -230,7 +247,11 @@ class VolumeGestureTracker:
         )
         if not structural_ready:
             return False
-        return active or pose_score >= 0.08 or stable_gesture in {'volume_pose', 'two', 'finger_together', 'neutral'}
+        # 'two' removed from the allow-list here too — even with a
+        # structurally-valid pose, if the stable label is 'two'
+        # we don't activate fresh; the user must produce a real
+        # volume_pose label to start.
+        return active or pose_score >= 0.08 or stable_gesture in {'volume_pose', 'finger_together', 'neutral'}
 
     def _is_pinky_hold_pose(self, features) -> bool:
         open_scores = features.open_scores
