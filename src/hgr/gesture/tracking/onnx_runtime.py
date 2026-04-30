@@ -623,8 +623,24 @@ class _OnnxHands:
         self._palm_samples_seconds = []
         self._landmark_samples_seconds = []
         try:
-            palm_avg = (sum(palm_samples) / len(palm_samples) * 1000.0) if palm_samples else 0.0
-            lm_avg = (sum(lm_samples) / len(lm_samples) * 1000.0) if lm_samples else 0.0
+            # Average alone hides spike contention from co-resident GPU
+            # workloads (whisper-stream.exe with -ngl, llama-server.exe
+            # serving Qwen grammar correction). p95 + max expose those
+            # spikes so a steady avg=3ms with max=25ms is visibly the
+            # signature of GPU contention rather than a smooth track.
+            def _stats_ms(samples: list[float]) -> tuple[float, float, float, float]:
+                if not samples:
+                    return 0.0, 0.0, 0.0, 0.0
+                ms = sorted(s * 1000.0 for s in samples)
+                avg = sum(ms) / len(ms)
+                p50 = ms[len(ms) // 2]
+                p95_idx = max(0, min(len(ms) - 1, int(round(0.95 * (len(ms) - 1)))))
+                p95 = ms[p95_idx]
+                mx = ms[-1]
+                return avg, p50, p95, mx
+
+            palm_avg, palm_p50, palm_p95, palm_max = _stats_ms(palm_samples)
+            lm_avg, lm_p50, lm_p95, lm_max = _stats_ms(lm_samples)
             stage1_a = self._stage1_attempts_total
             stage1_lc = self._stage1_lost_crop_total
             stage1_lp = self._stage1_lost_conf_total
@@ -646,8 +662,10 @@ class _OnnxHands:
             self._gate_fire_tp1 = 0
             self._gate_fire_tpN = 0
             sys.stderr.write(
-                f"[onnx_runtime] palm-detect avg={palm_avg:.1f}ms ({len(palm_samples)}) "
-                f"hand-landmark avg={lm_avg:.1f}ms ({len(lm_samples)}) "
+                f"[onnx_runtime] palm avg={palm_avg:.1f} p50={palm_p50:.1f} "
+                f"p95={palm_p95:.1f} max={palm_max:.1f}ms ({len(palm_samples)}) "
+                f"landmark avg={lm_avg:.1f} p50={lm_p50:.1f} "
+                f"p95={lm_p95:.1f} max={lm_max:.1f}ms ({len(lm_samples)}) "
                 f"track1[attempts={stage1_a} ok={stage1_ok} "
                 f"lost_crop_or_None={stage1_lc} lost_conf={stage1_lp}] "
                 f"gate[scan={gate_scan} no_surv={gate_nos} dis={gate_dis}] "
