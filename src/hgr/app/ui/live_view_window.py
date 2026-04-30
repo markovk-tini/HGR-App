@@ -375,19 +375,21 @@ class LiveViewWindow(QMainWindow):
         # bypasses the engine pipeline.
         if not self.isVisible() or frame is None:
             return
-        # Drop stale signals queued while the main thread was
-        # blocked. Under GPU contention (e.g., Spotify Chromium
-        # compositor competing for the GPU with DirectML
-        # inference) Qt's main-thread paint slows; raw_frame_ready
-        # emits at camera fps but the slot can't keep up. Without
-        # this drop, the recovery plays back several seconds of
-        # stale frames in order, looking like a 3 s display lag.
-        # 0.15 s = ~5 frames @ 30 fps; anything older has already
-        # been superseded by a newer frame in the queue.
-        import time as _time
-        now_check = _time.monotonic()
-        if capture_ts > 0.0 and (now_check - capture_ts) > 0.15:
-            return
+        # Two-stage staleness rejection — see MiniLiveViewer for
+        # the full rationale. Cap residual lag at one frame
+        # interval after any main-thread stall:
+        #   (a) drop if frame is older than 0.07 s (~2 frame
+        #       intervals at 30 fps)
+        #   (b) drop if a more-recent capture_ts was already
+        #       rendered by a previous fire (queued-then-stale)
+        if capture_ts > 0.0:
+            import time as _time
+            if (_time.monotonic() - capture_ts) > 0.07:
+                return
+            prev_ts = getattr(self, "_last_rendered_capture_ts", 0.0)
+            if capture_ts <= prev_ts:
+                return
+            self._last_rendered_capture_ts = capture_ts
         self._last_frame = frame
         self._render_frame()
         # Update the latency + display-rate readout. The label
