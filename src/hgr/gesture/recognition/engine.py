@@ -103,10 +103,18 @@ class GestureRecognitionEngine:
     def _volume_pose_ready(self, hand_reading: HandReading) -> bool:
         fingers = hand_reading.fingers
         spread = hand_reading.spreads["index_middle"]
+        # Tight AND gate. The earlier OR-of-three was too lenient:
+        # the "spread.distance <= 0.48 + together_strength >= 0.30
+        # + apart_strength <= 0.52" branch let a clearly-spread V
+        # sign sneak through whenever the index/middle ratio
+        # landed anywhere in the 0.45-0.48 borderline band.
+        # Volume pose visually requires fingers TOUCHING or
+        # ~touching — a 0.44 ratio cap rejects any visible gap,
+        # while still admitting normal volume-pose execution
+        # (fingers tip-to-tip).
         index_middle_close = (
             spread.state == "together"
-            or spread.distance <= 0.44
-            or (spread.distance <= 0.48 and spread.together_strength >= 0.30 and spread.apart_strength <= 0.52)
+            and spread.distance <= 0.44
         )
         return (
             index_middle_close
