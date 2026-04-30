@@ -3824,7 +3824,26 @@ class GestureWorker(QObject):
                         active=active,
                     )
                 )
-            self.engine_landmarks_ready.emit(hands_info)
+            mouse_overlay = None
+            if self._mouse_mode_enabled:
+                try:
+                    debug = self.mouse_tracker.debug_state
+                except Exception:
+                    debug = None
+                if debug is not None and debug.camera_control_bounds is not None:
+                    mouse_overlay = {
+                        "bounds": tuple(float(v) for v in debug.camera_control_bounds),
+                        "anchor": (
+                            tuple(float(v) for v in debug.camera_anchor_position)
+                            if debug.camera_anchor_position is not None
+                            else None
+                        ),
+                    }
+            if mouse_overlay is not None:
+                payload = {"hands": hands_info, "mouse_overlay": mouse_overlay}
+            else:
+                payload = hands_info
+            self.engine_landmarks_ready.emit(payload)
         except Exception:
             pass
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None

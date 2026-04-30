@@ -570,7 +570,28 @@ class MouseGestureTracker:
         if motion <= self.cursor_deadzone:
             return self._cursor_position
 
-        alpha = min(0.72, max(self.cursor_smoothing, self.cursor_smoothing + 0.55 * motion))
+        # Velocity-adaptive alpha tuned for cursor precision. The
+        # earlier curve held alpha around 0.25-0.40 for slow motion,
+        # which made the cursor lag a few frames behind the
+        # fingertip target — when the user tried to land on a small
+        # tutorial dot the cursor would drift past, the user would
+        # correct, the cursor would over-correct in the other
+        # direction, etc. ("rubber-banding"). Higher alpha at slow
+        # speeds keeps the cursor hugging the target so precision
+        # moves settle cleanly.
+        #
+        #   motion just above deadzone (~0.012, slow precision):
+        #     alpha = 0.55  -> cursor follows tightly
+        #   motion ~0.05 (deliberate move):
+        #     alpha ~ 0.78  -> responsive
+        #   motion >= 0.10 (fast sweep):
+        #     alpha = 0.92  -> near-passthrough so big moves
+        #                      don't lag noticeably
+        if motion >= 0.10:
+            alpha = 0.92
+        else:
+            t = motion / 0.10  # 0..1 across the slow-to-fast band
+            alpha = 0.55 + (0.92 - 0.55) * t
         self._cursor_position = (
             clamp01(self._cursor_position[0] + alpha * dx),
             clamp01(self._cursor_position[1] + alpha * dy),

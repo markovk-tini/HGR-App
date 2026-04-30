@@ -75,6 +75,11 @@ class GpuVideoWidget(QWidget):
         # state independently. There is no "primary" / "secondary"
         # distinction in the display.
         self._hands_info: List[dict] = []
+        # Mouse-mode "control area" overlay. Set by update_landmarks
+        # when the engine emits a payload containing mouse_overlay
+        # data. Dict with keys "bounds" (x1, y1, x2, y2 normalized
+        # in [0, 1] image coords) and optional "anchor" (ax, ay).
+        self._mouse_overlay: Optional[dict] = None
         self._idle_text: str = ""
         self._idle_font = QFont("Segoe UI", 10)
         self._banner_font = QFont("Segoe UI", 9)
@@ -91,6 +96,12 @@ class GpuVideoWidget(QWidget):
         # recognized gesture.
         self._bbox_inactive_color = QColor(232, 72, 72, 235)
         self._bbox_active_color = QColor(70, 220, 130, 235)
+        # Mouse-mode control box: red border so the user
+        # immediately reads "this is the active region — keep your
+        # hand in here." Faint red fill for the area itself.
+        self._mouse_box_color = QColor(255, 64, 56, 235)
+        self._mouse_box_fill_color = QColor(255, 64, 56, 24)
+        self._mouse_anchor_color = QColor(255, 248, 212, 230)
         self._banner_bg_color = QColor(0, 0, 0, 150)
         self._banner_text_color = QColor(248, 250, 252, 250)
         self._idle_color = QColor(180, 200, 220)
@@ -134,19 +145,48 @@ class GpuVideoWidget(QWidget):
         self._idle_text = ""
         self.update()
 
-    def update_landmarks(self, hands_info: Optional[Iterable]) -> None:
-        """Store per-hand display info for the next paintEvent. Each
-        entry is a dict with keys: landmarks, bbox, handedness,
-        label, active, secondary. The plain list-of-pointlists shape
-        emitted by older callers still works — bbox/handedness/label
-        default to empty.
+    def update_landmarks(self, payload: Optional[object]) -> None:
+        """Store per-hand display info for the next paintEvent.
+
+        Accepted payload shapes:
+          - dict {"hands": [...], "mouse_overlay": {...}|None} — full
+            payload from the engine when mouse mode is on (or any
+            other future overlay we layer on the camera frame)
+          - iterable of per-hand dicts with keys landmarks, bbox,
+            handedness, label, active — the bare hands list when
+            no mouse overlay is needed
+          - iterable of plain list-of-(x,y) tuples — legacy shape
+            from before the bbox/banner additions
 
         `update()` is NOT called here — the next `update_frame` will
         schedule the repaint, which keeps the overlay in sync with
         the frame it belongs to."""
-        if hands_info is None:
+        if payload is None:
             self._hands_info = []
+            self._mouse_overlay = None
             return
+        if isinstance(payload, dict):
+            hands_info = payload.get("hands") or []
+            mouse_overlay_raw = payload.get("mouse_overlay")
+            if isinstance(mouse_overlay_raw, dict):
+                bounds = mouse_overlay_raw.get("bounds")
+                anchor = mouse_overlay_raw.get("anchor")
+                if bounds is not None and len(bounds) == 4:
+                    self._mouse_overlay = {
+                        "bounds": tuple(float(v) for v in bounds),
+                        "anchor": (
+                            tuple(float(v) for v in anchor)
+                            if anchor is not None and len(anchor) == 2
+                            else None
+                        ),
+                    }
+                else:
+                    self._mouse_overlay = None
+            else:
+                self._mouse_overlay = None
+        else:
+            hands_info = payload
+            self._mouse_overlay = None
         normalised: List[dict] = []
         for entry in hands_info:
             if entry is None:
@@ -188,6 +228,7 @@ class GpuVideoWidget(QWidget):
         self._image_w = 0
         self._image_h = 0
         self._hands_info = []
+        self._mouse_overlay = None
         self._idle_text = str(idle_text or "")
         self.update()
 
@@ -249,12 +290,59 @@ class GpuVideoWidget(QWidget):
         return QRect(x, y, tw, th)
 
     def _draw_landmarks(self, painter: QPainter, target: QRect) -> None:
-        if not self._hands_info:
-            return
         tx = target.x()
         ty = target.y()
         tw = target.width()
         th = target.height()
+
+        # Mouse-mode control area. Painted first so the hand
+        # skeleton/bbox overlay on top — keeps the box visually
+        # behind the hand. Faint red fill + bold red border + a
+        # small "Mouse control area" label so the user
+        # immediately knows where to keep their hand.
+        if self._mouse_overlay is not None:
+            bx1, by1, bx2, by2 = self._mouse_overlay["bounds"]
+            rx1 = bx1 * tw + tx
+            ry1 = by1 * th + ty
+            rx2 = bx2 * tw + tx
+            ry2 = by2 * th + ty
+            box_rect = QRectF(rx1, ry1, max(0.0, rx2 - rx1), max(0.0, ry2 - ry1))
+            painter.fillRect(box_rect, self._mouse_box_fill_color)
+            painter.setPen(QPen(self._mouse_box_color, 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(box_rect)
+            label = "Mouse control area"
+            painter.setFont(self._banner_font)
+            metrics = QFontMetrics(self._banner_font)
+            text_w = metrics.horizontalAdvance(label)
+            label_h = metrics.height()
+            if ry1 - label_h - 6 >= ty:
+                bg_y = ry1 - label_h - 4
+            else:
+                bg_y = ry1 + 2
+            bg_rect = QRectF(
+                max(tx, rx1),
+                bg_y,
+                min(text_w + 10.0, tw - (max(tx, rx1) - tx)),
+                label_h + 2.0,
+            )
+            painter.fillRect(bg_rect, self._banner_bg_color)
+            painter.setPen(QPen(self._mouse_box_color, 1))
+            painter.drawRect(bg_rect)
+            painter.setPen(QPen(self._mouse_box_color, 1))
+            painter.drawText(QPointF(bg_rect.x() + 5.0, bg_rect.y() + label_h - 3.0), label)
+            anchor = self._mouse_overlay.get("anchor")
+            if anchor is not None:
+                ax = anchor[0] * tw + tx
+                ay = anchor[1] * th + ty
+                painter.setPen(QPen(self._mouse_anchor_color, 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(QPointF(ax, ay), 7.0, 7.0)
+                painter.drawLine(QPointF(ax - 8, ay), QPointF(ax + 8, ay))
+                painter.drawLine(QPointF(ax, ay - 8), QPointF(ax, ay + 8))
+
+        if not self._hands_info:
+            return
 
         # Per-hand bbox + banner. Drawn first so the skeleton +
         # joints paint over them (avoids the bbox edge cutting
