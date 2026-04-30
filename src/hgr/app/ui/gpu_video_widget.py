@@ -33,8 +33,8 @@ import time
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import QLineF, QPointF, QRect, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPaintEvent, QPen
+from PySide6.QtCore import QLineF, QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 # MediaPipe's 21-landmark hand connections (pairs of indices).
@@ -64,11 +64,28 @@ class GpuVideoWidget(QWidget):
         self._image: Optional[QImage] = None
         self._image_w: int = 0
         self._image_h: int = 0
-        self._landmarks: List[Sequence[Tuple[float, float]]] = []
+        # Per-hand display info — list of dicts with keys:
+        #   landmarks: list[(x, y)] normalized
+        #   bbox:      (x, y, w, h) normalized | None
+        #   handedness: "Left" / "Right" / ""
+        #   label:     gesture name string (empty when inactive)
+        #   active:    bool — toggles bbox to green
+        #   secondary: bool — secondary hand uses amber, never goes green
+        self._hands_info: List[dict] = []
         self._idle_text: str = ""
         self._idle_font = QFont("Segoe UI", 10)
+        self._banner_font = QFont("Segoe UI", 9)
+        self._banner_font.setBold(True)
         self._landmark_pen = QPen(QColor(29, 233, 182), 2)
         self._connection_pen = QPen(QColor(29, 233, 182, 200), 2)
+        # Bbox colors — primary inactive: red. primary active: green.
+        # secondary: amber so two hands in the frame are visually
+        # distinct even when both are "neutral".
+        self._bbox_inactive_color = QColor(232, 72, 72, 235)
+        self._bbox_active_color = QColor(70, 220, 130, 235)
+        self._bbox_secondary_color = QColor(255, 180, 60, 235)
+        self._banner_bg_color = QColor(0, 0, 0, 150)
+        self._banner_text_color = QColor(248, 250, 252, 250)
         self._idle_color = QColor(180, 200, 220)
         self._background = QColor(7, 19, 29)
         # Paint-rate diagnostic — prints `[gpu_video] paint rate:`
@@ -110,36 +127,63 @@ class GpuVideoWidget(QWidget):
         self._idle_text = ""
         self.update()
 
-    def update_landmarks(self, hands_xy_norm: Optional[Iterable]) -> None:
-        """Store landmarks for the next paintGL. Each hand is a
-        list of (x, y) tuples in [0, 1] image-normalized space.
-        `update()` is NOT called here — the next `update_frame`
-        will schedule the repaint, which keeps landmarks in sync
-        with the frame they belong to."""
-        if hands_xy_norm is None:
-            self._landmarks = []
+    def update_landmarks(self, hands_info: Optional[Iterable]) -> None:
+        """Store per-hand display info for the next paintEvent. Each
+        entry is a dict with keys: landmarks, bbox, handedness,
+        label, active, secondary. The plain list-of-pointlists shape
+        emitted by older callers still works — bbox/handedness/label
+        default to empty.
+
+        `update()` is NOT called here — the next `update_frame` will
+        schedule the repaint, which keeps the overlay in sync with
+        the frame it belongs to."""
+        if hands_info is None:
+            self._hands_info = []
             return
-        normalised: List[Sequence[Tuple[float, float]]] = []
-        for hand in hands_xy_norm:
-            if hand is None:
+        normalised: List[dict] = []
+        for entry in hands_info:
+            if entry is None:
                 continue
+            if isinstance(entry, dict):
+                pts_raw = entry.get("landmarks") or []
+                bbox = entry.get("bbox")
+                handedness = str(entry.get("handedness") or "")
+                label = str(entry.get("label") or "")
+                active = bool(entry.get("active"))
+                secondary = bool(entry.get("secondary"))
+            else:
+                # Legacy: bare list of (x, y) tuples.
+                pts_raw = entry
+                bbox = None
+                handedness = ""
+                label = ""
+                active = False
+                secondary = False
             pts: List[Tuple[float, float]] = []
-            for pt in hand:
+            for pt in pts_raw:
                 if pt is None:
                     continue
                 try:
                     pts.append((float(pt[0]), float(pt[1])))
                 except Exception:
                     continue
-            if pts:
-                normalised.append(pts)
-        self._landmarks = normalised
+            if not pts and bbox is None:
+                continue
+            normalised.append({
+                "landmarks": pts,
+                "bbox": bbox,
+                "handedness": handedness,
+                "label": label,
+                "active": active,
+                "secondary": secondary,
+            })
+        self._hands_info = normalised
 
     def clear_video(self, idle_text: str = "") -> None:
         self._image = None
         self._image_w = 0
         self._image_h = 0
-        self._landmarks = []
+        self._hands_info = []
         self._idle_text = str(idle_text or "")
         self.update()
 
@@ -201,8 +245,76 @@ class GpuVideoWidget(QWidget):
         return QRect(x, y, tw, th)
 
     def _draw_landmarks(self, painter: QPainter, target: QRect) -> None:
-        if not self._landmarks:
+        if not self._hands_info:
             return
+        tx = target.x()
+        ty = target.y()
+        tw = target.width()
+        th = target.height()
+
+        # Per-hand bbox + banner. Drawn first so the skeleton +
+        # joints paint over them (avoids the bbox edge cutting
+        # through a fingertip).
+        painter.save()
+        painter.setFont(self._banner_font)
+        metrics = QFontMetrics(self._banner_font)
+        banner_h = metrics.height()
+        for hand in self._hands_info:
+            bbox = hand.get("bbox")
+            if bbox is None:
+                continue
+            if hand.get("secondary"):
+                color = self._bbox_secondary_color
+            elif hand.get("active"):
+                color = self._bbox_active_color
+            else:
+                color = self._bbox_inactive_color
+            bx, by, bw, bh = bbox
+            rx = bx * tw + tx
+            ry = by * th + ty
+            rw = bw * tw
+            rh = bh * th
+            rect = QRectF(rx, ry, rw, rh)
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+
+            # Banner text: handedness ("Right") for primary inactive,
+            # "Right | gesture" for primary active, "Right (2nd)"
+            # for the secondary hand. Empty handedness prints just
+            # the label (or nothing).
+            handedness = hand.get("handedness", "") or ""
+            label = hand.get("label", "") or ""
+            if hand.get("secondary"):
+                banner = f"{handedness} (2nd)" if handedness else "(2nd)"
+            elif label:
+                banner = f"{handedness} | {label}" if handedness else label
+            else:
+                banner = handedness
+            if not banner:
+                continue
+            text_w = metrics.horizontalAdvance(banner)
+            # Sit the banner just above the bbox; if the box is at
+            # the top of the frame, drop the banner inside the box
+            # instead so it never gets clipped off-screen.
+            if ry - banner_h - 6 >= ty:
+                bg_y = ry - banner_h - 4
+            else:
+                bg_y = ry + 2
+            bg_rect = QRectF(
+                max(tx, rx),
+                bg_y,
+                min(text_w + 10.0, tw - (max(tx, rx) - tx)),
+                banner_h + 2.0,
+            )
+            painter.fillRect(bg_rect, self._banner_bg_color)
+            painter.setPen(QPen(color, 1))
+            painter.drawRect(bg_rect)
+            painter.setPen(QPen(self._banner_text_color, 1))
+            text_pt = QPointF(bg_rect.x() + 5.0, bg_rect.y() + banner_h - 3.0)
+            painter.drawText(text_pt, banner)
+        painter.restore()
+
         # Batch every connection across every hand into one drawLines
         # call and every joint into one drawPoints call. Replaces what
         # used to be ~84 individual painter.draw* calls per paint
@@ -210,28 +322,24 @@ class GpuVideoWidget(QWidget):
         # paint ops + 2 pen swaps total. Each Qt paint call has
         # per-call overhead (transform, pen state, antialias setup);
         # batching collapses that overhead to constant.
-        tx = target.x()
-        ty = target.y()
-        tw = target.width()
-        th = target.height()
         all_lines: list[QLineF] = []
         all_points: list[QPointF] = []
-        for hand in self._landmarks:
-            if not hand:
+        for hand in self._hands_info:
+            pts = hand.get("landmarks") or []
+            n = len(pts)
+            if n == 0:
                 continue
-            n = len(hand)
             for a, b in _HAND_CONNECTIONS:
                 if a >= n or b >= n:
                     continue
-                ax, ay = hand[a][0], hand[a][1]
-                bx, by = hand[b][0], hand[b][1]
+                ax, ay = pts[a][0], pts[a][1]
+                bx, by = pts[b][0], pts[b][1]
                 all_lines.append(QLineF(
                     ax * tw + tx, ay * th + ty,
                     bx * tw + tx, by * th + ty,
                 ))
-            for pt in hand:
+            for pt in pts:
                 all_points.append(QPointF(pt[0] * tw + tx, pt[1] * th + ty))
-        # Connections first so the joint dots paint on top.
         if all_lines:
             painter.setPen(self._connection_pen)
             painter.drawLines(all_lines)

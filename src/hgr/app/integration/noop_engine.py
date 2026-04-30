@@ -2626,6 +2626,43 @@ class GestureWorker(QObject):
         self._reset_window_gesture_state(clear_cooldown=False)
         return True
 
+    @staticmethod
+    def _build_hand_overlay_info(
+        tracked_hand,
+        *,
+        label: str,
+        active: bool,
+        secondary: bool,
+    ) -> dict:
+        # Pack a per-hand display payload for GpuVideoWidget. Tuples
+        # / floats only — the dict crosses the Qt signal queue so we
+        # keep it free of any object that the receiver thread can't
+        # safely consume. bbox is normalized [0, 1] image coords.
+        landmarks_arr = getattr(tracked_hand, "landmarks", None)
+        if landmarks_arr is not None:
+            pts = [(float(p[0]), float(p[1])) for p in landmarks_arr]
+        else:
+            pts = []
+        bbox = getattr(tracked_hand, "bbox", None)
+        if bbox is not None:
+            bbox_tuple = (
+                float(bbox.x),
+                float(bbox.y),
+                float(bbox.width),
+                float(bbox.height),
+            )
+        else:
+            bbox_tuple = None
+        handedness = str(getattr(tracked_hand, "handedness", "") or "")
+        return {
+            "landmarks": pts,
+            "bbox": bbox_tuple,
+            "handedness": handedness,
+            "label": str(label or ""),
+            "active": bool(active),
+            "secondary": bool(secondary),
+        }
+
     def _normalize_result_right_primary(self, result):
         if not getattr(result, "found", False) or result.tracked_hand is None:
             return result
@@ -3687,27 +3724,46 @@ class GestureWorker(QObject):
                 pass
         monotonic_now = time.monotonic()
         result = self._normalize_result_right_primary(result)
-        # Emit landmark coordinates for GPU-side overlay rendering.
+        # Emit per-hand info for GPU-side overlay rendering.
         # Receivers feed these into GpuVideoWidget.update_landmarks
-        # which draws connections + joints via the OpenGL paint
-        # engine, replacing the CPU cv2 draw_hand_overlay path that
-        # used to mutate the display BGR buffer every frame.
+        # which draws bbox + handedness/gesture banner + connections
+        # + joints via the Qt paint engine, replacing the CPU cv2
+        # draw_hand_overlay path that used to mutate the display
+        # BGR buffer every frame.
         try:
-            hands_landmarks: list = []
+            hands_info: list = []
+            primary_label = ""
+            primary_active = False
+            if result.prediction is not None:
+                stable = str(getattr(result.prediction, "stable_label", "neutral") or "neutral")
+                raw = str(getattr(result.prediction, "raw_label", "neutral") or "neutral")
+                # Match the original draw_hand_overlay banner logic:
+                # show stable when non-neutral, else fall back to raw.
+                # "Active" (green box) = the chosen label is non-neutral.
+                chosen = stable if stable != "neutral" else raw
+                if chosen != "neutral":
+                    primary_label = chosen
+                    primary_active = True
             if result.found and result.tracked_hand is not None:
-                lm = getattr(result.tracked_hand, "landmarks", None)
-                if lm is not None:
-                    hands_landmarks.append(
-                        [(float(p[0]), float(p[1])) for p in lm]
+                hands_info.append(
+                    self._build_hand_overlay_info(
+                        result.tracked_hand,
+                        label=primary_label,
+                        active=primary_active,
+                        secondary=False,
                     )
+                )
             secondary_for_lm = getattr(result, "secondary_tracked_hand", None)
             if secondary_for_lm is not None:
-                lm2 = getattr(secondary_for_lm, "landmarks", None)
-                if lm2 is not None:
-                    hands_landmarks.append(
-                        [(float(p[0]), float(p[1])) for p in lm2]
+                hands_info.append(
+                    self._build_hand_overlay_info(
+                        secondary_for_lm,
+                        label="",
+                        active=False,
+                        secondary=True,
                     )
-            self.engine_landmarks_ready.emit(hands_landmarks)
+                )
+            self.engine_landmarks_ready.emit(hands_info)
         except Exception:
             pass
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None
