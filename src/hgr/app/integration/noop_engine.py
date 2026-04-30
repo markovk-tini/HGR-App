@@ -4277,9 +4277,35 @@ class GestureWorker(QObject):
                 self._spotify_control_text = self._drawing_control_text
                 return
             self._update_drawing_controls(prediction, hand_reading, hand_handedness, now)
-            if hand_handedness == "Right" and hand_reading is not None and self._drawing_tool == "hover" and now >= self._drawing_swipe_cooldown_until:
+            # Swipe gating used to require self._drawing_tool == "hover",
+            # which meant a swipe right after the user lifted their pen
+            # was silently ignored: the draw-pose grace window
+            # (~0.40 s) keeps the tool sticky on "draw" until grace
+            # expires, so dynamic_label=swipe_right would arrive while
+            # tool was still "draw" and skip the handler. The cooldown
+            # below already prevents repeated swipes from firing within
+            # 1.2 s, and the dynamic_label classifier only emits
+            # swipe_left/right on real swipe motion (much larger than
+            # any drawing stroke), so we trust the dynamic_label
+            # decision regardless of current tool. Commit any in-flight
+            # stroke and cancel grace so the swipe motion doesn't get
+            # reinterpreted as draw/erase frames during its arc.
+            if (
+                hand_handedness == "Right"
+                and hand_reading is not None
+                and now >= self._drawing_swipe_cooldown_until
+            ):
                 dynamic_label = str(getattr(prediction, "dynamic_label", "neutral") or "neutral")
                 if dynamic_label in {"swipe_left", "swipe_right"}:
+                    if (
+                        self._drawing_render_target == "camera"
+                        and self._camera_draw_active_stroke_points
+                    ):
+                        self._commit_camera_draw_stroke()
+                    self._camera_draw_last_point = None
+                    self._drawing_draw_grace_until = 0.0
+                    self._drawing_erase_grace_until = 0.0
+                    self._drawing_draw_active_streak = 0
                     if self._perform_drawing_swipe_action(dynamic_label):
                         self._drawing_swipe_cooldown_until = now + 1.2
                     self._chrome_control_text = self._drawing_control_text
