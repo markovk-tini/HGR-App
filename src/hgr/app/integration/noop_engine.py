@@ -721,6 +721,14 @@ class GestureWorker(QObject):
         self._drawing_draw_grace_until = 0.0
         self._drawing_erase_grace_until = 0.0
         self._drawing_thumb_open_streak = 0
+        # Anti-misfire: a new stroke only starts after 2 consecutive
+        # draw-pose frames. Single-frame jitter (e.g. dropping the
+        # hand from an open position briefly reads as draw pose for
+        # one frame) doesn't extend grace and so doesn't paint a
+        # stray dot. An already-active stroke (already in grace
+        # window) ignores this counter and extends per-frame as
+        # normal so tilt/rotation wobble doesn't break the stroke.
+        self._drawing_draw_active_streak = 0
         self._drawing_wheel_candidate = "neutral"
         self._drawing_wheel_candidate_since = 0.0
         self._drawing_wheel_visible = False
@@ -1392,23 +1400,53 @@ class GestureWorker(QObject):
             return
         erase_active = self._drawing_erase_pose_active(prediction, hand_reading)
         draw_active = self._drawing_draw_pose_active(prediction, hand_reading)
-        if erase_active:
-            self._drawing_erase_grace_until = now + 0.25
-        if draw_active:
-            self._drawing_draw_grace_until = now + 0.25
 
-        # Fast-stop: two consecutive frames of a decisively open thumb cancel the
-        # draw/erase grace so the pen lifts immediately when the user opens their
-        # thumb. The streak (not a single-frame check) keeps rotation wobble —
-        # where the thumb briefly reads as open or partially curled — from ending
-        # a stroke early.
+        # Track sustained draw-pose intent. Single-frame draw_active
+        # blips (e.g. dropping an open hand briefly reads as draw
+        # pose for one frame as the wrist swings down) increment
+        # the counter to 1 only — and we require 2 to actually
+        # start a new stroke. Once the user is mid-stroke (grace
+        # window is active) we extend per-frame as before so tilt
+        # / rotation wobble doesn't break the stroke.
+        if draw_active:
+            self._drawing_draw_active_streak += 1
+        else:
+            self._drawing_draw_active_streak = 0
+
+        if erase_active:
+            # Erase grace: 0.40 s (was 0.25). The longer window
+            # gives more tolerance for tilt and brief misreads
+            # without losing the erase pose.
+            self._drawing_erase_grace_until = now + 0.40
+        already_drawing = now < self._drawing_draw_grace_until
+        if draw_active and (already_drawing or self._drawing_draw_active_streak >= 2):
+            # Either continuing an active stroke (already in grace)
+            # or sustained draw pose for >=2 frames (new stroke) —
+            # both extend grace by 0.40 s. Anti-misfire: a single
+            # frame draw_active blip never extends grace, so a
+            # passing hand-drop can't start an unintended stroke.
+            self._drawing_draw_grace_until = now + 0.40
+
+        # Fast-stop: open the thumb and the pen lifts. The previous
+        # implementation required state == "fully_open" AND openness
+        # >= 0.88 AND `not draw_active`, which collectively meant
+        # the user had to also extend their other fingers (so the
+        # hand stopped reading as draw_pose) before the open-thumb
+        # streak could even start counting. That's why the user had
+        # to "open my full hand" to lift the pen.
+        #
+        # New behaviour: detect a decisively open thumb (state in
+        # {fully_open, partially_curled} AND openness >= 0.78)
+        # WITHOUT gating on draw_active. So thumb-only opening is
+        # now sufficient. Streak still =2 frames so a brief
+        # rotation-induced thumb misread doesn't cancel a stroke.
         thumb = hand_reading.fingers.get("thumb")
-        thumb_decisive_open = (
+        thumb_open_now = (
             thumb is not None
-            and getattr(thumb, "state", None) == "fully_open"
-            and float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.88
+            and getattr(thumb, "state", None) in {"fully_open", "partially_curled"}
+            and float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.78
         )
-        if thumb_decisive_open and not draw_active and not erase_active:
+        if thumb_open_now:
             self._drawing_thumb_open_streak += 1
         else:
             self._drawing_thumb_open_streak = 0
@@ -1417,6 +1455,9 @@ class GestureWorker(QObject):
                 self._commit_camera_draw_stroke()
             self._drawing_draw_grace_until = 0.0
             self._drawing_erase_grace_until = 0.0
+            # Reset the draw-pose streak too so re-acquiring the
+            # pen requires the same 2-frame anti-misfire start.
+            self._drawing_draw_active_streak = 0
 
         if erase_active or now < self._drawing_erase_grace_until:
             self._drawing_tool = "erase"
