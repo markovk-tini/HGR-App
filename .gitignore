@@ -60,6 +60,21 @@ whisper.cpp/
 whisper_bundle/
 llama.cpp/
 
+# ONNX conversion reference material — not used at runtime. Holds
+# the original MediaPipe TFLite weights + OpenCV Zoo reference
+# scripts that were adapted into
+# src/hgr/gesture/tracking/onnx_runtime.py. The shipping .onnx
+# files in assets/models/ come from OpenCV Zoo
+# (https://github.com/opencv/opencv_zoo, BSD-3-Clause), NOT from a
+# local conversion of these TFLite weights — so the directory is
+# pure reference / experimentation. Kept out of the repo to avoid
+# carrying ~7.6 MB of binaries; re-fetch from:
+#   - MediaPipe hand assets:
+#     https://storage.googleapis.com/mediapipe-models/hand_landmarker/
+#   - OpenCV Zoo reference Python:
+#     https://github.com/opencv/opencv_zoo/tree/main/models/handpose_estimation_mediapipe
+tools/onnx_conversion/
+
 # Agent / tooling state
 .agents/
 .claude/
