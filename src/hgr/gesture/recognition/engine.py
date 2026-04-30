@@ -103,30 +103,32 @@ class GestureRecognitionEngine:
     def _volume_pose_ready(self, hand_reading: HandReading) -> bool:
         fingers = hand_reading.fingers
         spread = hand_reading.spreads["index_middle"]
-        # Strict gate. Real volume pose has the index + middle
-        # fingers TOUCHING or near-touching (tip-to-tip), which
-        # produces a tight spread.distance ratio (~0.30-0.38) and
-        # zero apart_strength. The user reported V-signs still
-        # tripping the previous 0.44 cap — that's because at
-        # certain hand angles a peace sign with ~1cm gap can
-        # measure 0.40-0.44, sneaking through. Three layered
-        # checks now:
+        # Direct fingertip-to-fingertip distance check is the
+        # decisive signal here. spread.distance is a blend
+        # (0.52*tip + 0.24*dip + 0.14*pip + 0.10*skew); PIP joints
+        # (landmarks 6, 10) sit anatomically close at the base of
+        # the V regardless of how wide the user spreads their
+        # fingers, so the blend averages down to ~0.35 even for a
+        # genuinely wide V — which sneaks through any sane
+        # blended-ratio threshold. Comparing landmark 8 (index
+        # tip) and landmark 12 (middle tip) directly, normalized
+        # by palm scale, is what the eye actually evaluates.
         #
-        #   - state must be the explicit 'together' classifier
-        #     decision
-        #   - distance ratio <= 0.38 (tighter than 0.44; only
-        #     real touching/near-touching passes)
-        #   - apart_strength <= 0.05 (zero-tolerance: the spread
-        #     classifier must see no apart signal at all; even
-        #     0.10 of apart-strength would mean fingers are
-        #     actively pulling away)
-        #
-        # Together, these reject any visually-spread V-sign while
-        # admitting normal volume_pose execution.
+        # Threshold: tips must be within 0.22 * palm_scale to
+        # count as "together". Real volume_pose (fingers
+        # touching) measures ~0.05-0.18; even ~1 cm gap pushes
+        # past 0.22 and rejects.
+        try:
+            lm = hand_reading.landmarks
+            palm_scale = max(float(hand_reading.palm.scale), 1e-6)
+            tip_dx = float(lm[8][0]) - float(lm[12][0])
+            tip_dy = float(lm[8][1]) - float(lm[12][1])
+            tip_distance_ratio = (tip_dx * tip_dx + tip_dy * tip_dy) ** 0.5 / palm_scale
+        except Exception:
+            tip_distance_ratio = 1.0
         index_middle_close = (
             spread.state == "together"
-            and spread.distance <= 0.38
-            and spread.apart_strength <= 0.05
+            and tip_distance_ratio <= 0.22
         )
         return (
             index_middle_close
