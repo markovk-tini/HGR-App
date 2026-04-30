@@ -3838,6 +3838,18 @@ class GestureWorker(QObject):
                             if debug.camera_anchor_position is not None
                             else None
                         ),
+                        # Virtual cursor position in [0, 1] across
+                        # the full virtual desktop. Lets the live
+                        # view widget render a moving dot inside the
+                        # red box so the user sees the cursor
+                        # responding to their hand even when their
+                        # eyes are on the camera feed instead of the
+                        # actual mouse pointer.
+                        "cursor": (
+                            tuple(float(v) for v in debug.cursor_position)
+                            if debug.cursor_position is not None
+                            else None
+                        ),
                     }
             if mouse_overlay is not None:
                 payload = {"hands": hands_info, "mouse_overlay": mouse_overlay}

@@ -11,6 +11,7 @@ def draw_mouse_control_box_overlay(
     *,
     debug_state: MouseDebugState,
     mode_enabled: bool,
+    mouse_controller=None,
 ) -> None:
     if not mode_enabled or debug_state.camera_control_bounds is None:
         return
@@ -31,6 +32,77 @@ def draw_mouse_control_box_overlay(
     label = "Mouse control area"
     label_origin = (x1 + 10, y1 - 10 if y1 >= 28 else y1 + 22)
     cv2.putText(frame, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.72, (28, 36, 255), 2, cv2.LINE_AA)
+
+    # Optional monitor layout + virtual cursor inside the box. When
+    # the user has multiple monitors, drawing each one proportionally
+    # gives a 1:1 spatial mental model: hand left -> cursor left
+    # in box -> actual mouse left across the desktop.
+    drew_monitor_map = False
+    if mouse_controller is not None:
+        try:
+            virtual_bounds = mouse_controller.virtual_bounds()
+        except Exception:
+            virtual_bounds = None
+        if virtual_bounds is not None:
+            v_left, v_top, v_w, v_h = virtual_bounds
+            v_w = max(1.0, float(v_w))
+            v_h = max(1.0, float(v_h))
+            box_w = max(1, x2 - x1)
+            box_h = max(1, y2 - y1)
+            inset = 12
+            inner_w = max(40, box_w - inset * 2)
+            inner_h = max(40, box_h - inset * 2)
+            scale = min(inner_w / v_w, inner_h / v_h)
+            map_w = int(round(v_w * scale))
+            map_h = int(round(v_h * scale))
+            map_x = x1 + (box_w - map_w) // 2
+            map_y = y1 + (box_h - map_h) // 2
+            try:
+                from PySide6.QtGui import QGuiApplication
+                screens = QGuiApplication.screens()
+                primary = QGuiApplication.primaryScreen()
+            except Exception:
+                screens = []
+                primary = None
+            if screens:
+                # Faint backdrop so the monitor outlines read as
+                # one cohesive map rather than disconnected boxes.
+                backdrop = frame.copy()
+                cv2.rectangle(backdrop, (map_x, map_y), (map_x + map_w, map_y + map_h), (8, 14, 26), thickness=-1)
+                cv2.addWeighted(backdrop, 0.55, frame, 0.45, 0.0, frame)
+                for screen in screens:
+                    geo = screen.geometry()
+                    sx1 = map_x + int(round((geo.x() - v_left) * scale))
+                    sy1 = map_y + int(round((geo.y() - v_top) * scale))
+                    sx2 = map_x + int(round((geo.x() + geo.width() - v_left) * scale))
+                    sy2 = map_y + int(round((geo.y() + geo.height() - v_top) * scale))
+                    fill = (58, 122, 96) if screen == primary else (39, 72, 108)
+                    cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), fill, thickness=-1)
+                    cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), (228, 236, 243), thickness=1)
+                drew_monitor_map = True
+                # Virtual cursor dot at the actual mouse position
+                # mapped into this monitor layout.
+                try:
+                    cursor_pos = mouse_controller.current_position()
+                except Exception:
+                    cursor_pos = None
+                if cursor_pos is not None:
+                    cx = map_x + int(round((cursor_pos[0] - v_left) * scale))
+                    cy = map_y + int(round((cursor_pos[1] - v_top) * scale))
+                    cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+                    cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
+
+    if not drew_monitor_map and debug_state.cursor_position is not None:
+        # Single-monitor (or no controller passed): map the
+        # normalized cursor_position (in [0, 1] of full virtual
+        # desktop) directly into the box. Still gives the user
+        # a "the cursor moves with my hand" affordance.
+        box_w = max(1, x2 - x1)
+        box_h = max(1, y2 - y1)
+        cx = x1 + int(round(float(debug_state.cursor_position[0]) * box_w))
+        cy = y1 + int(round(float(debug_state.cursor_position[1]) * box_h))
+        cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
 
     if debug_state.camera_anchor_position is not None:
         anchor_x = int(round(debug_state.camera_anchor_position[0] * frame_w))

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from ...config.app_config import AppConfig
 from ...debug.chrome_controller import ChromeController
 from ...debug.mouse_gesture import MouseGestureTracker
+from ...debug.mouse_overlay import draw_mouse_control_box_overlay
 from ...debug.voice_command_listener import VoiceCommandListener
 from ...gesture.recognition.engine import GestureRecognitionEngine
 from ...gesture.rendering.overlay import HAND_CONNECTIONS
@@ -1253,6 +1254,17 @@ class TutorialWindow(QDialog):
             self._draw_demo_hand(frame, main_center, "wheel_pose", scale=0.96, color=white)
         elif step_key == "mouse_mode":
             self._draw_demo_hand(frame, main_center, "left_three", scale=0.96, color=white)
+            # Mirror the regular-app mouse overlay during this step
+            # so the user sees the same red box they'd see when
+            # actually running the app, plus the virtual cursor
+            # mapped into the monitor layout.
+            if self._mouse_tracker.mode_enabled:
+                draw_mouse_control_box_overlay(
+                    frame,
+                    debug_state=self._mouse_tracker.debug_state,
+                    mode_enabled=True,
+                    mouse_controller=getattr(self, "_mouse_controller", None),
+                )
         elif step_key == "voice_command":
             self._draw_demo_hand(frame, main_center, "one", scale=1.00, color=white)
             cv2.putText(frame, "Voice", (int(width * 0.46), int(height * 0.50)), cv2.FONT_HERSHEY_SIMPLEX, 0.88, accent, 2, cv2.LINE_AA)

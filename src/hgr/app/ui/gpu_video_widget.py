@@ -34,7 +34,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QGuiApplication, QImage, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 # MediaPipe's 21-landmark hand connections (pairs of indices).
@@ -171,12 +171,18 @@ class GpuVideoWidget(QWidget):
             if isinstance(mouse_overlay_raw, dict):
                 bounds = mouse_overlay_raw.get("bounds")
                 anchor = mouse_overlay_raw.get("anchor")
+                cursor = mouse_overlay_raw.get("cursor")
                 if bounds is not None and len(bounds) == 4:
                     self._mouse_overlay = {
                         "bounds": tuple(float(v) for v in bounds),
                         "anchor": (
                             tuple(float(v) for v in anchor)
                             if anchor is not None and len(anchor) == 2
+                            else None
+                        ),
+                        "cursor": (
+                            tuple(float(v) for v in cursor)
+                            if cursor is not None and len(cursor) == 2
                             else None
                         ),
                     }
@@ -340,6 +346,66 @@ class GpuVideoWidget(QWidget):
                 painter.drawEllipse(QPointF(ax, ay), 7.0, 7.0)
                 painter.drawLine(QPointF(ax - 8, ay), QPointF(ax + 8, ay))
                 painter.drawLine(QPointF(ax, ay - 8), QPointF(ax, ay + 8))
+            # Monitor layout + virtual cursor inside the red box.
+            # When the user has multiple monitors, drawing each
+            # one proportionally inside the box gives a 1:1
+            # spatial mental model — hand left -> cursor in this
+            # monitor, hand right -> cursor in that monitor — so
+            # they can navigate the whole virtual desktop without
+            # taking their eyes off the camera feed.
+            cursor = self._mouse_overlay.get("cursor")
+            screens = QGuiApplication.screens()
+            map_origin = None  # (mx, my, scale, v_left, v_top)
+            if screens:
+                v_left = min(s.geometry().x() for s in screens)
+                v_top = min(s.geometry().y() for s in screens)
+                v_right = max(s.geometry().x() + s.geometry().width() for s in screens)
+                v_bottom = max(s.geometry().y() + s.geometry().height() for s in screens)
+                v_w = max(1, v_right - v_left)
+                v_h = max(1, v_bottom - v_top)
+                inset = 12.0
+                inner_w = max(40.0, box_rect.width() - 2 * inset)
+                inner_h = max(40.0, box_rect.height() - 2 * inset)
+                scale = min(inner_w / float(v_w), inner_h / float(v_h))
+                map_w = float(v_w) * scale
+                map_h = float(v_h) * scale
+                mx = box_rect.x() + (box_rect.width() - map_w) / 2.0
+                my = box_rect.y() + (box_rect.height() - map_h) / 2.0
+                # Faint backdrop so the monitor outlines read as
+                # one cohesive map, even on a busy camera frame.
+                painter.fillRect(QRectF(mx, my, map_w, map_h), QColor(8, 14, 26, 140))
+                primary = QGuiApplication.primaryScreen()
+                for screen in screens:
+                    geo = screen.geometry()
+                    sx = mx + (geo.x() - v_left) * scale
+                    sy = my + (geo.y() - v_top) * scale
+                    sw = geo.width() * scale
+                    sh = geo.height() * scale
+                    fill = QColor(58, 122, 96, 200) if screen == primary else QColor(39, 72, 108, 200)
+                    painter.fillRect(QRectF(sx, sy, sw, sh), fill)
+                    painter.setPen(QPen(QColor(228, 236, 243, 220), 1))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(QRectF(sx, sy, sw, sh))
+                map_origin = (mx, my, scale, v_left, v_top, v_w, v_h)
+            if cursor is not None:
+                if map_origin is not None:
+                    mx, my, scale, v_left, v_top, v_w, v_h = map_origin
+                    # cursor is normalized [0, 1] across the full
+                    # virtual desktop. Project into the monitor
+                    # layout coordinate space.
+                    cx = mx + cursor[0] * float(v_w) * scale
+                    cy = my + cursor[1] * float(v_h) * scale
+                else:
+                    cx = box_rect.x() + cursor[0] * box_rect.width()
+                    cy = box_rect.y() + cursor[1] * box_rect.height()
+                # Two-layer dot: white core for visibility on any
+                # background, mint ring for the Touchless theme.
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(QColor(255, 255, 255, 250)))
+                painter.drawEllipse(QPointF(cx, cy), 6.0, 6.0)
+                painter.setPen(QPen(QColor(36, 220, 184, 240), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(QPointF(cx, cy), 10.0, 10.0)
 
         if not self._hands_info:
             return
