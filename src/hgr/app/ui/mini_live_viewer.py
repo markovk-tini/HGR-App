@@ -247,11 +247,22 @@ class MiniLiveViewer(QWidget):
         # Fast display path — paints the camera frame at camera fps,
         # before the engine has even started processing it.
         # `capture_ts` is the monotonic time the reader thread
-        # decoded this frame; mini viewer doesn't display it, but
-        # we accept the arg so the signal connection lines up with
-        # the live view's signature.
+        # decoded this frame.
         if not self.isVisible() or frame is None:
             return
+        # Drop stale signals queued while the main thread was
+        # blocked. Under GPU contention (e.g., Spotify Chromium
+        # compositor competing for the GPU with DirectML
+        # inference) Qt's main-thread paint slows; raw_frame_ready
+        # emits at camera fps but the slot can't keep up. Without
+        # this drop, the recovery plays back several seconds of
+        # stale frames in order, looking like a 3 s display lag.
+        # 0.15 s = ~5 frames @ 30 fps; anything older has already
+        # been superseded by a newer frame in the queue.
+        if capture_ts > 0.0:
+            import time as _time
+            if (_time.monotonic() - capture_ts) > 0.15:
+                return
         self._last_frame = frame
         self._render_frame()
 
