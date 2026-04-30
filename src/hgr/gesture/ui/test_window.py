@@ -55,6 +55,15 @@ class SpotifyWheelOverlay(QWidget):
         self._selection_progress = 0.0
         self._status_text = "Gesture Wheel"
         self._cursor_offset: tuple[float, float] | None = None
+        # Cache for the static layer (slices in neutral state, rings,
+        # center disc, title). set_wheel() runs every 15 ms tick so
+        # the per-frame paint cost dominates if we re-render text +
+        # 8 sector paths every time. Static slices change only when
+        # the wheel variant or theme changes — cache them in a
+        # pixmap; per-frame paint just blits + draws the active
+        # slice overlay, selection arc, cursor, and subtitle.
+        self._static_pixmap: QPixmap | None = None
+        self._static_signature: tuple = ()
         self.setWindowFlags(
             Qt.Tool
             | Qt.FramelessWindowHint
@@ -84,6 +93,10 @@ class SpotifyWheelOverlay(QWidget):
 
     def apply_theme(self, config: AppConfig) -> None:
         self.config = config
+        # Theme colors are baked into the static pixmap — invalidate
+        # so the next paintEvent regenerates it.
+        self._static_pixmap = None
+        self._static_signature = ()
         self.update()
 
     def set_wheel(
@@ -212,6 +225,135 @@ class SpotifyWheelOverlay(QWidget):
         font.setBold(True)
         return font
 
+    def _wheel_geometry(self) -> tuple[float, float, float, float, float, float, float, float]:
+        rect = self.rect()
+        cx = rect.center().x()
+        cy = rect.center().y()
+        outer_radius = min(rect.width(), rect.height()) * 0.40
+        inner_radius = outer_radius * 0.50
+        center_radius = inner_radius * 0.78
+        slice_span = 360.0 / max(1, len(self._items))
+        half_slice = slice_span / 2.0
+        label_radius = inner_radius + (outer_radius - inner_radius) * 0.57
+        label_box_w = max(128.0, min(168.0, 2.0 * label_radius * math.sin(math.radians(half_slice)) * 1.18))
+        return cx, cy, outer_radius, inner_radius, center_radius, half_slice, label_radius, label_box_w
+
+    def _paint_slice(
+        self,
+        painter: QPainter,
+        *,
+        target_angle: float,
+        label: str,
+        active: bool,
+        cx: float,
+        cy: float,
+        inner_radius: float,
+        outer_radius: float,
+        half_slice: float,
+        label_radius: float,
+        label_box_w: float,
+        label_box_h: float,
+        outline: QColor,
+        glow_slice: QColor,
+        base_slice: QColor,
+    ) -> None:
+        start_deg = target_angle - half_slice
+        end_deg = target_angle + half_slice
+        path = self._sector_path(cx, cy, inner_radius, outer_radius, start_deg, end_deg)
+        if active:
+            # Active slice is drawn on top of the cached static layer
+            # (which painted this slice neutral). Source composition
+            # for the fill replaces those pixels exactly so no
+            # alpha-blending of base under glow shows through.
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(glow_slice))
+            painter.drawPath(path)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            painter.setPen(QPen(outline, 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+            painter.setPen(QPen(QColor(255, 255, 255, 34), 1))
+            painter.drawPath(path)
+        else:
+            painter.setPen(QPen(QColor(outline.red(), outline.green(), outline.blue(), 120), 2))
+            painter.setBrush(QBrush(base_slice))
+            painter.drawPath(path)
+            painter.setPen(QPen(QColor(255, 255, 255, 20), 1))
+            painter.drawPath(path)
+
+        mid_angle = math.radians(target_angle)
+        label_x = cx + math.cos(mid_angle) * label_radius
+        label_y = cy - math.sin(mid_angle) * label_radius
+        label_rect = QRectF(label_x - label_box_w / 2.0, label_y - label_box_h / 2.0, label_box_w, label_box_h)
+        painter.setPen(QPen(QColor(8, 12, 18) if active else outline))
+        painter.setFont(self._label_font(label, active=active))
+        painter.drawText(label_rect, Qt.AlignCenter | Qt.TextWordWrap, self._label_lines(label))
+
+    def _compute_static_signature(self) -> tuple:
+        return (
+            tuple((str(k), str(l), float(a)) for k, l, a in self._items),
+            str(self.config.accent_color or ""),
+            str(self.config.surface_color or ""),
+            int(self.width()),
+            int(self.height()),
+        )
+
+    def _build_static_pixmap(self) -> QPixmap | None:
+        if not self._items or self.width() <= 0 or self.height() <= 0:
+            return None
+        pm = QPixmap(self.size())
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            cx, cy, outer_radius, inner_radius, center_radius, half_slice, label_radius, label_box_w = self._wheel_geometry()
+            label_box_h = 88.0
+            outline = QColor(235, 244, 255, 215)
+            accent = self._hex_to_qcolor(self.config.accent_color, "#1DE9B6")
+            surface = self._hex_to_qcolor(self.config.surface_color, "#0F172A")
+            base_slice = QColor(24, 44, 78, 205)
+            glow_slice = QColor(accent)
+            glow_slice.setAlpha(235)
+
+            for _key, label, target_angle in self._items:
+                self._paint_slice(
+                    painter,
+                    target_angle=target_angle,
+                    label=label,
+                    active=False,
+                    cx=cx, cy=cy,
+                    inner_radius=inner_radius, outer_radius=outer_radius,
+                    half_slice=half_slice,
+                    label_radius=label_radius,
+                    label_box_w=label_box_w, label_box_h=label_box_h,
+                    outline=outline, glow_slice=glow_slice, base_slice=base_slice,
+                )
+
+            painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 235), 4))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QRectF(cx - outer_radius, cy - outer_radius, 2 * outer_radius, 2 * outer_radius))
+
+            painter.setPen(QPen(QColor(255, 255, 255, 88), 2))
+            painter.drawEllipse(QRectF(cx - inner_radius, cy - inner_radius, 2 * inner_radius, 2 * inner_radius))
+
+            painter.setPen(QPen(QColor(255, 255, 255, 105), 2))
+            painter.setBrush(QBrush(surface))
+            painter.drawEllipse(QRectF(cx - center_radius, cy - center_radius, 2 * center_radius, 2 * center_radius))
+
+            painter.setPen(QPen(outline))
+            title_font = QFont("Segoe UI", 14)
+            title_font.setBold(True)
+            painter.setFont(title_font)
+            painter.drawText(
+                QRectF(cx - center_radius + 6, cy - 42, 2 * center_radius - 12, 44),
+                Qt.AlignCenter,
+                "Gesture Wheel",
+            )
+        finally:
+            painter.end()
+        return pm
+
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._items:
             return
@@ -222,72 +364,58 @@ class SpotifyWheelOverlay(QWidget):
         painter.fillRect(self.rect(), Qt.transparent)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
-        rect = self.rect()
-        cx = rect.center().x()
-        cy = rect.center().y()
+        signature = self._compute_static_signature()
+        if self._static_pixmap is None or signature != self._static_signature:
+            self._static_pixmap = self._build_static_pixmap()
+            self._static_signature = signature
+        if self._static_pixmap is None:
+            return
+        painter.drawPixmap(0, 0, self._static_pixmap)
 
-        outer_radius = min(rect.width(), rect.height()) * 0.40
-        inner_radius = outer_radius * 0.50
-        center_radius = inner_radius * 0.78
-
+        cx, cy, outer_radius, inner_radius, center_radius, half_slice, label_radius, label_box_w = self._wheel_geometry()
+        label_box_h = 88.0
         outline = QColor(235, 244, 255, 215)
         accent = self._hex_to_qcolor(self.config.accent_color, "#1DE9B6")
-        surface = self._hex_to_qcolor(self.config.surface_color, "#0F172A")
-        base_slice = QColor(24, 44, 78, 205)
         glow_slice = QColor(accent)
         glow_slice.setAlpha(235)
-        muted_slice = QColor(15, 26, 42, 210)
+        base_slice = QColor(24, 44, 78, 205)
 
-        slice_span = 360.0 / max(1, len(self._items))
-        half_slice = slice_span / 2.0
-        label_radius = inner_radius + (outer_radius - inner_radius) * 0.57
-        label_box_w = max(128.0, min(168.0, 2.0 * label_radius * math.sin(math.radians(half_slice)) * 1.18))
-        label_box_h = 88.0
+        if self._selected_key is not None:
+            for key, label, target_angle in self._items:
+                if key != self._selected_key:
+                    continue
+                self._paint_slice(
+                    painter,
+                    target_angle=target_angle,
+                    label=label,
+                    active=True,
+                    cx=cx, cy=cy,
+                    inner_radius=inner_radius, outer_radius=outer_radius,
+                    half_slice=half_slice,
+                    label_radius=label_radius,
+                    label_box_w=label_box_w, label_box_h=label_box_h,
+                    outline=outline, glow_slice=glow_slice, base_slice=base_slice,
+                )
+                break
+            # Redraw the outer + inner rings on top so the active
+            # slice's outline doesn't overlap them. In the original
+            # un-cached paint path, rings were drawn after every
+            # slice so they masked all slice edges uniformly — we
+            # have to replicate that layering here when we redraw
+            # an active slice over the cached static layer.
+            painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 235), 4))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QRectF(cx - outer_radius, cy - outer_radius, 2 * outer_radius, 2 * outer_radius))
+            painter.setPen(QPen(QColor(255, 255, 255, 88), 2))
+            painter.drawEllipse(QRectF(cx - inner_radius, cy - inner_radius, 2 * inner_radius, 2 * inner_radius))
 
-        for key, label, target_angle in self._items:
-            start_deg = target_angle - half_slice
-            end_deg = target_angle + half_slice
-            active = key == self._selected_key
-
-            path = self._sector_path(cx, cy, inner_radius, outer_radius, start_deg, end_deg)
-            painter.setPen(QPen(outline if active else QColor(outline.red(), outline.green(), outline.blue(), 120), 2))
-            painter.setBrush(QBrush(glow_slice if active else base_slice))
-            painter.drawPath(path)
-
-            painter.setPen(QPen(QColor(255, 255, 255, 34 if active else 20), 1))
-            painter.drawPath(path)
-
-            mid_angle = math.radians(target_angle)
-            label_x = cx + math.cos(mid_angle) * label_radius
-            label_y = cy - math.sin(mid_angle) * label_radius
-
-            label_rect = QRectF(label_x - label_box_w / 2.0, label_y - label_box_h / 2.0, label_box_w, label_box_h)
-            painter.setPen(QPen(QColor(8, 12, 18) if active else outline))
-            painter.setFont(self._label_font(label, active=active))
-            painter.drawText(label_rect, Qt.AlignCenter | Qt.TextWordWrap, self._label_lines(label))
-
-        # Outer ring
-        painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 235), 4))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(QRectF(cx - outer_radius, cy - outer_radius, 2 * outer_radius, 2 * outer_radius))
-
-        # Inner ring
-        painter.setPen(QPen(QColor(255, 255, 255, 88), 2))
-        painter.drawEllipse(QRectF(cx - inner_radius, cy - inner_radius, 2 * inner_radius, 2 * inner_radius))
-
-        # Center disc
-        painter.setPen(QPen(QColor(255, 255, 255, 105), 2))
-        painter.setBrush(QBrush(surface))
-        painter.drawEllipse(QRectF(cx - center_radius, cy - center_radius, 2 * center_radius, 2 * center_radius))
-
-        # Selection progress arc
         if self._selected_key is not None and self._selection_progress > 0.0:
             progress_radius = center_radius + 16
             painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 245), 6))
+            painter.setBrush(Qt.NoBrush)
             progress_rect = QRectF(cx - progress_radius, cy - progress_radius, 2 * progress_radius, 2 * progress_radius)
             painter.drawArc(progress_rect, 90 * 16, int(-360 * 16 * self._selection_progress))
 
-        # Cursor
         if self._cursor_offset is not None:
             dx, dy = self._cursor_offset
             cursor_radius = min(outer_radius * 0.78, math.hypot(dx, dy) * outer_radius * 0.85)
@@ -300,17 +428,6 @@ class SpotifyWheelOverlay(QWidget):
             painter.setPen(QPen(QColor(255, 255, 255, 225), 1))
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QRectF(cursor_x - 4, cursor_y - 4, 8, 8))
-
-        # Center text
-        painter.setPen(QPen(outline))
-        title_font = QFont("Segoe UI", 14)
-        title_font.setBold(True)
-        painter.setFont(title_font)
-        painter.drawText(
-            QRectF(cx - center_radius + 6, cy - 42, 2 * center_radius - 12, 44),
-            Qt.AlignCenter,
-            "Gesture Wheel",
-        )
 
         subtitle_font = QFont("Segoe UI", 10)
         subtitle_font.setBold(False)
