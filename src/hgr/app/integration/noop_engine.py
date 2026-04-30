@@ -1964,6 +1964,75 @@ class GestureWorker(QObject):
             )
         return clones
 
+    @staticmethod
+    def _bezier_segment_steps(p0: tuple[int, int], p2: tuple[int, int]) -> int:
+        # Sample density follows the chord length so short segments
+        # cost ~8 samples and long segments cap at ~24. Tighter than
+        # that wastes cycles; looser leaves visible facets at high
+        # thickness.
+        dx = p2[0] - p0[0]
+        dy = p2[1] - p0[1]
+        rough = (dx * dx + dy * dy) ** 0.5
+        return max(8, min(24, int(rough / 4.0) + 8))
+
+    @classmethod
+    def _quad_bezier_polyline(
+        cls,
+        p_start: tuple[int, int],
+        p_ctrl: tuple[int, int],
+        p_end: tuple[int, int],
+    ) -> "np.ndarray":
+        steps = cls._bezier_segment_steps(p_start, p_end)
+        pts = np.empty((steps + 1, 2), dtype=np.int32)
+        for i in range(steps + 1):
+            t = i / steps
+            u = 1.0 - t
+            x = u * u * p_start[0] + 2.0 * u * t * p_ctrl[0] + t * t * p_end[0]
+            y = u * u * p_start[1] + 2.0 * u * t * p_ctrl[1] + t * t * p_end[1]
+            pts[i, 0] = int(round(x))
+            pts[i, 1] = int(round(y))
+        return pts
+
+    @classmethod
+    def _draw_smooth_polyline_canvas(
+        cls,
+        canvas: "np.ndarray",
+        points: list[tuple[float, float]],
+        color_bgra: tuple[int, int, int, int],
+        thickness: int,
+    ) -> None:
+        # Quadratic Bezier through midpoints (Procreate-style smoothing):
+        # each raw sample becomes a control point, the curve passes
+        # through the midpoints between consecutive samples. Renders
+        # the same path that incremental live drawing builds, so
+        # canvas state stays consistent across undo/erase rerenders.
+        n = len(points)
+        if n < 2:
+            return
+        rounded = [
+            (int(round(float(x))), int(round(float(y)))) for x, y in points
+        ]
+        if n == 2:
+            cv2.line(canvas, rounded[0], rounded[1], color_bgra, thickness, cv2.LINE_AA)
+            return
+        mid01 = (
+            (rounded[0][0] + rounded[1][0]) // 2,
+            (rounded[0][1] + rounded[1][1]) // 2,
+        )
+        cv2.line(canvas, rounded[0], mid01, color_bgra, thickness, cv2.LINE_AA)
+        for i in range(1, n - 1):
+            pa = rounded[i - 1]
+            pb = rounded[i]
+            pc = rounded[i + 1]
+            start = ((pa[0] + pb[0]) // 2, (pa[1] + pb[1]) // 2)
+            end = ((pb[0] + pc[0]) // 2, (pb[1] + pc[1]) // 2)
+            arr = cls._quad_bezier_polyline(start, pb, end)
+            cv2.polylines(canvas, [arr], False, color_bgra, thickness, cv2.LINE_AA)
+        last = rounded[-1]
+        prev = rounded[-2]
+        mid_last = ((prev[0] + last[0]) // 2, (prev[1] + last[1]) // 2)
+        cv2.line(canvas, mid_last, last, color_bgra, thickness, cv2.LINE_AA)
+
     def _camera_draw_rerender_from_strokes(self) -> None:
         if self._camera_draw_canvas is None:
             return
@@ -1974,15 +2043,12 @@ class GestureWorker(QObject):
                 continue
             color = tuple(int(v) for v in stroke.get("color", (255, 255, 255)))
             thickness = int(max(1, stroke.get("thickness", 2)))
-            for (x1, y1), (x2, y2) in zip(points, points[1:]):
-                cv2.line(
-                    self._camera_draw_canvas,
-                    (int(round(x1)), int(round(y1))),
-                    (int(round(x2)), int(round(y2))),
-                    (*color, 255),
-                    thickness,
-                    cv2.LINE_AA,
-                )
+            self._draw_smooth_polyline_canvas(
+                self._camera_draw_canvas,
+                points,
+                (*color, 255),
+                thickness,
+            )
 
     @staticmethod
     def _camera_point_to_segment_distance_sq(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
@@ -2064,13 +2130,38 @@ class GestureWorker(QObject):
         if not self._camera_draw_active_stroke_points:
             return
         points = list(self._camera_draw_active_stroke_points)
+        brush = tuple(int(v) for v in self._drawing_brush_bgr())
+        thickness = int(max(2, self._drawing_brush_thickness))
+        # Live drawing left the canvas ending at mid(P_{N-1}, P_N).
+        # Add the trailing stub mid -> P_N here so the canvas matches
+        # what _camera_draw_rerender_from_strokes would produce —
+        # otherwise an erase / undo pass would visibly nudge the
+        # stroke endpoint.
+        if (
+            self._camera_draw_canvas is not None
+            and len(points) >= 2
+        ):
+            (px1, py1), (px2, py2) = points[-2], points[-1]
+            mid = (
+                int(round((px1 + px2) / 2.0)),
+                int(round((py1 + py2) / 2.0)),
+            )
+            end = (int(round(px2)), int(round(py2)))
+            cv2.line(
+                self._camera_draw_canvas,
+                mid,
+                end,
+                (*brush, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
         if len(points) == 1:
             x, y = points[0]
             points.append((x + 0.01, y + 0.01))
         self._camera_draw_strokes.append(
             {
-                "color": tuple(int(v) for v in self._drawing_brush_bgr()),
-                "thickness": int(max(2, self._drawing_brush_thickness)),
+                "color": brush,
+                "thickness": thickness,
                 "points": points,
             }
         )
@@ -2257,10 +2348,45 @@ class GestureWorker(QObject):
         if self._drawing_tool == "draw":
             self._camera_draw_erasing = False
             if self._camera_draw_last_point is None:
+                # First sample of stroke — record only, no draw yet.
+                # The Bezier-through-midpoints scheme below needs at
+                # least two samples to produce its first segment.
                 self._camera_draw_push_history()
                 self._camera_draw_last_point = point
                 self._camera_draw_active_stroke_points = [(float(point[0]), float(point[1]))]
-            cv2.line(self._camera_draw_canvas, self._camera_draw_last_point, point, (*brush, 255), thickness, cv2.LINE_AA)
+                return
+            color_bgra = (*brush, 255)
+            p_prev = self._camera_draw_last_point
+            stroke_points = self._camera_draw_active_stroke_points
+            if len(stroke_points) < 2:
+                # Second sample — straight line from P_prev to
+                # mid(P_prev, P_new). Re-render produces the same
+                # leading stub so canvas matches across redraws.
+                mid = (
+                    (p_prev[0] + point[0]) // 2,
+                    (p_prev[1] + point[1]) // 2,
+                )
+                cv2.line(self._camera_draw_canvas, p_prev, mid, color_bgra, thickness, cv2.LINE_AA)
+            else:
+                # Third+ sample — quadratic Bezier from
+                # mid(P_prev_prev, P_prev) to mid(P_prev, P_new) with
+                # P_prev as the control point. This is the standard
+                # whiteboard-app smoothing: the curve passes through
+                # the midpoints, each raw sample acts as a control,
+                # and consecutive segments connect at their shared
+                # midpoint anchor with C1 continuity.
+                px, py = stroke_points[-2]
+                p_prev_prev = (int(round(px)), int(round(py)))
+                start = (
+                    (p_prev_prev[0] + p_prev[0]) // 2,
+                    (p_prev_prev[1] + p_prev[1]) // 2,
+                )
+                end = (
+                    (p_prev[0] + point[0]) // 2,
+                    (p_prev[1] + point[1]) // 2,
+                )
+                arr = self._quad_bezier_polyline(start, p_prev, end)
+                cv2.polylines(self._camera_draw_canvas, [arr], False, color_bgra, thickness, cv2.LINE_AA)
             self._camera_draw_active_stroke_points.append((float(point[0]), float(point[1])))
             self._camera_draw_last_point = point
             return
