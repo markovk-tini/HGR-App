@@ -45,25 +45,59 @@ class MiniLiveViewer(QWidget):
         self._topmost_watchdog.timeout.connect(self._reassert_topmost)
         self._topmost_watchdog.start()
 
-    def _reassert_topmost(self) -> None:
-        if not self.isVisible():
+    @staticmethod
+    def _pin_topmost_native(widget) -> None:
+        """Re-pin the widget as topmost via SetWindowPos. Unlike
+        native_overlay.apply_overlay (used by the translucent wheel
+        overlays), this DOES NOT add WS_EX_LAYERED / WS_EX_TOOLWINDOW
+        — those flags require layered-window APIs to draw and would
+        make a normal opaque widget like the mini viewer paint
+        invisibly. We just call SetWindowPos with HWND_TOPMOST +
+        SWP_NOMOVE / SWP_NOSIZE / SWP_NOACTIVATE so the window keeps
+        its current position/size and doesn't steal focus."""
+        import sys
+        if sys.platform != "win32":
             return
         try:
-            from .native_overlay import apply_overlay
-            apply_overlay(self)
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return
+        try:
+            hwnd = int(widget.winId())
+        except Exception:
+            return
+        if not hwnd:
+            return
+        HWND_TOPMOST = -1
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_NOACTIVATE = 0x0010
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                wintypes.HWND(hwnd),
+                ctypes.c_void_p(HWND_TOPMOST),
+                0, 0, 0, 0,
+                ctypes.c_uint(SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE),
+            )
         except Exception:
             pass
 
+    def _reassert_topmost(self) -> None:
+        if not self.isVisible():
+            return
+        self._pin_topmost_native(self)
+
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
-        # Re-raise + reapply topmost on every show. Qt sometimes
-        # drops the WindowStaysOnTopHint after hide/show cycles.
+        # Re-raise + re-pin topmost on every show. Qt sometimes drops
+        # the WindowStaysOnTopHint after hide/show cycles or when
+        # another window grabs focus aggressively.
         try:
             self.raise_()
-            from .native_overlay import apply_overlay
-            apply_overlay(self)
         except Exception:
             pass
+        self._pin_topmost_native(self)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
