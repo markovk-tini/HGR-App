@@ -108,12 +108,46 @@ class SpotifyWheelOverlay(QWidget):
         status_text: str,
         cursor_offset: tuple[float, float] | None = None,
     ) -> None:
+        new_progress = max(0.0, min(1.0, float(selection_progress)))
+        # Skip the update() when no visible change occurred. The
+        # caller drives this method every engine tick (~30 Hz). When
+        # the user is steady on a slice, selection_progress crawls
+        # at ~1% / tick and cursor moves are sub-pixel. Each skipped
+        # paintEvent saves ~1.5 ms (cached blit + dynamic redraw)
+        # and the next real change always re-fires update().
+        items_changed = items != self._items
+        selected_changed = selected_key != self._selected_key
+        progress_changed = abs(new_progress - self._selection_progress) >= 0.005
+        status_changed = status_text != self._status_text
+        cursor_changed = self._cursor_offset_changed(cursor_offset)
         self._items = items
         self._selected_key = selected_key
-        self._selection_progress = max(0.0, min(1.0, float(selection_progress)))
+        self._selection_progress = new_progress
         self._status_text = status_text
         self._cursor_offset = cursor_offset
-        self.update()
+        if (
+            items_changed
+            or selected_changed
+            or progress_changed
+            or status_changed
+            or cursor_changed
+        ):
+            self.update()
+
+    def _cursor_offset_changed(
+        self, new_offset: tuple[float, float] | None
+    ) -> bool:
+        prev = self._cursor_offset
+        if (prev is None) != (new_offset is None):
+            return True
+        if prev is None or new_offset is None:
+            return False
+        # Threshold at ~1px on a 472px wheel (radius ~190 px). Below
+        # this the cursor circle (18 px) does not visibly move.
+        return (
+            abs(prev[0] - new_offset[0]) >= 0.005
+            or abs(prev[1] - new_offset[1]) >= 0.005
+        )
 
     def _place_on_screen(self) -> None:
         screen = self.screen() or QGuiApplication.primaryScreen()

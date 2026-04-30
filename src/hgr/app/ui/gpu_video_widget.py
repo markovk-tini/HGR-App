@@ -33,7 +33,7 @@ import time
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRect, Qt
+from PySide6.QtCore import QLineF, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -203,25 +203,38 @@ class GpuVideoWidget(QWidget):
     def _draw_landmarks(self, painter: QPainter, target: QRect) -> None:
         if not self._landmarks:
             return
+        # Batch every connection across every hand into one drawLines
+        # call and every joint into one drawPoints call. Replaces what
+        # used to be ~84 individual painter.draw* calls per paint
+        # (2 hands × (21 connections + 21 joints)) with 2 batched
+        # paint ops + 2 pen swaps total. Each Qt paint call has
+        # per-call overhead (transform, pen state, antialias setup);
+        # batching collapses that overhead to constant.
+        tx = target.x()
+        ty = target.y()
+        tw = target.width()
+        th = target.height()
+        all_lines: list[QLineF] = []
+        all_points: list[QPointF] = []
         for hand in self._landmarks:
             if not hand:
                 continue
-            # Connections (skeleton) first so the joint dots paint
-            # on top.
-            painter.setPen(self._connection_pen)
+            n = len(hand)
             for a, b in _HAND_CONNECTIONS:
-                if a >= len(hand) or b >= len(hand):
+                if a >= n or b >= n:
                     continue
                 ax, ay = hand[a][0], hand[a][1]
                 bx, by = hand[b][0], hand[b][1]
-                p1 = QPointF(ax * target.width() + target.x(),
-                             ay * target.height() + target.y())
-                p2 = QPointF(bx * target.width() + target.x(),
-                             by * target.height() + target.y())
-                painter.drawLine(p1, p2)
-            # Joints
-            painter.setPen(self._landmark_pen)
+                all_lines.append(QLineF(
+                    ax * tw + tx, ay * th + ty,
+                    bx * tw + tx, by * th + ty,
+                ))
             for pt in hand:
-                px = pt[0] * target.width() + target.x()
-                py = pt[1] * target.height() + target.y()
-                painter.drawPoint(QPointF(px, py))
+                all_points.append(QPointF(pt[0] * tw + tx, pt[1] * th + ty))
+        # Connections first so the joint dots paint on top.
+        if all_lines:
+            painter.setPen(self._connection_pen)
+            painter.drawLines(all_lines)
+        if all_points:
+            painter.setPen(self._landmark_pen)
+            painter.drawPoints(all_points)
