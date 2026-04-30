@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
 
@@ -812,6 +812,138 @@ class ProcessingOverlay(QWidget):
         painter.setPen(QPen(text_color))
         text = f"{self._label}{'.' * self._dot_count}"
         painter.drawText(rect, Qt.AlignCenter, text)
+
+
+class SavedLocationOverlay(QWidget):
+    """Bottom-center pill that briefly shows where a file was just
+    saved, then fades away.
+
+    Same blue/teal palette as ProcessingOverlay and
+    VoiceStatusOverlay so the user reads them as the same family.
+    Width auto-fits the path text, capped at 80 % of screen width;
+    paths longer than that are middle-elided so the user still
+    sees the leading drive letter and the filename.
+
+    Lifecycle:
+        overlay.show_saved("Saved in: C:/.../foo.mp4", fade_after_ms=3000)
+    The overlay then animates its windowOpacity from 1.0 → 0.0
+    over the last ~600 ms of the visible window and hides itself
+    when the animation finishes.
+    """
+
+    _PILL_HEIGHT = 56
+    _PILL_PADDING_X = 28
+    _SCREEN_BOTTOM_GAP = 64
+    _MIN_WIDTH = 280
+    _MAX_WIDTH_FRAC = 0.80  # of screen width
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
+        transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
+        if transparent_flag is not None:
+            flags |= transparent_flag
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._text = ""
+        self._displayed_text = ""
+        # Hold-then-fade timers. Hold duration = total_ms - fade_ms.
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._begin_fade)
+        # Fade animation tick (16 ms ~ 60 fps).
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(16)
+        self._fade_timer.timeout.connect(self._tick_fade)
+        self._fade_total_ms = 600
+        self._fade_remaining_ms = 0
+        self.resize(self._MIN_WIDTH, self._PILL_HEIGHT)
+
+    def show_saved(self, text: str, *, total_ms: int = 3000, fade_ms: int = 600) -> None:
+        self._text = str(text or "")
+        # Stop any prior cycle so a new save replaces the old pill
+        # cleanly.
+        self._hold_timer.stop()
+        self._fade_timer.stop()
+        self._fade_remaining_ms = 0
+        self._fit_to_text()
+        self._place_on_screen()
+        self.setWindowOpacity(1.0)
+        self.show()
+        self.raise_()
+        self.update()
+        self._fade_total_ms = max(50, int(fade_ms))
+        hold_ms = max(0, int(total_ms) - self._fade_total_ms)
+        self._hold_timer.start(hold_ms)
+
+    def _begin_fade(self) -> None:
+        self._fade_remaining_ms = self._fade_total_ms
+        self._fade_timer.start()
+
+    def _tick_fade(self) -> None:
+        self._fade_remaining_ms -= self._fade_timer.interval()
+        if self._fade_remaining_ms <= 0:
+            self._fade_timer.stop()
+            self.hide()
+            self.setWindowOpacity(1.0)
+            return
+        self.setWindowOpacity(max(0.0, self._fade_remaining_ms / float(self._fade_total_ms)))
+
+    def _fit_to_text(self) -> None:
+        # Compute pill width from the rendered text width, with
+        # min/max bounds. If the text exceeds the max, switch to
+        # middle-elision so we keep the drive prefix + the file
+        # name visible.
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        screen_w = screen.availableGeometry().width() if screen is not None else 1280
+        max_pill_w = max(self._MIN_WIDTH, int(screen_w * self._MAX_WIDTH_FRAC))
+        font = QFont("Segoe UI", 12)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        full_w = metrics.horizontalAdvance(self._text) + 2 * self._PILL_PADDING_X
+        if full_w <= max_pill_w:
+            self._displayed_text = self._text
+            self.resize(max(self._MIN_WIDTH, full_w), self._PILL_HEIGHT)
+            return
+        # Too long: elide middle so leading drive + trailing name
+        # both stay visible.
+        target_text_w = max_pill_w - 2 * self._PILL_PADDING_X
+        self._displayed_text = metrics.elidedText(self._text, Qt.ElideMiddle, target_text_w)
+        self.resize(max_pill_w, self._PILL_HEIGHT)
+
+    def _place_on_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.move(40, 40)
+            return
+        geo = screen.availableGeometry()
+        x = geo.center().x() - self.width() // 2
+        y = geo.bottom() - self.height() - self._SCREEN_BOTTOM_GAP
+        self.move(x, y)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        panel = QColor(25, 73, 143, 164)
+        border = QColor(29, 233, 182, 210)
+        text_color = QColor(232, 246, 255, 238)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(panel)
+        painter.drawRoundedRect(rect, 18.0, 18.0)
+
+        font = QFont("Segoe UI", 12)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(text_color))
+        painter.drawText(rect, Qt.AlignCenter, self._displayed_text)
 
 
 class CaptureRegionOverlay(QWidget):

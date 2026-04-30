@@ -76,7 +76,7 @@ from ...debug.voice_command_listener import list_input_microphones
 from ...utils.runtime_paths import app_base_path
 from ...voice.save_prompt import SavePromptProcessor
 from ..integration.noop_engine import GestureWorker
-from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, ProcessingOverlay, RecordingIndicatorOverlay
+from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, ProcessingOverlay, RecordingIndicatorOverlay, SavedLocationOverlay
 from .mini_live_viewer import MiniLiveViewer
 from .live_view_window import LiveViewWindow
 from .tutorial_window import TutorialWindow
@@ -2859,10 +2859,16 @@ class MainWindow(QMainWindow):
         self.countdown_overlay = CountdownOverlay()
         self.capture_region_overlay = CaptureRegionOverlay()
         self.recording_overlay = RecordingIndicatorOverlay()
-        # "Processing clip..." indicator shown during the (now
-        # off-main-thread) ffmpeg clip export. See
-        # _export_clip_async for the worker-thread dispatch flow.
+        # "Processing ..." indicator shown during heavier save
+        # operations (clip export, screenshot save, screen
+        # recording finalize, drawing save). One overlay instance
+        # is reused across all of them since they're never
+        # concurrent.
         self.processing_overlay = ProcessingOverlay()
+        # Bottom-center pill with the full save path that fades
+        # out after 3 s — fires for every successful save in
+        # _on_save_prompt_completed.
+        self.saved_location_overlay = SavedLocationOverlay()
         # Active clip-export worker thread, if any. Held so we can
         # query state and so Python doesn't garbage-collect it
         # while it's still running.
@@ -6535,6 +6541,17 @@ class MainWindow(QMainWindow):
             str((payload or {}).get("heard_text", "") or ""),
             success=bool((payload or {}).get("success")),
         )
+        # Helper: pop the bottom-center "Saved in: <path>" pill on
+        # any save outcome that ended with a real file on disk.
+        # Discards skip it (no file to point at).
+        def _show_saved_pill(final_path: Path) -> None:
+            try:
+                self.saved_location_overlay.show_saved(
+                    f"Saved in: {final_path}", total_ms=3000, fade_ms=600
+                )
+            except Exception:
+                pass
+
         if decision.action == "discard":
             if self._discard_saved_output(source_path):
                 self.last_action_label.setText(f"Last action: discarded {label}")
@@ -6550,28 +6567,43 @@ class MainWindow(QMainWindow):
                 moved_path = self._move_saved_output(source_path, decision.folder)
             if moved_path is not None:
                 self.last_action_label.setText(f"Last action: saved {label} to {moved_path}")
+                _show_saved_pill(moved_path)
                 return
         if source_path.exists():
             self.last_action_label.setText(f"Last action: saved {label} to {source_path}")
+            _show_saved_pill(source_path)
 
     def _save_drawing_snapshot(self) -> None:
-        target_path = self._next_output_path("drawings", ".png")
-        path = None
-        if self._drawing_render_target == "camera":
-            worker = self._worker
-            if worker is not None and hasattr(worker, "save_camera_draw_snapshot"):
-                try:
-                    saved = bool(worker.save_camera_draw_snapshot(target_path))
-                except Exception:
-                    saved = False
-                path = target_path if saved else None
-        else:
-            path = self.draw_overlay.save_canvas_snapshot(target_path=target_path)
-        if path is not None:
-            self.last_action_label.setText(f"Last action: saved drawing to {path}")
-            self._queue_post_action_save_prompt("drawings", path)
-        else:
-            self.last_action_label.setText("Last action: could not save drawing")
+        # Brief processing-pill flash during the (typically fast)
+        # PNG write so the user sees the same UX cadence
+        # as the heavier clip / recording saves.
+        try:
+            self.processing_overlay.show_processing("Processing drawing")
+        except Exception:
+            pass
+        try:
+            target_path = self._next_output_path("drawings", ".png")
+            path = None
+            if self._drawing_render_target == "camera":
+                worker = self._worker
+                if worker is not None and hasattr(worker, "save_camera_draw_snapshot"):
+                    try:
+                        saved = bool(worker.save_camera_draw_snapshot(target_path))
+                    except Exception:
+                        saved = False
+                    path = target_path if saved else None
+            else:
+                path = self.draw_overlay.save_canvas_snapshot(target_path=target_path)
+            if path is not None:
+                self.last_action_label.setText(f"Last action: saved drawing to {path}")
+                self._queue_post_action_save_prompt("drawings", path)
+            else:
+                self.last_action_label.setText("Last action: could not save drawing")
+        finally:
+            try:
+                self.processing_overlay.hide_processing()
+            except Exception:
+                pass
 
     def _screens_union_geometry(self) -> QRect:
         screens = [screen for screen in QGuiApplication.screens() if screen is not None]
@@ -7021,19 +7053,39 @@ class MainWindow(QMainWindow):
         path = self._next_output_path("screenshots", ".png")
         return path if pixmap.save(str(path), "PNG") else None
     def _save_full_screen_screenshot(self) -> None:
-        path = self._save_screenshot_pixmap(self._grab_global_region_pixmap(None))
-        if path is not None:
-            self.last_action_label.setText(f"Last action: saved screenshot to {path}")
-            self._queue_post_action_save_prompt("screenshots", path)
-        else:
-            self.last_action_label.setText("Last action: could not save screenshot")
+        try:
+            self.processing_overlay.show_processing("Processing screenshot")
+        except Exception:
+            pass
+        try:
+            path = self._save_screenshot_pixmap(self._grab_global_region_pixmap(None))
+            if path is not None:
+                self.last_action_label.setText(f"Last action: saved screenshot to {path}")
+                self._queue_post_action_save_prompt("screenshots", path)
+            else:
+                self.last_action_label.setText("Last action: could not save screenshot")
+        finally:
+            try:
+                self.processing_overlay.hide_processing()
+            except Exception:
+                pass
     def _save_custom_region_screenshot(self, region: QRect) -> None:
-        path = self._save_screenshot_pixmap(self._grab_global_region_pixmap(region))
-        if path is not None:
-            self.last_action_label.setText(f"Last action: saved custom screenshot to {path}")
-            self._queue_post_action_save_prompt("screenshots", path)
-        else:
-            self.last_action_label.setText("Last action: could not save custom screenshot")
+        try:
+            self.processing_overlay.show_processing("Processing screenshot")
+        except Exception:
+            pass
+        try:
+            path = self._save_screenshot_pixmap(self._grab_global_region_pixmap(region))
+            if path is not None:
+                self.last_action_label.setText(f"Last action: saved custom screenshot to {path}")
+                self._queue_post_action_save_prompt("screenshots", path)
+            else:
+                self.last_action_label.setText("Last action: could not save custom screenshot")
+        finally:
+            try:
+                self.processing_overlay.hide_processing()
+            except Exception:
+                pass
     def _set_worker_utility_recording_active(self, active: bool) -> None:
         if self._worker is not None and hasattr(self._worker, "set_utility_recording_active"):
             try:
@@ -8337,6 +8389,14 @@ class MainWindow(QMainWindow):
             return False
         self._screen_record_timer.stop()
         self.recording_overlay.hide_indicator()
+        # Show the processing pill during ffmpeg / cv2 finalize.
+        # ffmpeg finalize can take 0.5-2 s as it writes the trailer
+        # and flushes; without the pill the UI looks unresponsive
+        # in that window.
+        try:
+            self.processing_overlay.show_processing("Processing recording")
+        except Exception:
+            pass
         writer = self._screen_record_writer
         process = self._screen_record_process
         path = self._screen_record_path
@@ -8355,6 +8415,10 @@ class MainWindow(QMainWindow):
             elif writer is not None:
                 writer.release()
         finally:
+            try:
+                self.processing_overlay.hide_processing()
+            except Exception:
+                pass
             if path is not None and path.exists() and path.stat().st_size > 1024:
                 self.last_action_label.setText(f"Last action: saved screen recording to {path}")
                 self._queue_post_action_save_prompt("screen_recordings", path)
