@@ -1425,7 +1425,37 @@ class GestureWorker(QObject):
             self._drawing_tool = "hidden"
             self._camera_draw_last_point = None
             return
-        self._drawing_cursor_norm = (cursor_x, cursor_y)
+        # Velocity-adaptive cursor smoothing. The global landmark
+        # smoother is tuned for gesture recognition (noise budget
+        # spread across all 21 landmarks) and leaves enough jitter
+        # on landmark 8 to make the cursor feel fidgety when the
+        # user holds their finger still while drawing. Apply a
+        # second per-cursor EMA with a velocity-adaptive alpha:
+        #   - slow motion (< 0.005 normalized, ~3 px on 640-wide)
+        #     → alpha 0.30 (heavy smoothing, suppresses jitter)
+        #   - fast motion (> 0.030 normalized, ~19 px / fast stroke)
+        #     → alpha 0.85 (near-passthrough, preserves response)
+        #   - between → linear ramp
+        # First frame after the cursor was None (drawing mode just
+        # entered or hand just re-acquired) snaps to the current
+        # value with no smoothing so the cursor doesn't visibly
+        # crawl in from the previous position.
+        prior = self._drawing_cursor_norm
+        if prior is None:
+            self._drawing_cursor_norm = (cursor_x, cursor_y)
+        else:
+            px, py = prior
+            dx = cursor_x - px
+            dy = cursor_y - py
+            motion = (dx * dx + dy * dy) ** 0.5
+            if motion < 0.005:
+                alpha = 0.30
+            elif motion > 0.030:
+                alpha = 0.85
+            else:
+                t = (motion - 0.005) / (0.030 - 0.005)
+                alpha = 0.30 + (0.85 - 0.30) * t
+            self._drawing_cursor_norm = (px + alpha * dx, py + alpha * dy)
         if self._drawing_lift_pose_active(hand_reading):
             self._drawing_tool = "hover"
             self._drawing_control_text = f"drawing hover ({self._drawing_render_target})"
