@@ -399,6 +399,16 @@ class StartTutorialDialog(QDialog):
         self.choice: Optional[str] = None
         self.setModal(True)
         self.setWindowTitle("Touchless")
+        # Show the Touchless logo next to the title in the OS title
+        # bar / Alt-Tab list. Qt would normally inherit the
+        # QApplication-level icon, but a top-level QDialog created
+        # without a parent in some launch paths (e.g., the splash
+        # transition before MainWindow is shown) doesn't pick it up
+        # — set it explicitly here.
+        from PySide6.QtWidgets import QApplication
+        app_icon = QApplication.windowIcon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
         self.setMinimumWidth(440)
         self.setObjectName("startTutorialDialog")
         self._build_ui()
