@@ -194,6 +194,24 @@ exe = EXE(
     icon=str(ICON) if ICON.exists() else None,
     disable_windowed_traceback=False,
     upx=False,
+    # Embed a manifest with requireAdministrator so Touchless
+    # launches elevated by default. Why: clip recording uses
+    # Windows screen capture (DXGI / GDI), which can't see frames
+    # from games running at higher integrity levels (most modern
+    # AAA titles + many anti-cheat-protected games). Without
+    # admin, clipping yields the desktop background instead of
+    # the game window. With admin, the captured frames include
+    # the game. The user reported this exact bug. Trade-offs we
+    # accept by elevating:
+    #   - one UAC prompt per launch (the OS handles it; no code
+    #     change needed). Same UX as OBS Studio with admin.
+    #   - drag-drop from non-admin Explorer is blocked by UIPI.
+    #     Touchless doesn't accept drag-drop today, so no
+    #     regression.
+    #   - Auto-updater still works because the running admin
+    #     process can spawn the (per-user) installer with same
+    #     elevation.
+    uac_admin=True,
 )
 
 coll = COLLECT(

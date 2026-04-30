@@ -574,7 +574,7 @@ class TutorialWindow(QDialog):
         footer_layout.setContentsMargins(18, 14, 18, 14)
         footer_layout.setSpacing(10)
 
-        self.guide_button = QPushButton("Open Gesture Guide")
+        self.guide_button = QPushButton("Open Control Guide")
         self.guide_button.clicked.connect(self._open_guide)
         self.leave_button = QPushButton("Leave Tutorial")
         self.leave_button.clicked.connect(lambda: self._finish_and_close(False))

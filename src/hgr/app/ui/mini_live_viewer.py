@@ -33,6 +33,38 @@ class MiniLiveViewer(QWidget):
         self._build_ui()
         self.apply_theme(config)
 
+        # Always-on-top watchdog. Qt's WindowStaysOnTopHint alone
+        # isn't reliable on Windows: opening a chrome page or the
+        # main settings tab can grab focus in a way that drops the
+        # mini viewer behind. Periodically re-applying SetWindowPos
+        # with HWND_TOPMOST (via the existing native_overlay helper)
+        # keeps it visibly pinned. Also re-raised on every show.
+        from PySide6.QtCore import QTimer
+        self._topmost_watchdog = QTimer(self)
+        self._topmost_watchdog.setInterval(2000)
+        self._topmost_watchdog.timeout.connect(self._reassert_topmost)
+        self._topmost_watchdog.start()
+
+    def _reassert_topmost(self) -> None:
+        if not self.isVisible():
+            return
+        try:
+            from .native_overlay import apply_overlay
+            apply_overlay(self)
+        except Exception:
+            pass
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # Re-raise + reapply topmost on every show. Qt sometimes
+        # drops the WindowStaysOnTopHint after hide/show cycles.
+        try:
+            self.raise_()
+            from .native_overlay import apply_overlay
+            apply_overlay(self)
+        except Exception:
+            pass
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)

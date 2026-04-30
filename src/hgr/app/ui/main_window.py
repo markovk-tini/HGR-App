@@ -3294,7 +3294,16 @@ class MainWindow(QMainWindow):
         self._settings_search_input = QLineEdit()
         self._settings_search_input.setObjectName("settingsSearch")
         self._settings_search_input.setPlaceholderText("Search settings, gestures, voice commands...")
-        self._settings_search_input.setClearButtonEnabled(True)
+        # Use a custom accent-green X clear action instead of the
+        # built-in clearButton (whose pixmap can't be recolored
+        # reliably across Qt versions). Action only shows when the
+        # input has text — same UX as setClearButtonEnabled.
+        self._settings_search_clear_action = self._settings_search_input.addAction(
+            self._build_search_clear_icon(self.config.accent_color),
+            QLineEdit.TrailingPosition,
+        )
+        self._settings_search_clear_action.setVisible(False)
+        self._settings_search_clear_action.triggered.connect(self._settings_search_input.clear)
         self._settings_search_input.textChanged.connect(self._on_settings_search_changed)
         self._settings_search_input.returnPressed.connect(self._on_settings_search_activate_first)
         left_layout.addWidget(self._settings_search_input)
@@ -3392,6 +3401,32 @@ class MainWindow(QMainWindow):
 
         self.show_settings_section(SECTION_INSTRUCTIONS)
         return page
+
+    @staticmethod
+    def _build_search_clear_icon(color_hex: str) -> "QIcon":
+        """Programmatically draw an accent-color "X" icon for the
+        settings-search clear action. The built-in QLineEdit clear
+        button uses a system pixmap that can't be recolored across
+        Qt versions; rendering our own keeps the icon on-theme."""
+        from PySide6.QtGui import QIcon
+        size = 18
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            color = QColor(color_hex)
+            if not color.isValid():
+                color = QColor("#1DE9B6")
+            pen = QPen(color, 2.4)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            inset = 5
+            painter.drawLine(inset, inset, size - inset, size - inset)
+            painter.drawLine(size - inset, inset, inset, size - inset)
+        finally:
+            painter.end()
+        return QIcon(pm)
 
     def _build_settings_search_index(self) -> None:
         """Construct the searchable index used by the settings search
@@ -3506,6 +3541,13 @@ class MainWindow(QMainWindow):
 
     def _on_settings_search_changed(self, text: str) -> None:
         query = str(text or "").strip().lower()
+        # The custom accent-X clear action only shows when there's
+        # text to clear — matches the built-in clearButton UX but
+        # uses our themed icon.
+        try:
+            self._settings_search_clear_action.setVisible(bool(query))
+        except Exception:
+            pass
         # Keep the original behavior of hiding non-matching tab
         # buttons so the user still has a quick visual filter on the
         # left rail.
@@ -5539,6 +5581,15 @@ class MainWindow(QMainWindow):
         self.show_settings_section(section_index)
 
     def show_home_page(self) -> None:
+        # Clear any active settings search so re-entering Settings
+        # starts on the default view rather than mid-search. The
+        # textChanged signal restores tab visibility and hides the
+        # results dropdown.
+        try:
+            if hasattr(self, "_settings_search_input"):
+                self._settings_search_input.clear()
+        except Exception:
+            pass
         self.page_stack.setCurrentWidget(self.home_page)
 
 
@@ -5639,6 +5690,15 @@ class MainWindow(QMainWindow):
         self.overlay.set_font_size(self.config.hello_font_size)
         button_hover_color = _with_alpha(QColor(self.config.primary_color).lighter(118), 170).name(QColor.HexArgb)
         nav_hover_color = _with_alpha(QColor(self.config.primary_color).lighter(115), 115).name(QColor.HexArgb)
+        # Re-render the settings-search clear-X icon in the latest
+        # accent color (in case the user changed the theme).
+        try:
+            if hasattr(self, "_settings_search_clear_action"):
+                self._settings_search_clear_action.setIcon(
+                    self._build_search_clear_icon(self.config.accent_color)
+                )
+        except Exception:
+            pass
         stylesheet = f"""
         QMainWindow {{
             background-color: {self.config.surface_color};
