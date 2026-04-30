@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -75,7 +76,7 @@ from ...debug.voice_command_listener import list_input_microphones
 from ...utils.runtime_paths import app_base_path
 from ...voice.save_prompt import SavePromptProcessor
 from ..integration.noop_engine import GestureWorker
-from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, RecordingIndicatorOverlay
+from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, ProcessingOverlay, RecordingIndicatorOverlay
 from .mini_live_viewer import MiniLiveViewer
 from .live_view_window import LiveViewWindow
 from .tutorial_window import TutorialWindow
@@ -2845,6 +2846,14 @@ class MainWindow(QMainWindow):
         self.countdown_overlay = CountdownOverlay()
         self.capture_region_overlay = CaptureRegionOverlay()
         self.recording_overlay = RecordingIndicatorOverlay()
+        # "Processing clip..." indicator shown during the (now
+        # off-main-thread) ffmpeg clip export. See
+        # _export_clip_async for the worker-thread dispatch flow.
+        self.processing_overlay = ProcessingOverlay()
+        # Active clip-export worker thread, if any. Held so we can
+        # query state and so Python doesn't garbage-collect it
+        # while it's still running.
+        self._clip_export_thread: threading.Thread | None = None
         self.capture_region_overlay.selection_finished.connect(self._on_capture_region_selected)
         self.capture_region_overlay.selection_canceled.connect(self._on_capture_region_canceled)
         self._drawing_mode_active = False
@@ -7731,20 +7740,19 @@ class MainWindow(QMainWindow):
         if not options:
             return False
 
-        def _do_export(region: QRect) -> None:
-            target = self._normalized_record_region(region)
-            if target.isNull() or target.width() <= 1 or target.height() <= 1:
-                self.last_action_label.setText("Last action: clip canceled")
-                return
-            if self._ffmpeg_ready() and self._clip_cache_backend == "ffmpeg":
-                success = self._export_recent_clip_ffmpeg(duration_seconds, target)
-            else:
-                success = self._export_recent_clip_opencv(duration_seconds, target)
-            if not success:
-                self.last_action_label.setText("Last action: no recent clip available yet")
+        def _kickoff_export(region: QRect) -> None:
+            # Defer to the next event-loop turn so the dialog has a
+            # chance to actually close + the picker repaint settles
+            # BEFORE we display the processing overlay and start the
+            # ffmpeg subprocess. Without the QTimer.singleShot(0)
+            # bounce, the dialog's close() call is queued but doesn't
+            # process until after our slot returns — meaning the
+            # user would still see the picker overlapping the
+            # processing overlay for one frame.
+            self._export_clip_async(duration_seconds, QRect(region))
 
         if len(options) == 1:
-            _do_export(QRect(options[0][1]))
+            _kickoff_export(QRect(options[0][1]))
             return True
 
         dialog = CaptureMonitorDialog(self.config, f"clip {duration_seconds} sec", options, self)
@@ -7754,8 +7762,16 @@ class MainWindow(QMainWindow):
         self._set_worker_utility_capture_selection_active(True)
 
         def _on_selected(region: QRect) -> None:
+            # Order matters: clear the dialog bookkeeping first so
+            # subsequent picker checks see "no dialog open", then
+            # bounce through the event loop so the dialog's
+            # CaptureMonitorDialog.close() (which fires AFTER the
+            # selection_made signal returns from our slot) gets to
+            # process its hide before we paint the processing
+            # overlay on top.
             self._clear_capture_monitor_dialog_state()
-            _do_export(QRect(region.normalized()))
+            chosen = QRect(region.normalized())
+            QTimer.singleShot(0, lambda r=chosen: _kickoff_export(r))
 
         def _on_canceled() -> None:
             self._clear_capture_monitor_dialog_state()
@@ -7772,6 +7788,63 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.update()
         return True
+
+    def _export_clip_async(self, duration_seconds: int, region: QRect) -> None:
+        # Off-main-thread clip export. The ffmpeg subprocess for a
+        # 60 s concat + crop + trim + encode takes 3-8 s, which
+        # used to freeze the UI completely (and let the monitor
+        # picker dialog hang on screen during the freeze). Now:
+        #
+        #   1. The picker dialog is already closed by the time we
+        #      get here (caller used singleShot(0) to defer this).
+        #   2. We show a "Processing clip" overlay immediately.
+        #   3. The ffmpeg run goes onto a daemon thread; main
+        #      thread keeps the event loop free for the gesture
+        #      worker, paint events, etc.
+        #   4. When the thread finishes, it queues a finish-on-GUI
+        #      callback that hides the overlay and updates the
+        #      "Last action" label.
+        if self._clip_export_thread is not None and self._clip_export_thread.is_alive():
+            self.last_action_label.setText("Last action: clip already exporting")
+            return
+        target = self._normalized_record_region(region)
+        if target.isNull() or target.width() <= 1 or target.height() <= 1:
+            self.last_action_label.setText("Last action: clip canceled")
+            return
+        try:
+            self.processing_overlay.show_processing(f"Processing {duration_seconds}s clip")
+        except Exception:
+            pass
+
+        def _finish_on_gui(success: bool) -> None:
+            try:
+                self.processing_overlay.hide_processing()
+            except Exception:
+                pass
+            if not success:
+                self.last_action_label.setText("Last action: no recent clip available yet")
+            # On success, _export_recent_clip_*() already set the
+            # "saved … to <path>" text from the worker thread —
+            # leave it alone.
+
+        def _runner() -> None:
+            success = False
+            try:
+                if self._ffmpeg_ready() and self._clip_cache_backend == "ffmpeg":
+                    success = self._export_recent_clip_ffmpeg(duration_seconds, target)
+                else:
+                    success = self._export_recent_clip_opencv(duration_seconds, target)
+            except Exception:
+                success = False
+            # Bounce back to the GUI thread for overlay teardown
+            # and label update — these touch QWidgets, which must
+            # only be touched on the main thread.
+            QTimer.singleShot(0, lambda ok=success: _finish_on_gui(ok))
+
+        self._clip_export_thread = threading.Thread(
+            target=_runner, name="hgr-clip-export", daemon=True
+        )
+        self._clip_export_thread.start()
     def _start_screen_recording_ffmpeg(self, region: QRect) -> bool:
         if not self._ffmpeg_ready():
             return False
@@ -9909,6 +9982,20 @@ def _mw_clear_capture_monitor_dialog_state(self) -> None:
     self._set_worker_utility_capture_selection_active(False)
     self._capture_monitor_dialog = None
     self._capture_monitor_selection_mode = None
+    # Force the dialog widget itself to hide — CaptureMonitorDialog
+    # already calls self.close() inside _choose, but if that didn't
+    # fire (race / direct state-clear from another path) we want
+    # the picker off the screen NOW so subsequent overlays
+    # (countdown, processing) don't paint behind it.
+    if dialog is not None:
+        try:
+            dialog.hide()
+        except Exception:
+            pass
+        try:
+            dialog.deleteLater()
+        except Exception:
+            pass
 
 
 def _mw_begin_monitor_selection_async(self, mode: str) -> bool:

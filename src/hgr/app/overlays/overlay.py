@@ -711,6 +711,86 @@ class RecordingIndicatorOverlay(QWidget):
         painter.drawText(rect.adjusted(44, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, 'Recording')
 
 
+class ProcessingOverlay(QWidget):
+    """Centered "Processing ..." indicator with animated dots.
+
+    Used while a heavy synchronous-ish operation runs (ffmpeg clip
+    export, etc.). Mouse-transparent so the user can still click
+    through to other windows. Lifecycle:
+
+        overlay = ProcessingOverlay()
+        overlay.show_processing("Processing clip")
+        # ... do work, ideally on a worker thread ...
+        overlay.hide_processing()
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
+        transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
+        if transparent_flag is not None:
+            flags |= transparent_flag
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._label = "Processing"
+        self._dot_count = 0
+        # 380 ms cadence — slow enough not to look frantic, fast
+        # enough that the indicator clearly conveys "still working."
+        self._timer = QTimer(self)
+        self._timer.setInterval(380)
+        self._timer.timeout.connect(self._advance_dots)
+        self._resize_to_primary_screen()
+
+    def _resize_to_primary_screen(self) -> None:
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.setGeometry(0, 0, 1280, 720)
+            return
+        self.setGeometry(screen.geometry())
+
+    def _advance_dots(self) -> None:
+        self._dot_count = (self._dot_count + 1) % 4
+        if self.isVisible():
+            self.update()
+
+    def show_processing(self, label: str = "Processing") -> None:
+        self._label = str(label or "Processing")
+        self._dot_count = 0
+        self._resize_to_primary_screen()
+        self.show()
+        self.raise_()
+        self._timer.start()
+        self.update()
+
+    def hide_processing(self) -> None:
+        self._timer.stop()
+        self.hide()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        text = f"{self._label}{'.' * self._dot_count}"
+        # Size the pill horizontally based on text width so it
+        # looks balanced regardless of label length.
+        font = QFont('Arial', 22, QFont.Bold)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        # Reserve room for the longest possible suffix (3 dots) so
+        # the pill width doesn't pulse with the dot count.
+        widest = metrics.horizontalAdvance(f"{self._label}...")
+        box_width = max(280, widest + 80)
+        box_height = 86
+        rect = QRect(0, 0, box_width, box_height)
+        rect.moveCenter(QPoint(self.rect().center().x(), self.rect().center().y()))
+        painter.setPen(QPen(QColor(255, 255, 255, 80), 1.4))
+        painter.setBrush(QColor(10, 18, 26, 200))
+        painter.drawRoundedRect(rect, 18, 18)
+        painter.setPen(QColor('#F4FAFF'))
+        painter.drawText(rect, Qt.AlignCenter, text)
+
+
 class CaptureRegionOverlay(QWidget):
     selection_finished = Signal(QRect)
     selection_canceled = Signal()
