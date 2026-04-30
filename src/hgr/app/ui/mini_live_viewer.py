@@ -250,33 +250,25 @@ class MiniLiveViewer(QWidget):
         # decoded this frame.
         if not self.isVisible() or frame is None:
             return
-        # Two-stage staleness rejection so any backlog from a
-        # main-thread stall (GPU contention, opening Chrome /
-        # Spotify, modal dialog briefly blocking, etc.) drains in
-        # microseconds and the display snaps back to live within a
-        # frame or two:
-        #
-        #   (a) Absolute freshness: drop if the frame is older
-        #       than 0.07 s. ~2 frame intervals at 30 fps —
-        #       tight enough that sustained 100 ms+ pipeline lag
-        #       gets dropped, loose enough that normal jitter
-        #       (one slow paint, one slow inference) doesn't
-        #       starve the display.
-        #
-        #   (b) Monotonic ordering: each fired slot tracks the
-        #       most recent capture_ts it rendered. A subsequent
-        #       slot with an older capture_ts is a queued frame
-        #       that's already been superseded — drop it. This
-        #       cleans up the post-stall drain even when (a)
-        #       wouldn't have caught it.
-        if capture_ts > 0.0:
-            import time as _time
-            if (_time.monotonic() - capture_ts) > 0.07:
-                return
-            prev_ts = getattr(self, "_last_rendered_capture_ts", 0.0)
-            if capture_ts <= prev_ts:
-                return
-            self._last_rendered_capture_ts = capture_ts
+        # Backlog detection: only drop this frame if the daemon
+        # reader has ALREADY decoded a strictly newer one. A
+        # newer raw_frame_ready is then queued behind us and will
+        # render fresher content — there's no value in painting
+        # the older frame first. Earlier versions used an
+        # absolute "now - capture_ts" threshold, but that
+        # measured slot delay (how long the main thread has been
+        # busy) rather than frame staleness, and rejected every
+        # frame during sustained mild contention — freezing the
+        # display instead of letting it track the freshest
+        # available frame. The 0.05 s tolerance accounts for the
+        # normal one-frame race between emit and slot-fire
+        # (~33 ms at 30 fps).
+        if capture_ts > 0.0 and self._worker is not None:
+            cap = getattr(self._worker, "_cap", None)
+            if cap is not None:
+                latest_ts = float(getattr(cap, "_latest_frame_ts", 0.0) or 0.0)
+                if latest_ts > capture_ts + 0.05:
+                    return
         self._last_frame = frame
         self._render_frame()
 

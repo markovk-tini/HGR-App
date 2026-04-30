@@ -375,21 +375,18 @@ class LiveViewWindow(QMainWindow):
         # bypasses the engine pipeline.
         if not self.isVisible() or frame is None:
             return
-        # Two-stage staleness rejection — see MiniLiveViewer for
-        # the full rationale. Cap residual lag at one frame
-        # interval after any main-thread stall:
-        #   (a) drop if frame is older than 0.07 s (~2 frame
-        #       intervals at 30 fps)
-        #   (b) drop if a more-recent capture_ts was already
-        #       rendered by a previous fire (queued-then-stale)
-        if capture_ts > 0.0:
-            import time as _time
-            if (_time.monotonic() - capture_ts) > 0.07:
-                return
-            prev_ts = getattr(self, "_last_rendered_capture_ts", 0.0)
-            if capture_ts <= prev_ts:
-                return
-            self._last_rendered_capture_ts = capture_ts
+        # Backlog detection (see MiniLiveViewer for full
+        # rationale). Drop this frame only if the daemon reader
+        # has already produced a strictly newer one — meaning a
+        # fresher raw_frame_ready is queued behind us. 0.05 s
+        # tolerance for the normal one-frame race between emit
+        # and slot-fire.
+        if capture_ts > 0.0 and self._worker is not None:
+            cap = getattr(self._worker, "_cap", None)
+            if cap is not None:
+                latest_ts = float(getattr(cap, "_latest_frame_ts", 0.0) or 0.0)
+                if latest_ts > capture_ts + 0.05:
+                    return
         self._last_frame = frame
         self._render_frame()
         # Update the latency + display-rate readout. The label
