@@ -1412,19 +1412,35 @@ class GestureWorker(QObject):
             self._camera_draw_last_point = None
             return
         # Pen-lift trigger: open the thumb for >= 0.20 s and the
-        # pen lifts. Compute thumb_open_now FIRST so the draw
-        # / erase pose detectors below can be overridden — the
-        # _drawing_thumb_foldedish helper accepts openness <= 0.80,
-        # so a clearly-open thumb at openness ~0.79 was still
-        # reading as "folded" and keeping draw_active = True every
-        # frame. The lift logic was firing (it cancels grace) but
-        # the SAME frame's draw_active = True extended grace right
-        # back. Solution: when the thumb is decisively open, force
-        # draw_active and erase_active to False.
+        # pen lifts. Detection requires multiple corroborating
+        # signals so a rotated single-finger pose (where the
+        # state classifier sometimes mis-labels the thumb as
+        # fully_open with low openness) doesn't false-fire.
+        #
+        # All four conditions must hold:
+        #   - thumb.state == "fully_open" (classifier's call)
+        #   - thumb.openness >= 0.65          (visibly open, not borderline)
+        #   - thumb.curl    <= 0.35           (not curled across the palm)
+        #   - spreads.thumb_index distance >= 0.55
+        #     (the thumb is actually splayed away from the index;
+        #      a folded thumb sits close to the index regardless
+        #      of what the classifier thinks)
+        #
+        # User screenshot showed the failing case: state=fully_open,
+        # openness=0.54, curl=0.46, spread=0.46 — all four signals
+        # in the borderline band. The new AND-of-four rejects it.
         thumb = hand_reading.fingers.get("thumb")
-        thumb_open_now = thumb is not None and (
-            getattr(thumb, "state", None) == "fully_open"
-            or float(getattr(thumb, "openness", 0.0) or 0.0) >= 0.55
+        thumb_state = getattr(thumb, "state", None) if thumb is not None else None
+        thumb_openness = float(getattr(thumb, "openness", 0.0) or 0.0) if thumb is not None else 0.0
+        thumb_curl = float(getattr(thumb, "curl", 0.0) or 0.0) if thumb is not None else 1.0
+        spread_ti = hand_reading.spreads.get("thumb_index") if hasattr(hand_reading, "spreads") else None
+        thumb_index_distance = float(getattr(spread_ti, "distance", 0.0) or 0.0) if spread_ti is not None else 0.0
+        thumb_open_now = (
+            thumb is not None
+            and thumb_state == "fully_open"
+            and thumb_openness >= 0.65
+            and thumb_curl <= 0.35
+            and thumb_index_distance >= 0.55
         )
 
         erase_active = self._drawing_erase_pose_active(prediction, hand_reading)

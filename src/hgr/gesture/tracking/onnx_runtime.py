@@ -495,9 +495,21 @@ class _OnnxHands:
             nms_threshold=0.3,
             top_k=max(int(max_num_hands) * 4, 8),
         )
+        # 0.60 (was 0.50): the upstream OpenCV-Zoo example uses 0.5,
+        # but in practice scores in [0.50, 0.60) at extreme yaw / roll
+        # produced visibly wonky landmark scatters — fingers landing
+        # in implausible positions that downstream gesture logic
+        # would briefly mis-classify (false thumb-open during pen
+        # rotation, e.g.). Bumping the floor to 0.60 drops those
+        # bad reads entirely; the user sees a brief tracking gap
+        # instead of a wrong gesture, which is the safer failure
+        # mode. Stage-1 (tracked) reads still face the separate
+        # _tracking_threshold gate (= min_tracking_confidence, 0.72
+        # by default), so this only changes new-detection behaviour
+        # via Stage-2 palm-detect.
         self._landmarker = _OnnxHandLandmarker(
             landmark_session,
-            conf_threshold=0.5,
+            conf_threshold=0.60,
         )
         self._max_num_hands = max(1, int(max_num_hands))
         # min_tracking_confidence gates "is the previous landmark
