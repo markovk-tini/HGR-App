@@ -14,7 +14,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QThread, QTimer, QEvent, QUrl, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, Qt, QThread, QTimer, QEvent, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPainterPath, QPen, QCursor, QPixmap, QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -2737,6 +2737,73 @@ class _PhoneCameraTestThread(QThread):
         self.finished_with_result.emit(True, f"connected — frame {width}x{height}.")
 
 
+class _ScrollWheelForwarder(QObject):
+    """Event filter that forwards wheel events from focus-trapping
+    child widgets (QComboBox, QSpinBox, QSlider, ...) to a parent
+    QScrollArea when the child isn't focused. Lets the user scroll
+    a settings panel by spinning the wheel anywhere in it without
+    accidentally changing values in a combobox / spinbox under the
+    cursor.
+
+    A single instance can be shared across multiple scroll areas;
+    .attach(scroll) registers a target, and on each wheel event the
+    forwarder picks the closest ancestor scroll area for the
+    widget that received the event."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._scroll_areas: list[QScrollArea] = []
+
+    def attach(self, scroll_area: QScrollArea) -> None:
+        if scroll_area is not None and scroll_area not in self._scroll_areas:
+            self._scroll_areas.append(scroll_area)
+
+    def _find_target_scroll(self, widget) -> Optional[QScrollArea]:
+        # Walk up the parent chain from the widget that received the
+        # wheel event and return the first attached scroll area that
+        # contains it. Multiple panels can share one forwarder; we
+        # only want to scroll the panel the user is actually in.
+        try:
+            current = widget
+            while current is not None:
+                for scroll in self._scroll_areas:
+                    if scroll is current:
+                        return scroll
+                current = current.parent()
+        except Exception:
+            return None
+        return None
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if event.type() != QEvent.Wheel:
+            return False
+        try:
+            if obj.hasFocus():
+                # User has clicked into the widget — let it consume
+                # the wheel as normal (e.g. scrolling through combo
+                # box options).
+                return False
+        except Exception:
+            return False
+        target = self._find_target_scroll(obj)
+        if target is None:
+            return False
+        try:
+            bar = target.verticalScrollBar()
+            if bar is None:
+                return False
+            delta_y = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+            if delta_y == 0:
+                return False
+            # 120 wheel-units == one notch. Translate to pixel scroll
+            # roughly matching the platform default (~3 lines per
+            # notch, ~16 px per line).
+            bar.setValue(bar.value() - int(delta_y * 0.40))
+            return True
+        except Exception:
+            return False
+
+
 class TouchlessNotice(QDialog):
     """Touchless-themed information popup. Replacement for
     QMessageBox.information / .warning that uses the OS native
@@ -3226,10 +3293,40 @@ class MainWindow(QMainWindow):
 
         self._settings_search_input = QLineEdit()
         self._settings_search_input.setObjectName("settingsSearch")
-        self._settings_search_input.setPlaceholderText("Search settings...")
+        self._settings_search_input.setPlaceholderText("Search settings, gestures, voice commands...")
         self._settings_search_input.setClearButtonEnabled(True)
         self._settings_search_input.textChanged.connect(self._on_settings_search_changed)
+        self._settings_search_input.returnPressed.connect(self._on_settings_search_activate_first)
         left_layout.addWidget(self._settings_search_input)
+
+        # Dropdown of specific matching items below the search box.
+        # When the user types, e.g., 'dictation', this lists every
+        # gesture / voice command / panel subsection whose title or
+        # keywords match. Clicking an entry navigates: switch to its
+        # settings tab, expand its collapsible section if any, and
+        # scroll the target widget into view.
+        from PySide6.QtWidgets import QListWidget
+        self._settings_search_results = QListWidget()
+        self._settings_search_results.setObjectName("settingsSearchResults")
+        self._settings_search_results.setVisible(False)
+        self._settings_search_results.itemActivated.connect(self._on_settings_search_result_clicked)
+        self._settings_search_results.itemClicked.connect(self._on_settings_search_result_clicked)
+        self._settings_search_results.setStyleSheet(
+            "QListWidget#settingsSearchResults {"
+            "  background-color: rgba(15,23,42,0.96);"
+            "  color: #E5F6FF;"
+            "  border: 1px solid rgba(29,233,182,0.30);"
+            "  border-radius: 8px;"
+            "  padding: 4px;"
+            "}"
+            "QListWidget#settingsSearchResults::item { padding: 6px 8px; border-radius: 4px; }"
+            "QListWidget#settingsSearchResults::item:hover { background-color: rgba(29,233,182,0.18); }"
+            "QListWidget#settingsSearchResults::item:selected { background-color: rgba(29,233,182,0.28); }"
+        )
+        self._settings_search_results.setMaximumHeight(220)
+        left_layout.addWidget(self._settings_search_results)
+        # Populated lazily after settings_content_stack is built.
+        self._settings_search_index: list = []
 
         instructions_button = SettingsNavButton("Instructions", SECTION_INSTRUCTIONS, self)
         gestures_button = SettingsNavButton("Control Guide", SECTION_GESTURES, self)
@@ -3286,19 +3383,211 @@ class MainWindow(QMainWindow):
         layout.addWidget(left_panel)
         layout.addWidget(self.settings_content_stack, 1)
 
+        # Build the search index now that every panel has been
+        # constructed and added. Walks each panel for searchable
+        # widgets (gesture cards, voice command cards, panel section
+        # labels) and records (label, target_section, target_widget)
+        # so the dropdown can navigate to the precise spot.
+        self._build_settings_search_index()
+
         self.show_settings_section(SECTION_INSTRUCTIONS)
         return page
 
+    def _build_settings_search_index(self) -> None:
+        """Construct the searchable index used by the settings search
+        dropdown. Each entry is a dict with:
+          - label: display text shown in the dropdown
+          - haystack: lowercased text used for matching
+          - section_id: which settings tab to open (SECTION_*)
+          - section_widget: collapsible to expand (or None)
+          - target_widget: widget to scroll into view (or None)
+        """
+        from PySide6.QtWidgets import QLabel
+        index: list[dict] = []
+        # Map section button -> SECTION_* constant by index in the
+        # nav button list (same order as settings_content_stack).
+        section_for_index = (
+            SECTION_INSTRUCTIONS, SECTION_GESTURES, SECTION_CUSTOM_GESTURE,
+            SECTION_CAMERA, SECTION_MICROPHONE, SECTION_SAVE_LOCATIONS,
+            SECTION_COLORS, SECTION_TUTORIAL, SECTION_UPDATES,
+        )
+        # 1. Gesture / voice cards inside the Control Guide. For each
+        # GestureGuideCard / VoiceCommandCard in any panel, walk up
+        # to find its parent GestureGuideSection so the dropdown can
+        # auto-expand it on selection.
+        gesture_panel = self.settings_content_stack.widget(SECTION_GESTURES)
+        if gesture_panel is not None:
+            for card in gesture_panel.findChildren(GestureGuideCard):
+                title_label = card.findChild(QLabel, "gestureCardTitle")
+                title = title_label.text() if title_label is not None else ""
+                action_label = card.findChild(QLabel, "gestureCardSubtitle")
+                action_text = action_label.text() if action_label is not None else ""
+                section_widget = card.parent()
+                while section_widget is not None and not isinstance(section_widget, GestureGuideSection):
+                    section_widget = section_widget.parent()
+                if not title:
+                    continue
+                index.append({
+                    "label": title + (f"  —  {action_text}" if action_text else ""),
+                    "haystack": f"{title} {action_text}".lower(),
+                    "section_id": SECTION_GESTURES,
+                    "section_widget": section_widget,
+                    "target_widget": card,
+                })
+            for card in gesture_panel.findChildren(VoiceCommandCard):
+                # VoiceCommandCard reuses the gestureCardTitle
+                # objectName for its title QLabel.
+                title_label = card.findChild(QLabel, "gestureCardTitle")
+                title = title_label.text() if title_label is not None else ""
+                section_widget = card.parent()
+                while section_widget is not None and not isinstance(section_widget, GestureGuideSection):
+                    section_widget = section_widget.parent()
+                if not title:
+                    continue
+                index.append({
+                    "label": f"Voice: {title}",
+                    "haystack": f"voice {title}".lower(),
+                    "section_id": SECTION_GESTURES,
+                    "section_widget": section_widget,
+                    "target_widget": card,
+                })
+        # 2. Section header buttons themselves so users can search
+        # by tab name even when the gesture-card index doesn't
+        # match.
+        for nav_idx, button in enumerate(self._settings_nav_buttons):
+            section_id = section_for_index[nav_idx] if nav_idx < len(section_for_index) else None
+            if section_id is None:
+                continue
+            keywords = self._settings_nav_search_keywords.get(button, "")
+            index.append({
+                "label": button.text(),
+                "haystack": f"{button.text()} {keywords}".lower(),
+                "section_id": section_id,
+                "section_widget": None,
+                "target_widget": None,
+            })
+        # 3. Camera and microphone subsections — index any QFrame
+        # with objectName == "innerCard" plus its first QLabel
+        # child as a "subsection" entry. Lets users type 'phone'
+        # and jump to the phone-camera card.
+        for nav_idx, section_id in enumerate(
+            (SECTION_CAMERA, SECTION_MICROPHONE, SECTION_SAVE_LOCATIONS, SECTION_COLORS, SECTION_TUTORIAL, SECTION_UPDATES, SECTION_INSTRUCTIONS)
+        ):
+            panel = self.settings_content_stack.widget(section_id)
+            if panel is None:
+                continue
+            for card in panel.findChildren(QFrame):
+                if card.objectName() != "innerCard":
+                    continue
+                first_label = None
+                for lbl in card.findChildren(QLabel):
+                    text = (lbl.text() or "").strip()
+                    if text and len(text) <= 64:
+                        first_label = lbl
+                        break
+                if first_label is None:
+                    continue
+                title = first_label.text().strip()
+                if not title:
+                    continue
+                # Skip if the card title duplicates the panel name
+                # (already covered by the tab-button entry).
+                tab_name = self._settings_nav_buttons[section_id].text() if section_id < len(self._settings_nav_buttons) else ""
+                if title.lower() == tab_name.lower():
+                    continue
+                index.append({
+                    "label": f"{tab_name}: {title}",
+                    "haystack": f"{tab_name} {title}".lower(),
+                    "section_id": section_id,
+                    "section_widget": None,
+                    "target_widget": card,
+                })
+        self._settings_search_index = index
+
     def _on_settings_search_changed(self, text: str) -> None:
         query = str(text or "").strip().lower()
+        # Keep the original behavior of hiding non-matching tab
+        # buttons so the user still has a quick visual filter on the
+        # left rail.
         if not query:
             for button in self._settings_nav_buttons:
                 button.setVisible(True)
+            self._settings_search_results.clear()
+            self._settings_search_results.setVisible(False)
             return
         tokens = [tok for tok in query.split() if tok]
         for button in self._settings_nav_buttons:
             haystack = f"{button.text().lower()} {self._settings_nav_search_keywords.get(button, '')}"
             button.setVisible(all(tok in haystack for tok in tokens))
+        # Populate the results dropdown with entries whose haystack
+        # contains every token. Limit to ~12 to avoid a giant list.
+        from PySide6.QtWidgets import QListWidgetItem
+        from PySide6.QtCore import Qt as _Qt
+        self._settings_search_results.clear()
+        matches: list[dict] = []
+        for entry in self._settings_search_index:
+            haystack = entry["haystack"]
+            if all(tok in haystack for tok in tokens):
+                matches.append(entry)
+        matches = matches[:12]
+        for entry in matches:
+            item = QListWidgetItem(entry["label"])
+            item.setData(_Qt.UserRole, entry)
+            self._settings_search_results.addItem(item)
+        self._settings_search_results.setVisible(bool(matches))
+        if matches:
+            self._settings_search_results.setCurrentRow(0)
+
+    def _on_settings_search_activate_first(self) -> None:
+        # Enter on the search box activates the first match.
+        if self._settings_search_results.count() == 0:
+            return
+        item = self._settings_search_results.item(0)
+        if item is None:
+            return
+        self._on_settings_search_result_clicked(item)
+
+    def _on_settings_search_result_clicked(self, item) -> None:
+        from PySide6.QtCore import Qt as _Qt
+        if item is None:
+            return
+        entry = item.data(_Qt.UserRole)
+        if not isinstance(entry, dict):
+            return
+        section_id = entry.get("section_id")
+        if section_id is not None:
+            self.show_settings_section(section_id)
+        section_widget = entry.get("section_widget")
+        # Auto-expand the matching collapsible section. The
+        # GestureGuideSection toggles by clicking its header_button;
+        # only expand if currently collapsed so we don't toggle off
+        # an already-open section.
+        if isinstance(section_widget, GestureGuideSection):
+            try:
+                if not section_widget.header_button.isChecked():
+                    section_widget.header_button.setChecked(True)
+                    section_widget._toggle_expanded(True)
+            except Exception:
+                pass
+        target_widget = entry.get("target_widget")
+        if target_widget is not None:
+            # Walk up until we find the ancestor QScrollArea, then
+            # scroll the target into view via ensureWidgetVisible.
+            from PySide6.QtWidgets import QScrollArea
+            ancestor = target_widget.parent()
+            scroll: Optional[QScrollArea] = None
+            while ancestor is not None:
+                if isinstance(ancestor, QScrollArea):
+                    scroll = ancestor
+                    break
+                ancestor = ancestor.parent()
+            if scroll is not None:
+                # Defer one tick so the panel switch + section
+                # expansion has actually painted.
+                QTimer.singleShot(50, lambda s=scroll, w=target_widget: s.ensureWidgetVisible(w, 30, 60))
+        # Hide the dropdown after navigation; let the user re-type
+        # to search again.
+        self._settings_search_results.setVisible(False)
 
     def _make_content_panel(self, title: str, subtitle: str) -> tuple[QFrame, QVBoxLayout]:
         panel = QFrame()
@@ -3773,8 +4062,38 @@ class MainWindow(QMainWindow):
         self._refresh_phone_camera_controls()
 
         scroll.setWidget(box)
+        self._install_scroll_wheel_forwarder(scroll)
         layout.addWidget(scroll, 1)
         return panel
+
+    def _install_scroll_wheel_forwarder(self, scroll_area: QScrollArea) -> None:
+        """Make wheel-scrolling reliable inside a settings panel that
+        contains QComboBox / QSpinBox / QDoubleSpinBox / QSlider /
+        QAbstractSpinBox children. Without this, those widgets can
+        silently consume the wheel event without changing their value
+        (especially after a focus transition), and the panel just
+        stops scrolling until the user clicks elsewhere — exactly the
+        'sometimes scroll doesn't work' bug the user reported.
+        Applied wherever a settings panel embeds a QScrollArea."""
+        from PySide6.QtWidgets import QComboBox, QAbstractSpinBox, QAbstractSlider
+        if scroll_area is None:
+            return
+        widget = scroll_area.widget()
+        if widget is None:
+            return
+        forwarder = getattr(self, "_wheel_forwarder", None)
+        if forwarder is None:
+            forwarder = _ScrollWheelForwarder(self)
+            self._wheel_forwarder = forwarder
+        forwarder.attach(scroll_area)
+        # Walk every potentially-trapping child and install the
+        # forwarder. ClickFocus means the widget only gets focus
+        # when explicitly clicked — wheel scrolls outside that
+        # scope no longer change values by accident.
+        for child_cls in (QComboBox, QAbstractSpinBox, QAbstractSlider):
+            for child in widget.findChildren(child_cls):
+                child.setFocusPolicy(Qt.ClickFocus)
+                child.installEventFilter(forwarder)
 
     def _refresh_phone_camera_controls(self) -> None:
         if not hasattr(self, "phone_camera_checkbox"):
@@ -4445,6 +4764,7 @@ class MainWindow(QMainWindow):
         scroll_vbox.addStretch(1)
 
         scroll.setWidget(scroll_container)
+        self._install_scroll_wheel_forwarder(scroll)
         layout.addWidget(scroll, 1)
         # Reflect current phone-mic preference on the local dropdown +
         # save/clear buttons (greyed when phone mic is active).

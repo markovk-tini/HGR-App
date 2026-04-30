@@ -4948,6 +4948,22 @@ class GestureWorker(QObject):
             "voice_heard_text": self._voice_preview_text(self._voice_display_text),
             "mouse_mode_enabled": bool(self._mouse_mode_enabled),
             "mouse_cursor_position": self.mouse_tracker.debug_state.cursor_position,
+            # Camera-space bounds for the red mouse-control box +
+            # virtual-desktop bounds for the monitor-map overlay.
+            # Tutorial uses these so the cv2-side overlay can match
+            # what the live view shows when running outside the
+            # tutorial. None when mouse mode is off so the
+            # consumer can skip drawing.
+            "mouse_camera_control_bounds": (
+                tuple(float(v) for v in self.mouse_tracker.debug_state.camera_control_bounds)
+                if self.mouse_tracker.debug_state.camera_control_bounds is not None
+                else None
+            ),
+            "mouse_virtual_bounds": (
+                tuple(int(v) for v in self.mouse_controller.virtual_bounds())
+                if getattr(self.mouse_controller, "available", False)
+                else None
+            ),
             "mouse_left_click": bool(getattr(self._last_mouse_update, "left_click", False)),
             "gestures_enabled": bool(self._gestures_enabled),
             "drawing_mode_enabled": bool(self._drawing_mode_enabled),

@@ -357,6 +357,13 @@ class TutorialWindow(QDialog):
         self._voice_heard_text = ""
         self._voice_status = "ready"
         self._mouse_tracker = MouseGestureTracker()
+        # When the tutorial runs against the shared parent worker,
+        # the local _mouse_tracker is NOT updated — the parent
+        # engine's mouse_tracker is. Mirror the latest payload's
+        # mouse-overlay info here so _draw_demo_overlay can render
+        # the same red control-area box the regular live view
+        # renders.
+        self._payload_mouse_state: dict | None = None
         self._spotify_open_hold_seconds = 1.0
         self._spotify_static_cooldown_seconds = 1.5
         self._spotify_play_pause_hold_seconds = 0.5
@@ -1257,6 +1264,41 @@ class TutorialWindow(QDialog):
             cv2.line(frame, pts_px[a], pts_px[b], color, 2, cv2.LINE_AA)
         for px, py in pts_px:
             cv2.circle(frame, (px, py), max(2, int(round(3.0 * scale / 1.6))), color, -1, cv2.LINE_AA)
+    def _draw_tutorial_mouse_box(self, frame, state: dict) -> None:
+        """Render the red mouse-control box on the tutorial frame
+        directly from a payload state dict. Mirrors the look of
+        draw_mouse_control_box_overlay (red border + faint fill +
+        label + cursor dot) but doesn't require a full MouseDebugState
+        object — the tutorial gets only the minimal fields it needs
+        through the engine debug payload."""
+        bounds = state.get("camera_control_bounds")
+        if bounds is None:
+            return
+        frame_h, frame_w = frame.shape[:2]
+        x1 = int(round(bounds[0] * frame_w))
+        y1 = int(round(bounds[1] * frame_h))
+        x2 = int(round(bounds[2] * frame_w))
+        y2 = int(round(bounds[3] * frame_h))
+        if x2 <= x1 + 12 or y2 <= y1 + 12:
+            return
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (48, 56, 236), thickness=-1)
+        cv2.addWeighted(overlay, 0.08, frame, 0.92, 0.0, frame)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (28, 36, 255), thickness=4)
+        label = "Mouse control area"
+        label_origin = (x1 + 10, y1 - 10 if y1 >= 28 else y1 + 22)
+        cv2.putText(frame, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.72, (28, 36, 255), 2, cv2.LINE_AA)
+        # Virtual cursor dot mapped through the box. cursor_position
+        # is normalized [0, 1] across the full virtual desktop.
+        cursor = state.get("cursor_position")
+        if cursor is not None:
+            box_w = max(1, x2 - x1)
+            box_h = max(1, y2 - y1)
+            cx = x1 + int(round(float(cursor[0]) * box_w))
+            cy = y1 + int(round(float(cursor[1]) * box_h))
+            cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+            cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
+
     def _draw_demo_overlay(self, frame, step_key: str) -> None:
         height, width = frame.shape[:2]
         accent = (182, 233, 29)
@@ -1285,19 +1327,25 @@ class TutorialWindow(QDialog):
         elif step_key == "mouse_mode":
             # When mouse mode is OFF: show the demo hand so the user
             # learns the activation pose. When ON: drop the demo hand
-            # entirely and show the same red control-area box the
-            # regular live-view shows (plus the virtual cursor inside
-            # it). The earlier behavior drew BOTH on top of each
-            # other — the demo hand visually competed with the box,
-            # which is why the user reported "the box doesn't show
-            # like the regular version."
-            if self._mouse_tracker.mode_enabled:
-                draw_mouse_control_box_overlay(
-                    frame,
-                    debug_state=self._mouse_tracker.debug_state,
-                    mode_enabled=True,
-                    mouse_controller=getattr(self, "_mouse_controller", None),
-                )
+            # and draw the same red control-area box the regular live
+            # view shows. The state lives in self._payload_mouse_state
+            # because the tutorial's local _mouse_tracker isn't the
+            # one tracking — the parent engine's tracker is, and we
+            # receive its state via the engine debug payload.
+            mouse_state = getattr(self, "_payload_mouse_state", None) or (
+                {
+                    "mode_enabled": True,
+                    "camera_control_bounds": (
+                        tuple(float(v) for v in self._mouse_tracker.debug_state.camera_control_bounds)
+                        if self._mouse_tracker.debug_state.camera_control_bounds is not None
+                        else None
+                    ),
+                    "cursor_position": self._mouse_tracker.debug_state.cursor_position,
+                    "virtual_bounds": None,
+                } if self._mouse_tracker.mode_enabled else None
+            )
+            if mouse_state is not None and mouse_state.get("camera_control_bounds") is not None:
+                self._draw_tutorial_mouse_box(frame, mouse_state)
             else:
                 self._draw_demo_hand(frame, main_center, "left_three", scale=0.96, color=white)
         elif step_key == "voice_command":
@@ -1568,6 +1616,22 @@ class TutorialWindow(QDialog):
             mouse_mode_enabled = bool(payload.get("mouse_mode_enabled"))
             cursor_position = payload.get("mouse_cursor_position")
             left_click = bool(payload.get("mouse_left_click"))
+            # Mirror the engine's mouse-overlay state into a tutorial-
+            # level field so _draw_demo_overlay can render the red
+            # control-area box (same overlay the regular live view
+            # shows). Without this the tutorial's local _mouse_tracker
+            # never sees an .update() call in the engine-driven path,
+            # so its mode_enabled stays False and the box never
+            # rendered.
+            if mouse_mode_enabled:
+                self._payload_mouse_state = {
+                    "mode_enabled": True,
+                    "camera_control_bounds": payload.get("mouse_camera_control_bounds"),
+                    "cursor_position": cursor_position,
+                    "virtual_bounds": payload.get("mouse_virtual_bounds"),
+                }
+            else:
+                self._payload_mouse_state = None
             left_three_active = handedness == "left" and (
                 stable_label == "three" or (raw_label == "three" and confidence >= 0.56)
             )
