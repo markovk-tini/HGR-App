@@ -79,8 +79,14 @@ class GpuVideoWidget(QWidget):
         self._idle_font = QFont("Segoe UI", 10)
         self._banner_font = QFont("Segoe UI", 9)
         self._banner_font.setBold(True)
-        self._landmark_pen = QPen(QColor(29, 233, 182), 2)
-        self._connection_pen = QPen(QColor(29, 233, 182, 200), 2)
+        # RoundCap on the landmark pen so each drawPoint renders as
+        # a round disc instead of a square — at 5 px it's visibly
+        # circular and reads as a "joint dot" rather than a pixel
+        # cluster. Connection pen stays square-cap (default) and
+        # bumps from 2 px to 3 px for a slightly chunkier skeleton.
+        self._landmark_pen = QPen(QColor(29, 233, 182), 5)
+        self._landmark_pen.setCapStyle(Qt.RoundCap)
+        self._connection_pen = QPen(QColor(29, 233, 182, 200), 3)
         # Bbox colors — red default, green when that hand has a
         # recognized gesture.
         self._bbox_inactive_color = QColor(232, 72, 72, 235)
