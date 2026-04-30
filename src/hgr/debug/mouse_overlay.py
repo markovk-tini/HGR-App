@@ -103,13 +103,10 @@ def draw_mouse_control_box_overlay(
         cy = y1 + int(round(float(debug_state.cursor_position[1]) * box_h))
         cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
         cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
-
-    if debug_state.camera_anchor_position is not None:
-        anchor_x = int(round(debug_state.camera_anchor_position[0] * frame_w))
-        anchor_y = int(round(debug_state.camera_anchor_position[1] * frame_h))
-        cv2.circle(frame, (anchor_x, anchor_y), 7, (255, 248, 212), thickness=1)
-        cv2.line(frame, (anchor_x - 8, anchor_y), (anchor_x + 8, anchor_y), (255, 248, 212), 1, cv2.LINE_AA)
-        cv2.line(frame, (anchor_x, anchor_y - 8), (anchor_x, anchor_y + 8), (255, 248, 212), 1, cv2.LINE_AA)
+    # Anchor crosshair removed — it sat motionless in the box
+    # while the cursor dot moved, which read as a stale duplicate
+    # cursor. The box itself communicates the active region; the
+    # moving cursor dot is enough to confirm hand → mouse mapping.
 
 
 def draw_mouse_monitor_overlay(

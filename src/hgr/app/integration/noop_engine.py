@@ -4662,8 +4662,21 @@ class GestureWorker(QObject):
             if update.scroll_steps:
                 self.mouse_controller.scroll(update.scroll_steps)
 
+        prior_mode_enabled = self._mouse_mode_enabled
         self._mouse_mode_enabled = update.mode_enabled
         self._mouse_status_text = update.status
+        # Toggle pill: matches the Drawing-mode pattern at
+        # _toggle_drawing_mode — same VoiceStatusOverlay info hint
+        # so the user gets identical visual feedback when they
+        # flip mouse mode on or off via the gesture.
+        if update.mode_enabled != prior_mode_enabled:
+            try:
+                self.voice_status_overlay.show_info_hint(
+                    "Mouse Mode: On" if update.mode_enabled else "Mouse Mode: Off",
+                    duration=3.0,
+                )
+            except Exception:
+                pass
         action_text = update.control_text
         if not tutorial_demo_only and (update.left_press or update.left_release or update.left_click or update.right_click or update.scroll_steps):
             action_text = self.mouse_controller.message

@@ -337,15 +337,10 @@ class GpuVideoWidget(QWidget):
             painter.drawRect(bg_rect)
             painter.setPen(QPen(self._mouse_box_color, 1))
             painter.drawText(QPointF(bg_rect.x() + 5.0, bg_rect.y() + label_h - 3.0), label)
-            anchor = self._mouse_overlay.get("anchor")
-            if anchor is not None:
-                ax = anchor[0] * tw + tx
-                ay = anchor[1] * th + ty
-                painter.setPen(QPen(self._mouse_anchor_color, 2))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawEllipse(QPointF(ax, ay), 7.0, 7.0)
-                painter.drawLine(QPointF(ax - 8, ay), QPointF(ax + 8, ay))
-                painter.drawLine(QPointF(ax, ay - 8), QPointF(ax, ay + 8))
+            # Anchor crosshair removed — it was a static "+" in
+            # the box while the cursor dot moved, which read as a
+            # stale duplicate cursor. The box itself + moving
+            # cursor are enough.
             # Monitor layout + virtual cursor inside the red box.
             # When the user has multiple monitors, drawing each
             # one proportionally inside the box gives a 1:1
