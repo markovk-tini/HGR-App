@@ -724,12 +724,17 @@ class ProcessingOverlay(QWidget):
         overlay.hide_processing()
     """
 
-    # Pill geometry (the overlay window itself is sized to this
-    # plus a small margin; we don't paint over the full screen).
+    # Pill geometry. The overlay WINDOW is sized exactly to the
+    # pill (no extra transparent margin around it), otherwise the
+    # transparent margin reads on screen as a faint rectangular
+    # halo around the pill — what the user reported as a
+    # "transparent border." Qt's WA_TranslucentBackground keeps
+    # the transparent area invisible *in theory*, but some
+    # compositors / GPU drivers leave a 1-pixel residue at the
+    # window edge.
     _PILL_WIDTH = 360
     _PILL_HEIGHT = 56
-    _SCREEN_MARGIN_X = 16
-    _SCREEN_MARGIN_BOTTOM = 80
+    _SCREEN_BOTTOM_GAP = 64
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -746,8 +751,7 @@ class ProcessingOverlay(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(380)
         self._timer.timeout.connect(self._advance_dots)
-        self.resize(self._PILL_WIDTH + 2 * self._SCREEN_MARGIN_X,
-                    self._PILL_HEIGHT + 2 * self._SCREEN_MARGIN_X)
+        self.resize(self._PILL_WIDTH, self._PILL_HEIGHT)
 
     def _place_on_screen(self) -> None:
         # Bottom-center of the primary screen — same pattern the
@@ -758,13 +762,9 @@ class ProcessingOverlay(QWidget):
             self.move(40, 40)
             return
         geo = screen.availableGeometry()
-        # Re-fit the window to a known size so we can position
-        # deterministically regardless of any prior resize.
-        w = self._PILL_WIDTH + 2 * self._SCREEN_MARGIN_X
-        h = self._PILL_HEIGHT + 2 * self._SCREEN_MARGIN_X
-        self.resize(w, h)
-        x = geo.center().x() - w // 2
-        y = geo.bottom() - h - self._SCREEN_MARGIN_BOTTOM + self._SCREEN_MARGIN_X
+        self.resize(self._PILL_WIDTH, self._PILL_HEIGHT)
+        x = geo.center().x() - self._PILL_WIDTH // 2
+        y = geo.bottom() - self._PILL_HEIGHT - self._SCREEN_BOTTOM_GAP
         self.move(x, y)
 
     def _advance_dots(self) -> None:
@@ -798,8 +798,10 @@ class ProcessingOverlay(QWidget):
         border = QColor(29, 233, 182, 210)
         text_color = QColor(232, 246, 255, 238)
 
-        rect = QRectF(self._SCREEN_MARGIN_X, self._SCREEN_MARGIN_X,
-                      self._PILL_WIDTH, self._PILL_HEIGHT)
+        # Inset the rect by 0.5 px to keep the antialiased border
+        # fully inside the window bounds (otherwise the outermost
+        # half-pixel of the border would clip).
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         painter.setPen(QPen(border, 1.2))
         painter.setBrush(panel)
         painter.drawRoundedRect(rect, 18.0, 18.0)

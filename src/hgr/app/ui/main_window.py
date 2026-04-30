@@ -2791,6 +2791,19 @@ class TouchlessNotice(QDialog):
 
 
 class MainWindow(QMainWindow):
+    # Cross-thread bridge for the off-thread clip export. The
+    # worker thread emits this signal after stashing its result on
+    # self._clip_export_result; Qt's auto-connection delivers the
+    # slot call onto the main thread (where MainWindow lives), so
+    # the GUI-side completion handler runs safely.
+    #
+    # We can't use QTimer.singleShot from the worker thread because
+    # singleShot(0, callable) schedules the timer on the CALLING
+    # thread, and our worker thread has no Qt event loop, so the
+    # callback would never fire — leaving the processing overlay
+    # stuck on screen forever.
+    _clip_export_finished_signal = Signal()
+
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
@@ -8037,36 +8050,13 @@ class MainWindow(QMainWindow):
             "error": None,
         }
 
-        def _finish_on_gui() -> None:
-            try:
-                self.processing_overlay.hide_processing()
-            except Exception:
-                pass
-            result = dict(getattr(self, "_clip_export_result", {}) or {})
-            success = bool(result.get("success", False))
-            output_path = result.get("output_path")
-            actual_seconds = float(result.get("actual_seconds", 0.0) or 0.0)
-            error = result.get("error")
-            if error:
-                self.last_action_label.setText(
-                    f"Last action: clip export failed ({error})"
-                )
-                return
-            if not success or output_path is None:
-                self.last_action_label.setText("Last action: no recent clip available yet")
-                return
-            self.last_action_label.setText(
-                f"Last action: saved {actual_seconds:.1f}s clip to {output_path}"
-            )
-            # Save-location voice prompt — ALWAYS from GUI thread,
-            # because internally it starts voice capture and that
-            # touches sounddevice + QObject state which the worker
-            # owns on the main thread. Calling this from the export
-            # thread previously crashed the app.
-            try:
-                self._queue_post_action_save_prompt("clips", Path(output_path))
-            except Exception:
-                pass
+        # Connect the cross-thread bridge signal exactly once. We
+        # use a uniqueConnection-style guard so re-entry here
+        # doesn't stack duplicate slots if the user fires multiple
+        # clip exports across the lifetime of the app.
+        if not getattr(self, "_clip_export_signal_wired", False):
+            self._clip_export_finished_signal.connect(self._on_clip_export_finished_main_thread)
+            self._clip_export_signal_wired = True
 
         def _runner() -> None:
             try:
@@ -8091,12 +8081,48 @@ class MainWindow(QMainWindow):
                     "actual_seconds": 0.0,
                     "error": f"{type(exc).__name__}: {exc!s}",
                 }
-            QTimer.singleShot(0, _finish_on_gui)
+            # Bounce to the GUI thread via Qt signal — works from
+            # any thread, doesn't require a local event loop.
+            try:
+                self._clip_export_finished_signal.emit()
+            except Exception:
+                pass
 
         self._clip_export_thread = threading.Thread(
             target=_runner, name="hgr-clip-export", daemon=True
         )
         self._clip_export_thread.start()
+
+    def _on_clip_export_finished_main_thread(self) -> None:
+        """GUI-thread completion for the off-thread clip export.
+        Hides the processing overlay, updates the action label,
+        and (on success) fires the save-location voice prompt."""
+        try:
+            self.processing_overlay.hide_processing()
+        except Exception:
+            pass
+        result = dict(getattr(self, "_clip_export_result", {}) or {})
+        success = bool(result.get("success", False))
+        output_path = result.get("output_path")
+        actual_seconds = float(result.get("actual_seconds", 0.0) or 0.0)
+        error = result.get("error")
+        if error:
+            self.last_action_label.setText(
+                f"Last action: clip export failed ({error})"
+            )
+            return
+        if not success or output_path is None:
+            self.last_action_label.setText("Last action: no recent clip available yet")
+            return
+        self.last_action_label.setText(
+            f"Last action: saved {actual_seconds:.1f}s clip to {output_path}"
+        )
+        # Save-location voice prompt — must run on GUI thread
+        # because it starts voice capture (sounddevice + QObject).
+        try:
+            self._queue_post_action_save_prompt("clips", Path(output_path))
+        except Exception:
+            pass
     def _start_screen_recording_ffmpeg(self, region: QRect) -> bool:
         if not self._ffmpeg_ready():
             return False
