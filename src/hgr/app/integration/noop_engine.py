@@ -824,6 +824,18 @@ class GestureWorker(QObject):
         # fire as fast as the camera feeds frames.
         self._engine_runner = _EngineRunner()
         self._engine_result_ready.connect(self._on_engine_result)
+
+        # Custom-gesture live runner — owns its own classifier + hold/
+        # cooldown state and fires actions when the user holds a
+        # registered custom pose. Initializes from disk so any gesture
+        # the user previously saved is live immediately.
+        try:
+            from ...custom_gestures.runner import CustomGestureRunner
+            self._custom_gesture_runner = CustomGestureRunner()
+        except Exception as exc:
+            print(f"[custom-gestures] runner init failed: {exc}")
+            self._custom_gesture_runner = None
+
         # Per-tick timing markers shared between _tick and
         # _on_engine_result — needed because the engine call now
         # returns asynchronously, so the post-engine handler can't
@@ -891,6 +903,23 @@ class GestureWorker(QObject):
         self._emit_min_interval_seconds: float = 1.0 / 30.0
         self._last_emit_monotonic: float = 0.0
         self._action_history_dirty_for_emit: bool = False
+
+    def reload_custom_gestures(self) -> None:
+        """Re-read custom gestures from disk. Called by the Settings
+        panel after the user adds / edits / deletes a gesture so the
+        live pipeline picks up the change without restarting the app."""
+        runner = getattr(self, "_custom_gesture_runner", None)
+        if runner is None:
+            try:
+                from ...custom_gestures.runner import CustomGestureRunner
+                self._custom_gesture_runner = CustomGestureRunner()
+            except Exception as exc:
+                print(f"[custom-gestures] late init failed: {exc}")
+            return
+        try:
+            runner.reload()
+        except Exception as exc:
+            print(f"[custom-gestures] reload failed: {exc}")
 
     def _record_action(self, label: str, display_text: str) -> None:
         if not label or label == "-":
@@ -3858,6 +3887,32 @@ class GestureWorker(QObject):
             self.engine_landmarks_ready.emit(payload)
         except Exception:
             pass
+
+        # Custom-gesture live processing. Runs on the tracked hand's
+        # landmarks after the built-in pipeline has had its turn this
+        # frame. The runner manages its own hold/cooldown state and
+        # calls fire_once() on activation. Falls through silently if
+        # the user has no custom gestures registered.
+        if self._custom_gesture_runner is not None:
+            try:
+                if result.found and result.tracked_hand is not None:
+                    landmarks_arr = getattr(result.tracked_hand, "landmarks", None)
+                    if landmarks_arr is not None:
+                        fired = self._custom_gesture_runner.process(
+                            landmarks_arr, time.monotonic()
+                        )
+                        if fired:
+                            try:
+                                self.command_detected.emit(f"custom: {fired}")
+                            except Exception:
+                                pass
+                else:
+                    self._custom_gesture_runner.hand_lost(time.monotonic())
+            except Exception as exc:
+                # A bad sample / classifier hiccup must not break the
+                # main pipeline — log once and continue.
+                print(f"[custom-gestures] process error: {exc}")
+
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None
         # MediaPipe occasionally labels a single visible right hand
         # as "Left" when only one hand is in frame and the silhouette
