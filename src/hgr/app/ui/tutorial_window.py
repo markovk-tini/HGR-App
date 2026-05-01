@@ -839,6 +839,24 @@ class TutorialWindow(QDialog):
 
         self._owns_worker = True
         owned_worker = GestureWorker(self.config, camera_index_override=self._camera_index, parent=self)
+        # Plumb the parent app's phone-camera QR capture into the
+        # owned worker BEFORE start() so phone-only users can still
+        # take the tutorial. Without this, a user who has no local
+        # webcam (only phone QR connected) would hit
+        # open_preferred_or_first_available with no candidates and
+        # the tutorial would stall on "Starting tutorial camera and
+        # runtime...". The parent MainWindow holds the QR server +
+        # the active flag.
+        try:
+            parent = self.parent()
+            qr_server = getattr(parent, "_phone_camera_qr_server", None)
+            qr_active = bool(getattr(self.config, "phone_camera_qr_active", False))
+            if qr_server is not None and qr_active and self._camera_index is None:
+                qr_capture = getattr(qr_server, "capture", None)
+                if qr_capture is not None and hasattr(owned_worker, "set_phone_camera_capture"):
+                    owned_worker.set_phone_camera_capture(qr_capture)
+        except Exception:
+            pass
         self._connect_worker(owned_worker)
         self.camera_label.setText("Camera: starting tutorial runtime...")
         self.video_label.setText("Starting tutorial camera and runtime...")

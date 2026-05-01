@@ -3748,6 +3748,7 @@ class MainWindow(QMainWindow):
         self._custom_gestures_panel = CustomGesturesPanel(
             config=self.config,
             accent_color=self.config.accent_color or "#1DE9B6",
+            worker_provider=lambda: getattr(self, "_worker", None),
             parent=panel,
         )
         self._custom_gestures_panel.open_create_requested.connect(
@@ -3755,6 +3756,9 @@ class MainWindow(QMainWindow):
         )
         self._custom_gestures_panel.open_sandbox_requested.connect(
             self._open_custom_gesture_sandbox
+        )
+        self._custom_gestures_panel.open_edit_requested.connect(
+            self._open_custom_gesture_editor
         )
         layout.addWidget(self._custom_gestures_panel)
         return panel
@@ -3793,6 +3797,76 @@ class MainWindow(QMainWindow):
         worker = getattr(self, "_worker", None)
         sandbox = SandboxWindow(worker=worker, accent_color=accent, parent=self)
         sandbox.show()
+
+    def _open_custom_gesture_editor(self, name: str) -> None:
+        """Edit metadata + action of an already-recorded gesture without
+        re-recording samples. Opens the wizard pre-populated with the
+        existing values; on accept, updates the registry in place."""
+        from PySide6.QtWidgets import QDialog
+        from hgr.custom_gestures.registry import GestureRegistry
+        from .custom_gestures_wizard import CreateGestureWizard
+
+        accent = self.config.accent_color or "#1DE9B6"
+        registry = GestureRegistry()
+        registry.load()
+        existing = registry.get(name)
+        if existing is None:
+            QMessageBox.warning(self, "Not found", f"No gesture named {name!r}.")
+            return
+
+        # Reverse-engineer the wizard fields from the saved action payload.
+        action_kind = existing.action.kind
+        payload = existing.action.payload or {}
+        if action_kind == "keystroke":
+            initial_value = str(payload.get("key", ""))
+        elif action_kind == "hotkey":
+            keys = payload.get("keys") or []
+            initial_value = "+".join(str(k) for k in keys)
+        elif action_kind == "text":
+            initial_value = str(payload.get("text", ""))
+        elif action_kind == "open_url":
+            initial_value = str(payload.get("url", ""))
+        elif action_kind == "run_command":
+            initial_value = str(payload.get("command", ""))
+        else:
+            initial_value = ""
+        initial_hold = float(payload.get("hold_s", 1.0)) if payload else 1.0
+        initial_cooldown = float(payload.get("cooldown_s", 2.0)) if payload else 2.0
+
+        wizard = CreateGestureWizard(
+            accent_color=accent,
+            parent=self,
+            edit_mode=True,
+            initial_name=existing.name,
+            initial_description=existing.description,
+            initial_hold=initial_hold,
+            initial_cooldown=initial_cooldown,
+            initial_action_kind=action_kind if action_kind != "noop" else None,
+            initial_action_value=initial_value,
+            original_name=existing.name,
+        )
+        if wizard.exec() != QDialog.DialogCode.Accepted or wizard.result_payload is None:
+            return
+        result = wizard.result_payload
+
+        # Save back in place — keep the existing recorded samples, swap
+        # only the metadata + action. If the user changed the name,
+        # remove the old entry first.
+        if result.name != existing.name:
+            registry.remove(existing.name)
+        try:
+            registry.add(
+                name=result.name,
+                samples=existing.samples,
+                action=result.action,
+                description=result.description,
+                overwrite=True,
+            )
+        except ValueError as exc:
+            QMessageBox.critical(self, "Edit failed", str(exc))
+            return
+        registry.save()
+        self._custom_gestures_panel.refresh_cards()
 
     def _build_colors_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
@@ -4108,17 +4182,17 @@ class MainWindow(QMainWindow):
         self._refresh_lite_mode_button_label()
 
         # ============================================================
-        # 6. GPU MODE  (preview — full GPU inference lands in v1.0.10+)
+        # 6. GPU MODE
         # ============================================================
-        box_layout.addWidget(_section_header("GPU Mode (Preview)"))
+        box_layout.addWidget(_section_header("GPU Mode"))
 
         gpu_mode_note = QLabel(
-            "GPU Mode is the foundation for hardware-accelerated hand tracking. "
-            "When the toggle is on, Touchless tries the GPU inference path and "
-            "transparently falls back to CPU MediaPipe if no GPU path is reachable "
-            "on your machine — gesture recognition keeps working either way. "
-            "The full GPU runtime is being rolled out incrementally; for now the "
-            "toggle wires the plumbing without yet swapping the inference itself."
+            "GPU Mode routes hand tracking through ONNX Runtime + DirectML on any "
+            "DX12 GPU (NVIDIA / AMD / Intel). When the toggle is on, Touchless tries "
+            "the GPU inference path and transparently falls back to CPU MediaPipe "
+            "if no GPU path is reachable on your machine — gesture recognition "
+            "keeps working either way. Hover the toggle to see what paths the "
+            "current machine reports as available."
         )
         gpu_mode_note.setObjectName("cameraNote")
         gpu_mode_note.setWordWrap(True)
@@ -4133,17 +4207,25 @@ class MainWindow(QMainWindow):
         gpu_mode_row.addWidget(self.gpu_mode_button)
         gpu_mode_row.addStretch(1)
         box_layout.addLayout(gpu_mode_row)
-        # Probe what GPU paths are reachable so we can disable the
-        # toggle with an explanatory tooltip on machines that have
-        # nothing to accelerate against.
+        # Probe what GPU paths are reachable and surface it via the
+        # tooltip — but DON'T disable the toggle on a probe miss. The
+        # runtime loader falls back to CPU MediaPipe transparently if
+        # no GPU path is reachable, so toggling on with no GPU is at
+        # worst a no-op. Earlier versions disabled the button when
+        # the probe came back empty, which on some machines (probe
+        # false-negative, packaged-app DLL discovery edge cases) made
+        # GPU Mode appear permanently unavailable even when the user
+        # had a perfectly capable GPU.
         try:
             from ...gesture.tracking.gpu_probe import probe_gpu_paths
             probe = probe_gpu_paths()
             if probe.has_any_gpu_path:
                 self.gpu_mode_button.setToolTip(probe.path_summary())
             else:
-                self.gpu_mode_button.setEnabled(False)
-                self.gpu_mode_button.setToolTip(probe.path_summary())
+                self.gpu_mode_button.setToolTip(
+                    probe.path_summary()
+                    + " — toggling on is safe; runtime falls back to CPU MediaPipe automatically."
+                )
         except Exception:
             pass
         self._refresh_gpu_mode_button_label()
