@@ -1078,27 +1078,17 @@ def _build_voice_command_cards() -> list[VoiceCommandCard]:
             ],
         ),
         VoiceCommandCard(
-            title="Spotify track / shuffle / repeat",
-            action="Skip, go back, or toggle shuffle/repeat on the current Spotify session.",
-            examples=[
-                "next song",
-                "skip this track",
-                "previous song",
-                "go back",
-                "shuffle on",
-                "shuffle off",
-                "repeat this track",
-            ],
-        ),
-        VoiceCommandCard(
-            title="Add / remove from Spotify playlist",
-            action="Manage the currently-playing track against a named playlist or your library.",
+            title="Add / remove from a named Spotify playlist",
+            action=(
+                "Manage the currently-playing track against a playlist by NAME — "
+                "something gestures can't do because they can't pick a specific "
+                "playlist. Skip / previous / shuffle / pause are all available "
+                "as right-hand gestures and aren't included here on purpose."
+            ),
             examples=[
                 "add this to my workout playlist",
-                "remove this song from my playlist",
-                "save this track",
-                "add to queue",
-                "remove from queue",
+                "remove this song from my chill mix",
+                "save this track to liked songs",
             ],
         ),
         VoiceCommandCard(
@@ -3653,28 +3643,71 @@ class MainWindow(QMainWindow):
             "Instructions",
             "Touchless turns a live camera feed into hands-free control of Spotify, Chrome, the mouse, system volume, voice dictation, and an on-screen drawing canvas. Use this page as the quick start, Control Guide for the full gesture + voice command map, and Tutorial for the guided walkthrough.",
         )
+
+        # Wrap the body in a scroll area so the long step list stays
+        # readable on shorter windows instead of squishing.
+        accent = self.config.accent_color or "#1DE9B6"
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.viewport().setStyleSheet("background: transparent;")
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea, QScrollArea > QWidget {{
+                background: transparent; border: none;
+            }}
+            QScrollArea QScrollBar:vertical {{
+                background: rgba(255,255,255,0.04);
+                width: 10px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
+            }}
+            QScrollArea QScrollBar::handle:vertical {{
+                background: {accent};
+                border-radius: 5px;
+                min-height: 32px;
+            }}
+            QScrollArea QScrollBar::add-line:vertical,
+            QScrollArea QScrollBar::sub-line:vertical {{
+                height: 0px; background: transparent;
+            }}
+            """
+        )
+
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        scroll.setWidget(inner)
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 8, 0)
+        inner_layout.setSpacing(12)
+
         info_box = QFrame()
         info_box.setObjectName("innerCard")
         info_layout = QVBoxLayout(info_box)
         info_layout.setContentsMargins(16, 16, 16, 16)
         info_layout.setSpacing(10)
         items = [
-            "1. Press Start to begin live tracking with the selected camera. Touchless reads both hands in real time and routes gestures to whatever control context is active (Spotify, Chrome, mouse, volume, voice, drawing).",
-            "2. Live View shows the camera feed with the hand skeleton, gesture label per hand (red box default, green when a gesture is recognized), voice state, volume state, and current app routing. Open it whenever you want to verify what Touchless is seeing.",
-            "3. Right-hand gestures drive Spotify, Chrome, the gesture wheels, drawing, and volume. Left-hand gestures drive voice / dictation, the mouse-mode toggle, the YouTube wheel toggle (left 'four'), and Spotify-side controls during a save prompt.",
-            "4. Spotify actions work while Spotify is running on this device. Chrome wheel actions only work while Chrome is already open and active. The right-hand 'two' gesture will open or focus Spotify if it isn't running.",
-            "5. Mouse mode is a separate control mode. Turn it on with the left hand, control the pointer with the right hand, then turn it off again when finished. While mouse mode is on, drawing and the gesture wheels are disabled.",
-            "6. Drawing mode (right-hand gesture) lets you sketch directly over the camera feed. Open thumb for ~0.2s lifts the pen; left-hand pinch + stretch resizes a captured stroke; swipe right clears the canvas, swipe left undoes one stroke. Color, thickness, and eraser type persist across sessions; shape mode does not — it always starts off when you re-enter drawing mode.",
-            "7. Use your phone as the camera (and optionally the microphone) by opening Settings -> Camera, scanning the QR code with your phone, and tapping 'Use phone camera'. The phone streams video over your local Wi-Fi to Touchless and bypasses any laptop webcam. Phone microphone is a separate toggle in Settings -> Microphone.",
-            "8. Three camera-performance modes live in Settings -> Camera. Low FPS auto-engages on slower hardware (drops to 0.34/0.22 confidence + lite landmark model). Lite Mode is a manual switch to MediaPipe model_complexity=0 for ~2.5x faster CPU inference. GPU Mode routes the hand-detection model through ONNX Runtime + DirectML on any DX12 GPU (NVIDIA / AMD / Intel) and falls back to CPU MediaPipe if the GPU path is unreachable. Toggle whichever combination keeps your machine at ~30 fps.",
-            "9. Tutorial is the best place to learn the main motions. It uses the same live gesture and voice runtime as the app, so the actions you practice there are the real actions the app will run.",
+            "1. Press Start to begin live tracking with the selected camera. Touchless reads both hands in real time and routes gestures to whichever control context is active (Spotify, Chrome, mouse, volume, voice, drawing).",
+            "2. Live View shows the camera feed with the hand skeleton, a per-hand gesture label (red outline by default, green when a gesture is recognized), the voice state, the volume state, and the current app routing. Open it whenever you want to verify what Touchless is seeing.",
+            "3. Right-hand gestures drive Spotify, Chrome, the gesture wheels, drawing, and volume. Left-hand gestures drive voice and dictation, the mouse-mode toggle, the YouTube wheel toggle (left 'four'), and Spotify-side controls during a save prompt.",
+            "4. Spotify actions only work while Spotify is running on this device. Chrome wheel actions only work while Chrome is already open and active. The right-hand 'two' gesture will open or focus Spotify if it isn't running.",
+            "5. Mouse mode is a separate control mode. Turn it on with the left hand, control the pointer with the right hand, and turn it off again when you're finished. While mouse mode is on, drawing and the gesture wheels are disabled.",
+            "6. Drawing mode (right-hand gesture) lets you sketch directly over the camera feed. Opening the thumb for about 0.2 seconds lifts the pen; a left-hand pinch + stretch resizes the captured stroke; swiping right clears the canvas, swiping left undoes one stroke. Color, thickness, and eraser type persist across sessions; shape mode always resets to off when you re-enter drawing mode.",
+            "7. Use your phone as the camera (and optionally the microphone) by opening Settings -> Camera, scanning the QR code with your phone, and tapping 'Use phone camera'. The phone streams video over your local Wi-Fi and bypasses any built-in webcam. The phone microphone is a separate toggle in Settings -> Microphone.",
+            "8. Three camera-performance modes live in Settings -> Camera. Low FPS auto-engages on slower hardware (drops to 0.34 / 0.22 detection thresholds + the lite landmark model). Lite Mode is a manual switch to MediaPipe model_complexity=0 for roughly 2.5x faster CPU inference. GPU Mode routes the hand-detection model through ONNX Runtime + DirectML on any DX12 GPU (NVIDIA / AMD / Intel) and falls back to CPU MediaPipe if the GPU path isn't reachable. Use whichever combination keeps your machine near 30 fps.",
+            "9. Custom Gestures (Beta) lets you record your own static hand pose and bind it to a key, hotkey, text snippet, URL, or shell command. Open Settings -> Custom Gesture to create one and to test it in the Sandbox.",
+            "10. Tutorial is the easiest place to learn the main motions. It uses the same live gesture and voice runtime as the rest of the app, so the actions you practice there are the real actions the app will run.",
         ]
         for item in items:
             lbl = QLabel(item)
             lbl.setWordWrap(True)
             info_layout.addWidget(lbl)
-        layout.addWidget(info_box, 0)
-        layout.addStretch(1)
+        inner_layout.addWidget(info_box)
+        inner_layout.addStretch(1)
+
+        layout.addWidget(scroll, 1)
         return panel
 
     def _build_gesture_guide_panel(self) -> QWidget:
@@ -3705,20 +3738,61 @@ class MainWindow(QMainWindow):
 
     def _build_custom_gesture_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
-            "Custom Gesture",
-            "Custom gesture setup is reserved for a future update.",
+            "Custom Gestures Beta",
+            "Record your own hand pose and bind it to a key, hotkey, "
+            "text snippet, URL, or shell command. Static poses only — "
+            "see the How it works card below for limitations.",
         )
-        box = QFrame()
-        box.setObjectName("innerCard")
-        box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(16, 16, 16, 16)
-        box_layout.setSpacing(10)
-        coming_soon = QLabel("Coming soon.")
-        coming_soon.setWordWrap(True)
-        box_layout.addWidget(coming_soon)
-        layout.addWidget(box)
-        layout.addStretch(1)
+        from .custom_gestures_panel import CustomGesturesPanel
+
+        self._custom_gestures_panel = CustomGesturesPanel(
+            config=self.config,
+            accent_color=self.config.accent_color or "#1DE9B6",
+            parent=panel,
+        )
+        self._custom_gestures_panel.open_create_requested.connect(
+            self._open_custom_gesture_creator
+        )
+        self._custom_gestures_panel.open_sandbox_requested.connect(
+            self._open_custom_gesture_sandbox
+        )
+        layout.addWidget(self._custom_gestures_panel)
         return panel
+
+    def _open_custom_gesture_creator(self) -> None:
+        from PySide6.QtWidgets import QDialog
+        from .custom_gestures_recorder import RecordingWindow
+        from .custom_gestures_wizard import CreateGestureWizard
+
+        accent = self.config.accent_color or "#1DE9B6"
+        wizard = CreateGestureWizard(accent_color=accent, parent=self)
+        if wizard.exec() != QDialog.DialogCode.Accepted or wizard.result_payload is None:
+            return
+        result = wizard.result_payload
+        # Pass the worker if it's running so the recorder can share its
+        # frame stream — otherwise the recorder opens its own camera so
+        # the user doesn't have to start the main live viewer first.
+        worker = getattr(self, "_worker", None)
+        recorder = RecordingWindow(
+            worker=worker,
+            accent_color=accent,
+            name=result.name,
+            description=result.description,
+            action=result.action,
+            parent=self,
+        )
+        recorder.saved.connect(lambda _name: self._custom_gestures_panel.refresh_cards())
+        recorder.exec()
+
+    def _open_custom_gesture_sandbox(self) -> None:
+        from .custom_gestures_sandbox import SandboxWindow
+
+        accent = self.config.accent_color or "#1DE9B6"
+        # As with the recorder, pass the worker if alive — sandbox falls
+        # back to its own camera otherwise.
+        worker = getattr(self, "_worker", None)
+        sandbox = SandboxWindow(worker=worker, accent_color=accent, parent=self)
+        sandbox.show()
 
     def _build_colors_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
@@ -5327,6 +5401,52 @@ class MainWindow(QMainWindow):
             )
 
         return [
+            make("1.0.9", "2026-05-01", """
+**Major release: GPU acceleration, polished mouse mode, and big quality-of-life pass.**
+
+GPU & performance
+- **GPU Mode (real)**: hand tracking now runs through ONNX Runtime + DirectML on any DX12 GPU (NVIDIA / AMD / Intel). Falls back to MediaPipe CPU automatically if the GPU path isn't reachable. Toggle in Settings -> Camera.
+- **Decoupled display pipeline**: live camera frames now paint at camera FPS independently of inference, so the camera feed stays smooth even when the engine is busy.
+- **Camera-lag eliminated** during heavy events. Opening Chrome, Spotify, or any GPU-heavy app no longer leaves the camera feed seconds behind real motion. Dual-stage staleness detection drops backlog within a couple frames.
+- **Wheel paint cache** (Spotify / Chrome / YouTube / Drawing / Utility wheels): 4.1× faster paint, ~5 ms / frame freed on the main UI thread.
+- **Hand-landmark drawing batched** (single drawLines / drawPoints per frame instead of 84 separate calls).
+
+Drawing
+- **Pen-lift** detection rewritten: open thumb for 0.2 s lifts the pen reliably; tilt + rotation no longer mis-fire.
+- **Stroke smoothing** via quadratic Bezier through midpoints — strokes look like ink, not connected dots.
+- **Velocity-adaptive cursor smoothing** — the index-finger cursor stays put when your hand is still, tracks fast strokes responsively.
+- **Shape mode resets** when you exit drawing mode and on app restart (color, thickness, eraser kind still persist as you'd expect).
+- **Swipe-right to clear** now fires reliably from the draw-grace window, not only from hover.
+
+Mouse mode
+- **Red control-area box** is back, with monitor layout drawn proportionally inside it. The cursor dot inside the box mirrors your actual mouse position across multi-monitor setups.
+- **Cursor smoothing** retuned — no more rubber-banding when landing on small targets.
+- **Mouse Mode: On/Off pill** confirms toggles.
+- **Tutorial Part 5** now shows the same red box and cursor mapping as the live app.
+
+Gesture detection
+- **Volume pose** strict gate: requires direct fingertip-to-fingertip closeness so a peace sign / two with fingers apart no longer triggers volume control.
+- **Live-view bbox per hand**: red default, green when that hand has a recognized gesture, with handedness + gesture name in a banner. Both hands are first-class — either can drive its own active state.
+- **Skeleton + larger round joints** for cleaner readability.
+
+Tutorial
+- **Part 6 (Voice Command)** added to the description.
+- Per-finger instructions for every static pose (which fingers extend, which curl, palm orientation, hold duration).
+- Tutorial popup uses the Touchless title-bar color, with the app logo, and Yes/No buttons reordered with Yes as the brighter primary action.
+
+Settings
+- **Rich search**: type a gesture name, voice command, or panel keyword and the dropdown shows matching entries. Click to open the right tab, expand the right collapsible, and scroll the entry into view.
+- **Search clear X** uses your accent color and the search resets when you leave Settings.
+- **Wheel scrolling fixed** in Camera and Microphone panels (combo / spinbox / slider widgets no longer eat scroll events).
+- **Updates panel** falls back to a built-in release-history list if GitHub can't be reached.
+- **Mini live viewer** now stays reliably on top, including across full-screen window transitions.
+
+Admin elevation
+- Touchless launches with administrator elevation by default starting in 1.0.9. **Why**: clip recording uses Windows screen capture, which can't see frames from games running at higher integrity levels without admin. The first launch after this update will show a UAC prompt — click Yes. Per-user install path and the auto-updater both still work.
+
+<!-- full-installer-url: https://touchless.example.com/v1.0.9/Touchless_Installer.exe -->
+<!-- full-installer-size: 0 -->
+"""),
             make("1.0.8", "2026-04-15", """
 - **Lite Mode** end-to-end: manual switch to MediaPipe model_complexity=0 for ~2.5x faster CPU inference at the same gesture quality.
 - **GPU Mode foundation**: tasks_runtime adapter + harder runtime probe + .task asset bundling so the GPU path can engage on first install.
