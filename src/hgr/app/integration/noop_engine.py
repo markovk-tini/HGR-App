@@ -3895,11 +3895,21 @@ class GestureWorker(QObject):
         # the user has no custom gestures registered.
         if self._custom_gesture_runner is not None:
             try:
+                # Auto-reload from the registry file if it changed on
+                # disk since our last check (recorder / sandbox /
+                # wizard saved a new gesture). Throttled internally to
+                # one stat() per ~3 s, so the per-frame cost is
+                # negligible. Catches the case where the user creates
+                # a gesture mid-run and the save path didn't explicitly
+                # call worker.reload_custom_gestures().
+                self._custom_gesture_runner.maybe_reload_if_changed(time.monotonic())
                 if result.found and result.tracked_hand is not None:
                     landmarks_arr = getattr(result.tracked_hand, "landmarks", None)
                     if landmarks_arr is not None:
+                        live_hand = getattr(result.tracked_hand, "handedness", None)
+                        live_hand = str(live_hand) if live_hand in ("Left", "Right") else None
                         fired = self._custom_gesture_runner.process(
-                            landmarks_arr, time.monotonic()
+                            landmarks_arr, time.monotonic(), handedness=live_hand
                         )
                         if fired:
                             try:
