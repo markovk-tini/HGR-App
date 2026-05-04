@@ -45,6 +45,7 @@ _ACTION_KINDS = (
     ("Type a text snippet", "text", "Text to type", "e.g. test@example.com"),
     ("Open a URL in browser", "open_url", "URL", "e.g. https://example.com"),
     ("Run a shell command", "run_command", "Command", "e.g. start spotify"),
+    ("Show a saved drawing as overlay", "show_overlay_drawing", "Drawing filename (in your drawings folder)", "e.g. Touchless_Drawing_001.png"),
 )
 
 
@@ -199,7 +200,7 @@ class CreateGestureWizard(QDialog):
         # Name
         root.addWidget(QLabel("Name *"))
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("short, no spaces — e.g. open_inbox")
+        self.name_edit.setPlaceholderText("e.g. Open Inbox")
         root.addWidget(self.name_edit)
 
         # Description
@@ -345,9 +346,10 @@ class CreateGestureWizard(QDialog):
         if not name:
             self._error("Please enter a gesture name.")
             return
-        if " " in name:
-            self._error("Gesture name cannot contain spaces.")
-            return
+        # Spaces are now allowed (e.g., "open chrome", "my wave"); the
+        # registry stores the literal name so display reflects what
+        # the user typed. The thumbnail filename is sanitised
+        # separately in custom_gestures_recorder._save_thumbnail_to_disk.
 
         # Name-conflict check against the registry. In edit mode, the
         # gesture's own existing name is fine (no warning needed) — only
@@ -422,6 +424,17 @@ class CreateGestureWizard(QDialog):
             return Action(kind=kind, payload={"url": value, **timing_payload})
         if kind == "run_command":
             return Action(kind=kind, payload={"command": value, "shell": True, **timing_payload})
+        if kind == "show_overlay_drawing":
+            # Strip the user's input and append .png if they didn't.
+            # Resolution against the configured drawings_save_dir
+            # happens at fire-time in main_window — the wizard just
+            # stores the literal filename so the user can later move
+            # the underlying file or rename the directory without
+            # editing the gesture binding.
+            filename = value
+            if filename and not filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                filename = filename + ".png"
+            return Action(kind=kind, payload={"filename": filename, **timing_payload})
         return Action(kind="noop", payload=timing_payload)
 
     def _error(self, message: str) -> None:

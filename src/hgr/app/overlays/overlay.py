@@ -554,11 +554,16 @@ class ScreenDrawOverlay(QWidget):
 
     def save_canvas_snapshot(self, *, target_dir: Path | None = None, target_path: Path | None = None) -> Optional[Path]:
         self._ensure_canvas_size()
-        bg_color = QColor("#000000")
-        if self.brush_color.lightness() < 38:
-            bg_color = QColor("#FFFFFF")
+        # Save with a transparent background so the resulting PNG is
+        # just the strokes — no solid black/white rectangle around
+        # them. The custom-gesture "show_overlay_drawing" action
+        # depends on this so a saved drawing can be re-displayed as
+        # a click-through overlay on top of any app. Backwards-
+        # compatible for users who just want the file: a transparent
+        # PNG opens fine in every viewer / editor and shows the
+        # stroke colors against whatever the viewer's background is.
         output = QImage(self._canvas.size(), QImage.Format_ARGB32_Premultiplied)
-        output.fill(bg_color)
+        output.fill(Qt.transparent)
         painter = QPainter(output)
         painter.drawImage(0, 0, self._canvas)
         painter.end()

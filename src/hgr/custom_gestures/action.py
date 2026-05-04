@@ -282,6 +282,15 @@ def execute(action: Action) -> bool:
         if not cmd:
             return False
         return execute_run_command(cmd, shell=bool(payload.get("shell", True)))
+    if kind == "show_overlay_drawing":
+        # Qt-coupled action — the runner intercepts this kind before
+        # dispatching to execute() and routes it to a callback that
+        # talks to the GUI thread (see CustomGestureRunner). We
+        # never reach this branch in practice, but return True here
+        # so that if the runner falls back to execute() for any
+        # reason the cooldown still ticks (preventing a tight
+        # repeat-fire loop) instead of looking like a failed action.
+        return True
     return False
 
 
@@ -306,6 +315,8 @@ def describe(action: Action) -> str:
         cmd = str(p.get("command", ""))
         preview = cmd if len(cmd) <= 60 else cmd[:57] + "..."
         return f"run: {preview}"
+    if kind == "show_overlay_drawing":
+        return f"show drawing: {p.get('filename', '?')}"
     return f"unknown action: {kind}"
 
 

@@ -54,6 +54,7 @@ class CustomGestureRunner:
         default_hold_seconds: float = _DEFAULT_HOLD_SECONDS,
         grace_seconds: float = _DEFAULT_GRACE_SECONDS,
         binding_resolver=None,
+        image_overlay_handler=None,
     ) -> None:
         self._registry = GestureRegistry()
         self._classifier: Optional[GestureClassifier] = None
@@ -71,6 +72,14 @@ class CustomGestureRunner:
         # the gesture's stored action as usual. Decoupled from the engine
         # via callback so the runner stays pure (no engine import).
         self._binding_resolver = binding_resolver
+        # Qt-coupled bridge for the "show_overlay_drawing" action kind.
+        # Signature: image_overlay_handler(filename: str) -> None
+        # Called on the firing edge when a gesture's stored action is
+        # show_overlay_drawing. The engine's handler emits a Qt signal
+        # that the main window listens to so the actual QWidget
+        # mutation happens on the GUI thread — keeps this runner pure
+        # (no Qt import) and the engine pure (no widget code).
+        self._image_overlay_handler = image_overlay_handler
         # Idle-throttle: when no candidate is being held, only run the
         # classifier at ~20 Hz (50 ms intervals) instead of every frame.
         # Custom gestures need ~1 s of hold to fire, so a 50 ms sampling
@@ -511,6 +520,27 @@ class CustomGestureRunner:
                         f"(score={match.score:.2f}, hand={handedness})"
                     )
                     return match.gesture.name
+            # Qt-coupled action: route to the image-overlay handler
+            # registered by the engine. fire_once would just no-op
+            # this kind (returns True without doing anything), so
+            # the bridge has to live here. The handler talks to the
+            # GUI thread via a queued Qt signal.
+            if match.gesture.action.kind == "show_overlay_drawing":
+                filename = str((match.gesture.action.payload or {}).get("filename", ""))
+                if self._image_overlay_handler is not None:
+                    try:
+                        self._image_overlay_handler(filename)
+                    except Exception as exc:
+                        print(
+                            f"[custom-gestures] image_overlay_handler error "
+                            f"for {match.gesture.name!r}: {exc}"
+                        )
+                self._fired_for_hold = True
+                print(
+                    f"[custom-gestures] FIRED-OVERLAY {match.gesture.name!r} "
+                    f"file={filename!r} (score={match.score:.2f}, hand={handedness})"
+                )
+                return match.gesture.name
             if fire_once(match.gesture.name, match.gesture.action):
                 self._fired_for_hold = True
                 print(

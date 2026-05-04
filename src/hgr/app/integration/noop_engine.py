@@ -468,6 +468,11 @@ class GestureWorker(QObject):
     # a light blur so the user knows the main app intentionally
     # stopped reacting while a recording window is open.
     frozen_state_changed = Signal(bool)
+    # Custom-gesture "show_overlay_drawing" action: emitted when a
+    # bound gesture fires, carrying the user-typed filename. The
+    # main window resolves it against the configured drawings dir
+    # and toggles a transparent always-on-top overlay window.
+    drawing_overlay_toggle_requested = Signal(str)
 
     _LOW_FPS_AUTO_THRESHOLD = 18.0
     _LOW_FPS_AUTO_ENTER_SECONDS = 4.0
@@ -863,6 +868,7 @@ class GestureWorker(QObject):
             from ...custom_gestures.runner import CustomGestureRunner
             self._custom_gesture_runner = CustomGestureRunner(
                 binding_resolver=self._custom_runner_binding_resolver,
+                image_overlay_handler=self._custom_runner_image_overlay_handler,
             )
         except Exception as exc:
             print(f"[custom-gestures] runner init failed: {exc}")
@@ -946,6 +952,7 @@ class GestureWorker(QObject):
                 from ...custom_gestures.runner import CustomGestureRunner
                 self._custom_gesture_runner = CustomGestureRunner(
                     binding_resolver=self._custom_runner_binding_resolver,
+                    image_overlay_handler=self._custom_runner_image_overlay_handler,
                 )
             except Exception as exc:
                 print(f"[custom-gestures] late init failed: {exc}")
@@ -4790,6 +4797,26 @@ class GestureWorker(QObject):
             return bool(self._dispatch_action(bound_action_id, time.monotonic()))
         except Exception:
             return False
+
+    def _custom_runner_image_overlay_handler(self, filename: str) -> None:
+        """Bridge from the custom-gesture runner (worker thread) to
+        the main window (GUI thread). Just emits a Qt signal — the
+        receiver runs on the GUI thread because Qt picks a queued
+        connection across threads — and main_window does the actual
+        path resolution and overlay-widget mutation there.
+        Logs to recent-actions so the user can see the fire in the
+        same activity feed as built-in gestures."""
+        try:
+            self.drawing_overlay_toggle_requested.emit(str(filename or ""))
+        except Exception:
+            pass
+        try:
+            self._record_action(
+                "drawing_overlay_toggle",
+                f"toggled drawing overlay: {filename}" if filename else "toggled drawing overlay",
+            )
+        except Exception:
+            pass
 
     def _handle_app_controls(self, prediction, hand_reading, hand_handedness: str | None, now: float) -> None:
         if self._tutorial_mode_enabled:
