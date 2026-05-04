@@ -6675,6 +6675,36 @@ class MainWindow(QMainWindow):
             )
 
         return [
+            make("1.1.0b2", "2026-05-04", """
+**1.1 beta 2 — installer fix + tutorial polish + volume stability + recent-actions logging.**
+
+Installer
+- **Fixed error 740 on first install.** The post-install "Launch Touchless" checkbox was failing with "the requested operation requires elevation" on clean installs. Touchless.exe has a requireAdministrator manifest, but Inno Setup's default launcher uses CreateProcess which can't elevate. Switched to ShellExecute via the `shellexec` flag so the launch goes through the normal UAC prompt. Same path Explorer takes when you double-click a desktop shortcut.
+
+Volume pose stability
+- Volume pose detection no longer flickers on/off while you hold the pose. Added hysteresis (strict on entry, lenient once active), bumped the pose-grace window from 0.4s to 0.6s, and the release-frame counter from 2 to 5 frames so brief landmark jitter doesn't kick the tracker off.
+
+Tutorial
+- **Step 2 / Step 4 (Spotify, gesture wheel)**: once detected, the "Detected!" message stays put with "Swipe right to move on." even when the hand drops out of frame. Was reverting to "Waiting…" every frame the hand wasn't visible.
+- **Mouse mode completion**: a giant translucent ✓ now overlays the practice arena once you complete the targets and turn mouse mode off. Targets stay visible underneath. Completion message trimmed to just "Nice work!".
+- **Voice command tutorial**: skeleton overlay is now mirrored so it visually represents the LEFT hand. Header rewritten to "Hold left-hand one to activate voice listening, then say: 'Open YouTube on Google Chrome'."
+- **Tutorial copy** tightened across all 6 steps — every step's "How to do it" is now a quick scan instead of a wall of text.
+- **Larger completion checkmark** (200px) on every step except mouse mode (which has its own overlay above).
+
+Recent Actions
+- The Recent Actions panel now logs **every** gesture-driven event, not just media + volume. Added: mouse mode toggle, drawing mode toggle, voice listen start, dictation start/stop, voice cancel, and every custom-gesture fire.
+
+Custom gestures
+- **Gesture Binds hover popup** layout updated: description on the left, image on the right (was image-left). Larger image (180px) with friendlier fallback messages when no thumbnail was saved.
+- **Tighter thumbnail crop** when recording (1.4× hand bbox vs 2.0× before) — your hand actually fills the snapshot now.
+- **Conflict check** no longer flags OK-shaped gestures. OK isn't in the user-facing Gesture Binds gallery, so blocking custom OK recordings with "this conflicts with Spotify shuffle" was confusing for a pose users can't see or rebind.
+
+Updater
+- Version comparison now uses PEP 440 properly (the v1.1.0b1 fix). Future betas → RCs → stable transitions all upgrade cleanly.
+
+<!-- full-installer-url: https://pub-3116ebd541fa4ca18a84371667d029fe.r2.dev/windows/v1.1.0b2/Touchless_Installer.exe -->
+<!-- full-installer-size: 0 -->
+"""),
             make("1.1.0b1", "2026-05-04", """
 **1.1 beta — code signing, Gesture Binds, custom gestures, and license switch.**
 
