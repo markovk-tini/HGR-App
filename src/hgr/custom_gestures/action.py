@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import platform
 import subprocess
 import time
@@ -248,6 +249,38 @@ def execute_run_command(command: str, *, shell: bool = True) -> bool:
         return False
 
 
+def execute_open_file(path: str) -> bool:
+    """Open a file with the OS's default handler. Word docs open in
+    Word, PNGs in Photos, MP4s in the default player, .url files in
+    the browser, etc. Equivalent to double-clicking in Explorer.
+
+    Strips wrapping quotes from the path because Explorer's 'Copy as
+    path' command surrounds the path with double-quotes — pasting
+    that straight in shouldn't break the binding."""
+    cleaned = path.strip().strip('"').strip("'")
+    if not cleaned:
+        return False
+    try:
+        if platform.system() == "Windows":
+            os.startfile(cleaned)
+            return True
+        # Defensive cross-platform fallback. Touchless ships
+        # Windows-only today, but keeping this branch means a
+        # custom-gesture action authored on Windows still does the
+        # right thing if a future macOS/Linux build picks it up.
+        opener = "open" if platform.system() == "Darwin" else "xdg-open"
+        subprocess.Popen(
+            [opener, cleaned],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def execute(action: Action) -> bool:
     """Dispatch an Action to the right executor. Returns True on success,
     False on failure. A 'noop' action always succeeds (useful for disabling
@@ -282,6 +315,11 @@ def execute(action: Action) -> bool:
         if not cmd:
             return False
         return execute_run_command(cmd, shell=bool(payload.get("shell", True)))
+    if kind == "open_file":
+        path = str(payload.get("path", "")).strip()
+        if not path:
+            return False
+        return execute_open_file(path)
     if kind == "show_overlay_drawing":
         # Qt-coupled action — the runner intercepts this kind before
         # dispatching to execute() and routes it to a callback that
@@ -315,6 +353,10 @@ def describe(action: Action) -> str:
         cmd = str(p.get("command", ""))
         preview = cmd if len(cmd) <= 60 else cmd[:57] + "..."
         return f"run: {preview}"
+    if kind == "open_file":
+        path = str(p.get("path", ""))
+        preview = path if len(path) <= 60 else "..." + path[-57:]
+        return f"open file: {preview}"
     if kind == "show_overlay_drawing":
         return f"show drawing: {p.get('filename', '?')}"
     return f"unknown action: {kind}"

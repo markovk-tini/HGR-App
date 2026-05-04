@@ -45,6 +45,7 @@ _ACTION_KINDS = (
     ("Type a text snippet", "text", "Text to type", "e.g. test@example.com"),
     ("Open a URL in browser", "open_url", "URL", "e.g. https://example.com"),
     ("Run a shell command", "run_command", "Command", "e.g. start spotify"),
+    ("Open any file", "open_file", "Full file path", r"e.g. C:\Users\you\Documents\notes.docx"),
     ("Show a saved drawing as overlay", "show_overlay_drawing", "Drawing filename (in your drawings folder)", "e.g. Touchless_Drawing_001.png"),
 )
 
@@ -424,6 +425,15 @@ class CreateGestureWizard(QDialog):
             return Action(kind=kind, payload={"url": value, **timing_payload})
         if kind == "run_command":
             return Action(kind=kind, payload={"command": value, "shell": True, **timing_payload})
+        if kind == "open_file":
+            # Strip wrapping quotes — Explorer's "Copy as path"
+            # context-menu entry surrounds paths with double-quotes,
+            # and pasting that straight in shouldn't break the
+            # action. The executor strips them too as a defence in
+            # depth, but normalising here keeps the stored payload
+            # clean for display in Recent Actions / edit-mode.
+            cleaned = value.strip().strip('"').strip("'")
+            return Action(kind=kind, payload={"path": cleaned, **timing_payload})
         if kind == "show_overlay_drawing":
             # Strip the user's input and append .png if they didn't.
             # Resolution against the configured drawings_save_dir
