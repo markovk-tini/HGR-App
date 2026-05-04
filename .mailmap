@@ -1,0 +1,12 @@
+# Canonicalize all author identities to a single name + email.
+# Older commits used a few different names/emails before settling on
+# the canonical pair below. Every commit listed below is by the same
+# person; this mailmap simply tells git tools to display them under
+# the canonical identity.
+#
+# Format: <Canonical Name> <canonical@email> <Old Name> <old@email>
+
+Konstantin Markov <konstantinvmarkov@gmail.com> Dani <dani@mangollc.org>
+Konstantin Markov <konstantinvmarkov@gmail.com> Konstantin Markov <dani@mangollc.org>
+Konstantin Markov <konstantinvmarkov@gmail.com> markovk <markovk@users.noreply.github.com>
+Konstantin Markov <konstantinvmarkov@gmail.com> markovk-tini <konstantinvmarkov@gmail.com>

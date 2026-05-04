@@ -1,0 +1,20 @@
+Touchless
+Copyright 2026 Konstantin Markov
+
+This product includes software developed by Konstantin Markov.
+
+---
+
+This product also incorporates the following third-party components,
+each licensed by their respective authors:
+
+- MediaPipe (Apache License 2.0) — Google LLC
+- OpenCV (Apache License 2.0) — OpenCV team
+- PySide6 / Qt (LGPL v3 / Commercial) — The Qt Company
+- whisper.cpp (MIT License) — Georgi Gerganov
+- llama.cpp (MIT License) — Georgi Gerganov
+- ONNX Runtime (MIT License) — Microsoft Corporation
+- numpy (BSD-3-Clause) — NumPy contributors
+
+Full license texts for each component are included in their respective
+distribution directories or are available from their upstream projects.
