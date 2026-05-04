@@ -1317,7 +1317,7 @@ class TutorialWindow(QDialog):
             except Exception:
                 pass
         try:
-            self._set_step_progress(text)
+            self.progress_label.setText(text)
         except Exception:
             pass
 
@@ -1372,7 +1372,8 @@ class TutorialWindow(QDialog):
         Also handles the 1-second transition celebration after each
         sub-phase finishes: 'Completed right swipes!' between the
         right and left phases, and 'Completed left swipes!' before
-        the overall step completes."""
+        the overall step settles into 'All done, great work!' +
+        'Swipe right to move on!'."""
         right_count = int(self._swipe_counts.get("swipe_right", 0))
         left_count = int(self._swipe_counts.get("swipe_left", 0))
         in_left_phase = right_count >= 3
@@ -1382,7 +1383,17 @@ class TutorialWindow(QDialog):
         # swipes!" before transitioning to the next prompt.
         in_transition = now - self._swipe_last_advance_at < 1.0
 
-        if not in_left_phase:
+        footer_html: str | None = None  # set when we want a fixed
+        # post-completion sentence instead of the count line.
+        if self._step_completed:
+            if in_transition:
+                header = "Completed left swipes!"
+                count, label = 3, "left swipes"
+            else:
+                header = "All done, great work!"
+                footer_html = "Swipe right to move on!"
+                count, label = 3, "left swipes"
+        elif not in_left_phase:
             header = "Let's start with swiping right! Use skeleton hands for help."
             count, label = right_count, "right swipes"
         elif left_count == 0 and in_transition:
@@ -1395,18 +1406,21 @@ class TutorialWindow(QDialog):
             header = "Now let's try swiping to the left!"
             count, label = left_count, "left swipes"
 
-        color = self._swipe_count_color(count)
-        footer_html = (
-            f'<span style="color:{color};">'
-            f"Completed {count}/3 {label}"
-            f"</span>"
-        )
+        if footer_html is None:
+            color = self._swipe_count_color(count)
+            footer_html = (
+                f'Completed '
+                f'<span style="color:{color};">{count}/3</span> '
+                f'{label}'
+            )
         self.tutorial_camera_header.setText(header)
         self.tutorial_camera_footer.setText(footer_html)
         self.tutorial_camera_header.show()
         self.tutorial_camera_footer.show()
 
     def _complete_step(self, note: str | None = None) -> None:
+        if self._step_completed and self._completion_feedback_step == self._step_index:
+            return
         self._step_completed = True
         self._completed_steps.add(self._step_index)
         self.next_button.setEnabled(True)
@@ -1905,13 +1919,10 @@ class TutorialWindow(QDialog):
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + self._gesture_flash_seconds)
                 accepted_swipe = True
             self._last_dynamic_label = dynamic_label
+            if self._swipe_goal_index >= 6:
+                self._complete_step("Both swipes detected! Swipe right to move on!")
             self._refresh_swipe_camera_labels()
             visual_ready = accepted_swipe or now < self._visual_green_until.get("swipes", 0.0)
-            # Hold off on overall completion for 1s after the 6th
-            # swipe so the 'Completed left swipes!' transition
-            # message is visible before the overlay swap.
-            if self._swipe_goal_index >= 6 and (now - self._swipe_last_advance_at) >= 1.0:
-                self._complete_step("Both swipes detected! Swipe right to move on!")
             return visual_ready
 
         if step.key == "spotify_open":
@@ -2096,15 +2107,10 @@ class TutorialWindow(QDialog):
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + 1.0)
                 accepted_swipe = True
             self._last_dynamic_label = dynamic_label
+            if self._swipe_goal_index >= 6:
+                self._complete_step("Completed! Swipe right to move on!")
             self._refresh_swipe_camera_labels()
             visual_ready = accepted_swipe or now < self._visual_green_until.get("swipes", 0.0)
-            # Defer the overall step completion until the 'Completed
-            # left swipes!' celebration message has had its 1-second
-            # window. Without this delay, _complete_step fires
-            # immediately and the overlay swaps in before the user
-            # sees the transition message.
-            if self._swipe_goal_index >= 6 and (now - self._swipe_last_advance_at) >= 1.0:
-                self._complete_step("Completed! Swipe right to move on!")
             return visual_ready
 
         if step.key == "spotify_open":
