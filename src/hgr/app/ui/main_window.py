@@ -3456,10 +3456,15 @@ class MainWindow(QMainWindow):
         info_title.setObjectName("cardTitle")
         info_layout.addWidget(info_title)
         self.camera_label = QLabel("Camera: scanning...")
-        self.status_label = QLabel("Status: idle")
+        self.microphone_label = QLabel("Microphone: scanning...")
+        # status_label kept as a hidden compatibility shim — older code
+        # paths still call setText on it; we route the meaningful bits
+        # (errors, missing-camera notices) into camera_label instead.
+        self.status_label = QLabel("")
+        self.status_label.setVisible(False)
         self.last_action_label = QLabel("Last action: none")
         self.last_action_label.setVisible(False)
-        for label in (self.camera_label, self.status_label):
+        for label in (self.camera_label, self.microphone_label):
             label.setWordWrap(True)
             info_layout.addWidget(label)
 
@@ -3475,15 +3480,64 @@ class MainWindow(QMainWindow):
         self.undo_action_button.setEnabled(False)
         self.undo_action_button.clicked.connect(self._on_undo_last_action)
         history_header_row.addWidget(self.undo_action_button)
+        # Expand toggle in the top-right of the Recent Actions box —
+        # taps between the default ~140px height and a roomier ~300px
+        # so users with many recent actions can scroll a longer log
+        # without giving up the rest of the home screen.
+        self.action_history_expand_button = QPushButton("⤢")
+        self.action_history_expand_button.setObjectName("actionHistoryExpand")
+        self.action_history_expand_button.setToolTip("Expand / collapse Recent Actions")
+        self.action_history_expand_button.setFixedWidth(34)
+        self.action_history_expand_button.setCheckable(True)
+        self.action_history_expand_button.toggled.connect(self._on_action_history_expand_toggled)
+        history_header_row.addWidget(self.action_history_expand_button)
         info_layout.addLayout(history_header_row)
         self.action_history_list = QListWidget()
         self.action_history_list.setObjectName("actionHistoryList")
         self.action_history_list.setMaximumHeight(140)
         self.action_history_list.setSelectionMode(QListWidget.NoSelection)
         self.action_history_list.setFocusPolicy(Qt.NoFocus)
+        # Ensure the list actually scrolls when the content exceeds the
+        # visible height (especially after expand). The default policy
+        # leaves the scrollbar off until Qt re-evaluates layout, which
+        # can leave entries hidden with no way to reach them.
+        self.action_history_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.action_history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Grow vertically when given more room (used by the expand
+        # toggle to occupy the whole Runtime Status box).
+        self.action_history_list.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
         info_layout.addWidget(self.action_history_list)
 
+        # Stash references to widgets that hide when the user expands
+        # Recent Actions to fill the box. The runtime title / camera /
+        # microphone lines disappear so the action log gets the full
+        # height; collapsing restores them.
+        self._action_history_collapsible = [
+            info_title,
+            self.camera_label,
+            self.microphone_label,
+        ]
+
         body_layout.addWidget(info_card, 0, Qt.AlignHCenter)
+
+        # Stash the body layout so the expand toggle can swap stretch
+        # factors at runtime — that's what lets the info_card grow to
+        # fill available height when expanded WITHOUT overflowing on
+        # smaller windows. A static minimum-height on the list would
+        # have pushed the legend off-screen at default window sizes.
+        self._home_body_layout = body_layout
+        self._home_body_bottom_stretch_index = None  # filled in below
+
+        # Color legend for the category dots, shown beneath the
+        # Runtime Status box. Tells users at a glance what each
+        # colored dot in Recent Actions means without having to
+        # hover or guess. Added AFTER stashing _home_body_layout so
+        # we can address widgets by index in the expand toggle.
+        self.action_history_legend = self._build_action_history_legend()
+        body_layout.addWidget(self.action_history_legend, 0, Qt.AlignHCenter)
+
         QTimer.singleShot(0, self._update_home_status_card_width)
 
         self.debugger_button = QPushButton("LIVE VIEW")
@@ -5801,7 +5855,7 @@ class MainWindow(QMainWindow):
     def _build_microphone_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Microphone",
-            "Touchless can use the default Windows microphone automatically or a specific saved microphone if you have more than one input device.",
+            "Pick the microphone Touchless uses for voice commands and dictation. Auto-select uses the system default.",
         )
 
         # Wrap the panel body in a scroll area so the mic selector +
@@ -5893,8 +5947,8 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(self.microphone_combo)
 
         note = QLabel(
-            "Choosing Auto-select means Touchless will use the default Windows microphone. "
-            "Save a specific microphone only if you always want the same input device used by default."
+            "Choose from the list of microphones connected to your device. "
+            "Auto-select uses whichever input is the system default."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
@@ -5906,8 +5960,8 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(_section_header("Phone Microphone (QR)"))
 
         phone_mic_note = QLabel(
-            "Pair your phone via the QR button below (or from Settings → Camera) and then tick the box "
-            "to route its microphone into Touchless. Phone mics are usually cleaner than laptop webcam mics."
+            "Pair your phone via the QR button below, then tick the box to route "
+            "its mic into Touchless. Phone mics are usually cleaner than laptop mics."
         )
         phone_mic_note.setObjectName("cameraNote")
         phone_mic_note.setWordWrap(True)
@@ -5975,9 +6029,8 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(_section_header("Save Microphone Selection"))
 
         save_hint = QLabel(
-            "When 'Use phone microphone (QR) as source' is checked, Touchless uses the phone's mic regardless of "
-            "the device selected above — saving confirms the phone as the source. To go back to a local device, "
-            "uncheck the phone option, pick a device from Local Microphone, then click Save Microphone Choice."
+            "Pick a microphone from the list above and click Save to remember it. "
+            "Use Auto-Select to let Touchless use the system default each launch."
         )
         save_hint.setObjectName("cameraNote")
         save_hint.setWordWrap(True)
@@ -6008,12 +6061,10 @@ class MainWindow(QMainWindow):
         test_layout.addWidget(test_title)
 
         test_note = QLabel(
-            "Start the test to see incoming audio as a 0-100 volume bar. "
-            "Click Stop Mic Test to finish, then press Playback to replay what was captured.\n\n"
-            "The gain slider applies software gain to your captured microphone audio. "
-            "It boosts the level bar, the test playback, AND what voice commands hear \u2014 the slider value is saved. "
-            "Dictation uses Windows' microphone level directly, so raise Windows Sound Settings \u2192 your microphone "
-            "\u2192 Input volume / boost if you also want dictation to hear you louder."
+            "Click Start Mic Test to watch the volume bar move while you talk. "
+            "Click Stop, then Playback to hear what was captured. "
+            "The Gain slider boosts voice command audio; dictation reads the system "
+            "input level directly."
         )
         test_note.setObjectName("cameraNote")
         test_note.setWordWrap(True)
@@ -6611,6 +6662,28 @@ class MainWindow(QMainWindow):
             )
 
         return [
+            make("1.0.9a", "2026-05-03", """
+**Patch release: code signing, custom gestures, and license switch.**
+
+Code signing
+- **Every installer + bundled exe is now signed** under "Konstantin Markov" via Azure Trusted Signing. Cert chains to Microsoft's publicly-trusted root, so Windows Defender and most antivirus engines accept the install without flagging it. SmartScreen reputation will build over the first few weeks of typical download volume.
+
+Custom gestures
+- **Handedness-aware**: every saved gesture remembers whether you trained it with your left or right hand, and only fires for that hand. Live overlay shows the bound hand on each card.
+- **Live banner during use**: when you hold a custom gesture pose, its name appears over the matching hand exactly like a built-in gesture.
+- **Two-hand support**: left-bound gestures fire even when both hands are visible (the runner picks the matching hand instead of always the primary).
+- **Better thumb tracking**: thumb curl detection now stays accurate when you tilt your wrist back during a fist — fixes a long-standing under-detection.
+- **Pose conflict checks** are simpler: if you record a pose that already exists, you get a clear "this pose already exists as X" message with an Override option that swaps the new gesture in cleanly (instead of leaving two same-shape gestures fighting in live use).
+- **Built-in conflict matrix** rebuilt against the real recognizer outputs (Volume pose, Wheel pose, OK sign, Mute, One/Two/Three/Four, Fist) with per-hand action mapping.
+- **Wizard polish**: Enter no longer accidentally closes the survey window; only Escape closes it, and Enter activates Start when the form is fully valid.
+- **Recording UI**: live "Hand: Left/Right" badge during capture so you can see what MediaPipe is detecting before you save.
+
+License
+- **Switched from GPL v3 to FSL-1.1-Apache-2.0** (Functional Source License). Source stays public for audit/learning, mandatory attribution stays, but commercial-fork protection is added for the next 2 years; the license auto-converts to Apache 2.0 after that.
+
+<!-- full-installer-url: https://hgr-downloads.touchless.app/windows/v1.0.9a/Touchless_Installer.exe -->
+<!-- full-installer-size: 0 -->
+"""),
             make("1.0.9", "2026-05-01", """
 **Major release: GPU acceleration, polished mouse mode, and big quality-of-life pass.**
 
@@ -7131,6 +7204,26 @@ Admin elevation
             background-color: rgba(130, 187, 255, 0.06);
             border-color: rgba(130, 187, 255, 0.20);
         }}
+        QPushButton#actionHistoryExpand {{
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            color: rgba(229, 246, 255, 0.65);
+            padding: 0px 4px;
+            font-size: 16px;
+            min-width: 28px;
+            min-height: 24px;
+        }}
+        QPushButton#actionHistoryExpand:hover {{
+            background: rgba(29, 233, 182, 0.12);
+            border: 1px solid rgba(29, 233, 182, 0.45);
+            color: {self.config.accent_color};
+        }}
+        QPushButton#actionHistoryExpand:checked {{
+            background: rgba(29, 233, 182, 0.18);
+            border: 1px solid {self.config.accent_color};
+            color: {self.config.accent_color};
+        }}
         #settingsTitle {{
             font-size: 24px;
             font-weight: 900;
@@ -7534,14 +7627,178 @@ Admin elevation
                 self.camera_label.setText(f"Camera: {len(self._discovered_cameras)} available — choose in Settings")
         else:
             self.camera_label.setText("Camera: no camera found")
+        # Settings → Camera status line, mirrored from the home card.
+        if hasattr(self, "camera_page_status"):
+            if preferred is not None:
+                self.camera_page_status.setText(f"Saved camera: {preferred.display_name}")
+            elif self._discovered_cameras:
+                names = ", ".join(camera.display_name for camera in self._discovered_cameras)
+                self.camera_page_status.setText(f"Detected cameras: {names}")
+            else:
+                self.camera_page_status.setText("Detected cameras: none")
+        # Microphone line on the home card mirrors the camera line:
+        # show the saved choice when set, fall back to whichever device
+        # auto-select would actually use right now.
+        self._refresh_microphone_label()
 
-        if preferred is not None:
-            self.camera_page_status.setText(f"Saved camera: {preferred.display_name}")
-        elif self._discovered_cameras:
-            names = ", ".join(camera.display_name for camera in self._discovered_cameras)
-            self.camera_page_status.setText(f"Detected cameras: {names}")
+    @staticmethod
+    def _resolve_default_microphone_name() -> str:
+        """Best-effort: return the human-readable name of whichever mic
+        sounddevice would pick when no input device is specified. Used
+        by the home Microphone line in Auto-select mode so the user
+        sees a real device name (e.g., "Razer Seiren X") instead of
+        a generic "N available — choose in Settings"."""
+        try:
+            import sounddevice as sd
+        except Exception:
+            return ""
+        try:
+            default = sd.default.device
+        except Exception:
+            default = None
+        try:
+            input_idx = None
+            if isinstance(default, (list, tuple)) and len(default) >= 1:
+                input_idx = default[0]
+            elif isinstance(default, int):
+                input_idx = default
+            if input_idx is None or input_idx < 0:
+                return ""
+            info = sd.query_devices(int(input_idx))
+            if isinstance(info, dict):
+                name = str(info.get("name", "") or "").strip()
+                return name
+        except Exception:
+            pass
+        return ""
+
+    def _refresh_microphone_label(self) -> None:
+        """Update the home-page Microphone line. Pulls the active
+        choice from config.preferred_microphone_name + the discovered
+        list. In Auto-select mode (no preferred name) the label shows
+        the actual default device the OS would hand sounddevice, so
+        the user sees a real name instead of a count."""
+        if not hasattr(self, "microphone_label"):
+            return
+        # Phone-mic source wins when actively routed.
+        if (
+            bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+            and bool(getattr(self.config, "phone_camera_qr_paired", False))
+        ):
+            self.microphone_label.setText("Microphone: Phone (QR)")
+            return
+        preferred = str(getattr(self.config, "preferred_microphone_name", "") or "").strip()
+        mics = list(getattr(self, "_discovered_microphones", []) or [])
+        if preferred and (not mics or preferred in mics):
+            self.microphone_label.setText(f"Microphone: {preferred} (saved)")
+            return
+        # Auto-select mode (no saved preference). Resolve the device
+        # sounddevice would actually open and surface that name.
+        default_name = self._resolve_default_microphone_name()
+        if default_name:
+            self.microphone_label.setText(f"Microphone: {default_name} (auto)")
+            return
+        if mics:
+            self.microphone_label.setText(f"Microphone: {mics[0]} (auto)")
+            return
+        self.microphone_label.setText("Microphone: none found")
+
+    def _on_action_history_expand_toggled(self, expanded: bool) -> None:
+        """Expand Recent Actions to fill whatever vertical room the
+        home page has left after the buttons / hero / legend, or
+        collapse back to the default ~140 px slot.
+
+        Implementation note: instead of forcing a hard min-height on
+        the list, we swap the body layout's stretch factor between
+        the Runtime Status card and the bottom spacer. With stretch=1
+        on the card, it absorbs all available space; the list (which
+        is the only Expanding child of the card) grows with it. The
+        bottom-of-window margin and the legend stay reachable because
+        the card never goes past the available space — Qt's layout
+        respects the window height as a hard cap.
+        """
+        if not hasattr(self, "action_history_list"):
+            return
+        for widget in getattr(self, "_action_history_collapsible", []) or []:
+            try:
+                widget.setVisible(not expanded)
+            except Exception:
+                pass
+        # Drop both height caps so the list is purely layout-driven.
+        # The list itself is QSizePolicy.Expanding, and inside the
+        # card it's the only widget that wants to grow vertically,
+        # so it claims whatever room the card has.
+        if expanded:
+            self.action_history_list.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+            self.action_history_list.setMinimumHeight(120)
         else:
-            self.camera_page_status.setText("Detected cameras: none")
+            self.action_history_list.setMaximumHeight(140)
+            self.action_history_list.setMinimumHeight(0)
+        # Swap the body layout's stretch factors. body_layout has:
+        #   hero, subtitle, button_row, info_card, legend, debug_row,
+        #   final addStretch(1)
+        # When expanded we want info_card to claim the slack the
+        # bottom stretch was holding; when collapsed restore.
+        body = getattr(self, "_home_body_layout", None)
+        card = getattr(self, "home_status_card", None)
+        if body is not None and card is not None:
+            try:
+                body.setStretchFactor(card, 1 if expanded else 0)
+                # Zero out the trailing addStretch so all the available
+                # vertical room flows into the card instead of being
+                # split 50/50 with the bottom spacer.
+                last_idx = body.count() - 1
+                body.setStretch(last_idx, 0 if expanded else 1)
+            except Exception:
+                pass
+        if hasattr(self, "action_history_expand_button"):
+            self.action_history_expand_button.setText("⤡" if expanded else "⤢")
+            self.action_history_expand_button.setToolTip(
+                "Collapse Recent Actions" if expanded else "Expand Recent Actions"
+            )
+
+    def _build_action_history_legend(self) -> QWidget:
+        """Single-row legend widget showing each category dot beside
+        its label so users learn what the coloured dots mean. Lives
+        directly below the Runtime Status box on the home page."""
+        from PySide6.QtWidgets import QHBoxLayout, QLabel as _QLabel, QWidget
+        legend = QWidget()
+        legend.setObjectName("actionHistoryLegend")
+        legend.setAttribute(Qt.WA_StyledBackground, True)
+        legend.setStyleSheet(
+            "QWidget#actionHistoryLegend { background: transparent; }"
+            f" QLabel {{ color: rgba(229, 246, 255, 0.65); background: transparent;"
+            "  font-size: 11px; }}"
+        )
+        row = QHBoxLayout(legend)
+        row.setContentsMargins(6, 4, 6, 4)
+        row.setSpacing(12)
+        entries = [
+            ("media", "Media"),
+            ("audio", "Audio"),
+            ("voice", "Voice"),
+            ("mouse", "Mouse"),
+            ("drawing", "Drawing"),
+            ("capture", "Capture"),
+            ("other", "Other"),
+        ]
+        for category, name in entries:
+            cell = QWidget()
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(5)
+            dot = _QLabel()
+            dot.setFixedSize(8, 8)
+            dot.setStyleSheet(
+                f"background-color: {self._category_dot_color(category)};"
+                " border-radius: 4px;"
+            )
+            cell_layout.addWidget(dot, 0, Qt.AlignVCenter)
+            label = _QLabel(name)
+            cell_layout.addWidget(label, 0, Qt.AlignVCenter)
+            row.addWidget(cell)
+        row.addStretch(1)
+        return legend
 
     def _prompt_for_camera_choice(self, cameras: list[CameraInfo], prompt_text: str) -> Optional[tuple[int, bool]]:
         dialog = CameraSelectionDialog(self.config, cameras, prompt_text, self)
@@ -7711,7 +7968,10 @@ Admin elevation
         self.microphone_combo.setCurrentIndex(combo_index)
 
     def _refresh_microphone_labels(self) -> None:
-        return
+        # Plural alias kept for backwards compat with existing callers
+        # in the microphone settings flow. Forwards to the single
+        # home-card label refresher.
+        self._refresh_microphone_label()
 
     def save_microphone_preference_from_settings(self) -> None:
         selected_name = self.microphone_combo.currentData()
@@ -8102,6 +8362,134 @@ Admin elevation
             pass
 
 
+    # ---- Recent Actions row helpers -----------------------------------
+    @staticmethod
+    def _categorize_action_label(label: str) -> str:
+        """Bucket an ActionEvent label into a high-level category so the
+        row dot can be colour-coded. Categories are picked to be
+        scannable at a glance — was that a media event, a voice
+        result, an audio toggle? — rather than perfectly granular."""
+        s = (label or "").lower()
+        if not s or s == "?":
+            return "other"
+        if s.startswith(("spotify_", "youtube_", "chrome_")):
+            return "media"
+        if s.startswith("volume_") or "mute" in s:
+            return "audio"
+        if (
+            s.startswith(("voice_", "dictation"))
+            or s in ("voice", "dictation")
+        ):
+            return "voice"
+        if s.startswith(("mouse_",)) or s in ("mouse_mode_on", "mouse_mode_off"):
+            return "mouse"
+        if s.startswith(("drawing_",)) or "draw" in s:
+            return "drawing"
+        if (
+            s.startswith(("screenshot", "recording", "clip", "screen_"))
+            or "screen_record" in s
+            or "screenshot" in s
+        ):
+            return "capture"
+        return "other"
+
+    @staticmethod
+    def _category_dot_color(category: str) -> str:
+        """Hex colour string for the leading dot on each Recent
+        Actions row, keyed by category. The neutral 'other' bucket
+        uses a subtle grey so unknown / non-categorised actions don't
+        scream as much as the named ones."""
+        return {
+            "media": "#1DE9B6",   # accent green
+            "audio": "#FFB347",   # warm orange
+            "voice": "#82BBFF",   # soft blue
+            "mouse": "#C9A0FF",   # lavender
+            "drawing": "#FF7AA2", # pink
+            "capture": "#FFD166", # yellow
+            "other": "#7E8B97",   # neutral grey
+        }.get(category, "#7E8B97")
+
+    @staticmethod
+    def _relative_timestamp(now: float, ts: float) -> str:
+        """Compose a 'just now' / 'Ns ago' / 'Nm ago' string for the
+        right-aligned timestamp on each row. Handles future-stamp
+        clock-skew by clamping to 0."""
+        try:
+            delta = max(0.0, float(now) - float(ts or 0.0))
+        except (TypeError, ValueError):
+            return ""
+        if delta < 5:
+            return "just now"
+        if delta < 60:
+            return f"{int(delta)}s ago"
+        if delta < 3600:
+            return f"{int(delta // 60)}m ago"
+        if delta < 86400:
+            return f"{int(delta // 3600)}h ago"
+        return f"{int(delta // 86400)}d ago"
+
+    def _build_action_history_row(
+        self,
+        event,
+        count: int,
+        timestamp: float,
+    ) -> "tuple[QWidget, QLabel]":
+        """Render a single Recent Actions row.
+
+        Layout: <dot> <prefix> <text>  <stretch>  <ts>
+        Returns (row_widget, timestamp_label) so the periodic refresh
+        timer can update the timestamp in place without rebuilding
+        the whole row."""
+        label = str(getattr(event, "label", "") or "")
+        display = (
+            str(getattr(event, "display_text", "") or "")
+            or label
+            or "?"
+        )
+        if getattr(event, "is_undo", False):
+            prefix = "↶ "
+        elif getattr(event, "undoable", False):
+            prefix = "• "
+        else:
+            prefix = "· "
+        if count > 1:
+            display = f"{display}  × {count}"
+
+        category = self._categorize_action_label(label)
+        dot_color = self._category_dot_color(category)
+
+        from PySide6.QtWidgets import QHBoxLayout, QLabel as _QLabel, QWidget
+        row = QWidget()
+        row.setObjectName("actionHistoryRow")
+        row.setAttribute(Qt.WA_TranslucentBackground, True)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        dot = _QLabel()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(
+            f"background-color: {dot_color}; border-radius: 5px;"
+        )
+        layout.addWidget(dot, 0, Qt.AlignVCenter)
+
+        text_label = _QLabel(f"{prefix}{display}")
+        text_label.setStyleSheet(
+            f"color: {self.config.text_color or '#E5F6FF'}; background: transparent;"
+        )
+        text_label.setWordWrap(False)
+        layout.addWidget(text_label, 1, Qt.AlignVCenter)
+
+        ts_label = _QLabel(self._relative_timestamp(time.time(), timestamp))
+        ts_label.setObjectName("actionHistoryTimestamp")
+        ts_label.setStyleSheet(
+            "color: rgba(229, 246, 255, 0.55); background: transparent; font-size: 11px;"
+        )
+        ts_label.setProperty("eventTimestamp", float(timestamp or 0.0))
+        layout.addWidget(ts_label, 0, Qt.AlignVCenter)
+
+        return row, ts_label
+
     def _on_action_history_changed(self, events: object) -> None:
         if not hasattr(self, "action_history_list"):
             return
@@ -8110,20 +8498,78 @@ Admin elevation
         except TypeError:
             event_list = []
         self.action_history_list.clear()
+        # Track timestamp QLabels so the periodic refresh timer can
+        # update only the relative-time text without rebuilding the
+        # full row each tick.
+        self._action_history_timestamp_labels = []
         any_undoable = False
-        for event in reversed(event_list[-10:]):
-            display = getattr(event, "display_text", "") or getattr(event, "label", "") or "?"
-            if getattr(event, "is_undo", False):
-                prefix = "↶ "
-            elif getattr(event, "undoable", False):
-                prefix = "• "
+
+        # Most-recent-first, capped at 12 raw events so a long burst
+        # doesn't push useful older entries off-screen before they're
+        # collapsed.
+        recent = list(reversed(event_list[-12:]))
+
+        # Collapse consecutive identical labels into "× N" rows.
+        # Identity = same label string; display text variants for the
+        # same label still group cleanly. Newest event in the run keeps
+        # its timestamp / undoable flag; the count reflects the run
+        # length.
+        collapsed = []
+        idx = 0
+        while idx < len(recent):
+            head = recent[idx]
+            head_label = str(getattr(head, "label", "") or "")
+            run_count = 1
+            j = idx + 1
+            while j < len(recent):
+                nxt = recent[j]
+                if str(getattr(nxt, "label", "") or "") != head_label:
+                    break
+                if getattr(nxt, "is_undo", False) != getattr(head, "is_undo", False):
+                    break
+                run_count += 1
+                j += 1
+            collapsed.append((head, run_count, float(getattr(head, "timestamp", 0.0) or 0.0)))
+            idx = j
+
+        for event, count, ts in collapsed:
+            if getattr(event, "undoable", False):
                 any_undoable = True
-            else:
-                prefix = "· "
-            item = QListWidgetItem(f"{prefix}{display}")
+            row_widget, ts_label = self._build_action_history_row(event, count, ts)
+            item = QListWidgetItem()
+            item.setSizeHint(row_widget.sizeHint())
             self.action_history_list.addItem(item)
+            self.action_history_list.setItemWidget(item, row_widget)
+            self._action_history_timestamp_labels.append(ts_label)
+
         if hasattr(self, "undo_action_button"):
             self.undo_action_button.setEnabled(any_undoable)
+
+        # Lazy-init the relative-time refresh timer the first time the
+        # history is populated. Updates every 3 s — fast enough that
+        # "just now" → "5s ago" lands without obvious lag, slow enough
+        # that we don't burn cycles when the home page is foregrounded
+        # for long periods.
+        if not getattr(self, "_action_history_timestamp_timer", None):
+            timer = QTimer(self)
+            timer.setInterval(3000)
+            timer.timeout.connect(self._refresh_action_history_timestamps)
+            timer.start()
+            self._action_history_timestamp_timer = timer
+
+    def _refresh_action_history_timestamps(self) -> None:
+        """Update only the relative-time labels on each row. Cheap —
+        a few QLabel.setText calls on existing widgets."""
+        labels = getattr(self, "_action_history_timestamp_labels", None) or []
+        if not labels:
+            return
+        now = time.time()
+        for label in labels:
+            try:
+                ts = float(label.property("eventTimestamp") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            label.setText(self._relative_timestamp(now, ts))
 
     def _on_undo_last_action(self) -> None:
         worker = getattr(self, "_worker", None)

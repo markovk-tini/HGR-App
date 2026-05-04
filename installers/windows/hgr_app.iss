@@ -2,7 +2,7 @@
 ; Place this file at installers/windows/hgr_app.iss
 
 #define MyAppName "Touchless"
-#define MyAppVersion "1.0.9"
+#define MyAppVersion "1.0.9a"
 #define MyAppPublisher "Konstantin Markov"
 #define MyAppExeName "Touchless.exe"
 #define DistDir "..\..\dist\Touchless"
