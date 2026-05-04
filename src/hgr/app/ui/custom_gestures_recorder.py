@@ -223,6 +223,29 @@ class RecordingWindow(QDialog):
         )
         root.addWidget(self._video_label, 1)
 
+        # Big "Recording complete!" overlay that sits centered on top
+        # of the camera view once 100 samples have been captured. The
+        # smaller instruction line below the camera kept the success
+        # state easy to miss; this gives the user an unmissable,
+        # immediate confirmation. Auto-hides on Restart and never
+        # carries over to a fresh recording session.
+        self._complete_overlay = QLabel("Recording complete!", self._video_label)
+        self._complete_overlay.setObjectName("recordingCompleteOverlay")
+        self._complete_overlay.setAlignment(Qt.AlignCenter)
+        self._complete_overlay.setStyleSheet(
+            "QLabel#recordingCompleteOverlay {"
+            "  background: rgba(7, 30, 22, 0.78);"
+            "  color: #1DE9B6;"
+            "  border: 2px solid rgba(29, 233, 182, 0.55);"
+            "  border-radius: 18px;"
+            "  font-size: 38px;"
+            "  font-weight: 900;"
+            "  padding: 22px 36px;"
+            "  letter-spacing: 0.5px;"
+            "}"
+        )
+        self._complete_overlay.hide()
+
         self._progress_label = QLabel(
             f"Samples captured: 0 / {_TARGET_SAMPLES}"
         )
@@ -729,6 +752,7 @@ class RecordingWindow(QDialog):
         self._begin_button.hide()
         self._restart_button.show()
         self._save_button.show()
+        self._show_complete_overlay()
 
     def _on_restart(self) -> None:
         self._state = "idle"
@@ -737,6 +761,7 @@ class RecordingWindow(QDialog):
         self._restart_button.hide()
         self._save_button.hide()
         self._begin_button.show()
+        self._complete_overlay.hide()
         self._instructions.setText(
             "Hold your gesture in front of the camera, then click "
             "<b>Begin Recording</b> or press <b>Spacebar</b>."
@@ -744,6 +769,28 @@ class RecordingWindow(QDialog):
         self._progress_label.setText(
             f"Samples captured: 0 / {_TARGET_SAMPLES}"
         )
+
+    def _show_complete_overlay(self) -> None:
+        self._complete_overlay.adjustSize()
+        self._reposition_complete_overlay()
+        self._complete_overlay.show()
+        self._complete_overlay.raise_()
+
+    def _reposition_complete_overlay(self) -> None:
+        if not self._complete_overlay.isVisible() and self._state != "complete":
+            return
+        try:
+            parent_rect = self._video_label.rect()
+            label_size = self._complete_overlay.size()
+            x = (parent_rect.width() - label_size.width()) // 2
+            y = (parent_rect.height() - label_size.height()) // 2
+            self._complete_overlay.move(max(0, x), max(0, y))
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self._reposition_complete_overlay()
 
     def _on_save(self) -> None:
         try:
