@@ -236,27 +236,27 @@ class VolumeGestureTracker:
             tip_distance_ratio = (dx * dx + dy * dy) ** 0.5 / palm_scale
         except Exception:
             tip_distance_ratio = 1.0
-        # Hysteresis: strict on entry, lenient once we're already
-        # active. Without this, normal landmark jitter while the
-        # user holds the pose drives small fluctuations across the
-        # 0.22 cliff, kicking the tracker on/off ~once per second.
-        # Same idea applied to the per-finger open-score gates and
-        # the spread-state requirement, so a brief "almost too
-        # spread" frame doesn't yank us out of volume mode.
-        max_tip_distance = 0.30 if active else 0.22
-        require_together = not active  # only enforce strict 'together' on entry
-        index_middle_close = (
-            (not require_together or spread_states.get('index_middle') == 'together')
-            and tip_distance_ratio <= max_tip_distance
-        )
+        # Hysteresis: lenient on entry too (so users can actually
+        # turn volume mode on with a normal-feeling pose), even more
+        # lenient once already active so jitter doesn't kick it off.
+        # Earlier values (entry 0.22, open 0.56, etc.) were too
+        # strict — users with naturally slightly-spread peace-sign
+        # fingers couldn't activate volume mode at all.
+        max_tip_distance = 0.32 if active else 0.26
+        # Drop the strict 'together' spread-state check entirely.
+        # tip_distance_ratio already captures "fingers close enough";
+        # the spread-state classifier was double-gating with no
+        # added discriminative power and was the main reason real
+        # volume poses got rejected on entry.
+        index_middle_close = tip_distance_ratio <= max_tip_distance
         if active:
-            min_open = 0.48     # was 0.56
-            max_fold = 0.78     # was 0.70
-            max_thumb = 0.78    # was 0.70
+            min_open = 0.46     # was 0.56 originally, now 0.46
+            max_fold = 0.80     # was 0.70 originally, now 0.80
+            max_thumb = 0.80    # was 0.70 originally, now 0.80
         else:
-            min_open = 0.56
-            max_fold = 0.70
-            max_thumb = 0.70
+            min_open = 0.50     # was 0.56 — slightly more permissive entry
+            max_fold = 0.74     # was 0.70 — slightly more permissive entry
+            max_thumb = 0.74    # was 0.70 — slightly more permissive entry
         structural_ready = (
             self._is_volume_primary_open(features, 'index')
             and self._is_volume_primary_open(features, 'middle')

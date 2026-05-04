@@ -1664,21 +1664,25 @@ class GestureWorker(QObject):
             self._drawing_render_target = "camera" if self._drawing_render_target == "screen" else "screen"
             self._drawing_control_text = f"drawing target {self._drawing_render_target}"
             self.command_detected.emit(self._drawing_control_text)
+            self._record_action(f"drawing_target_{self._drawing_render_target}", self._drawing_control_text)
             return
         if key == "pen_options":
             self._queue_drawing_request("pen_options")
             self._drawing_control_text = "drawing pen options"
             self.command_detected.emit("Drawing pen options")
+            self._record_action("drawing_pen_options", "drawing pen options opened")
             return
         if key == "eraser_options":
             self._queue_drawing_request("eraser_options")
             self._drawing_control_text = "drawing eraser options"
             self.command_detected.emit("Drawing eraser options")
+            self._record_action("drawing_eraser_options", "drawing eraser options opened")
             return
         if key == "save":
             self._queue_drawing_request("save")
             self._drawing_control_text = "drawing save"
             self.command_detected.emit("Saving drawing")
+            self._record_action("drawing_save", "drawing saved")
             return
         if key == "shape":
             self._drawing_shape_mode = not self._drawing_shape_mode
@@ -1690,6 +1694,10 @@ class GestureWorker(QObject):
             except Exception:
                 pass
             self.command_detected.emit(self._drawing_control_text)
+            self._record_action(
+                "drawing_shape_on" if self._drawing_shape_mode else "drawing_shape_off",
+                self._drawing_control_text,
+            )
             return
         self._drawing_control_text = "drawing wheel action"
         self.command_detected.emit(self._drawing_control_text)
@@ -2012,18 +2020,38 @@ class GestureWorker(QObject):
         self._utility_capture_right_down = middle_down and not index_down
 
     def set_drawing_brush(self, color: str | None = None, thickness: int | None = None) -> None:
+        old_color = self._drawing_brush_hex
+        old_thickness = self._drawing_brush_thickness
         if color:
             self._drawing_brush_hex = str(color)
         if thickness is not None:
             self._drawing_brush_thickness = int(max(2, thickness))
+        # Log pen changes to recent-actions so the user sees the
+        # exact moment color / thickness flipped while drawing.
+        if color and color != old_color:
+            self._record_action("drawing_pen_color", f"pen color {self._drawing_brush_hex}")
+        if thickness is not None and thickness != old_thickness:
+            self._record_action(
+                "drawing_pen_thickness", f"pen thickness {self._drawing_brush_thickness}"
+            )
 
     def set_drawing_eraser(self, thickness: int | None = None, mode: str | None = None) -> None:
+        old_thickness = self._drawing_eraser_thickness
+        old_mode = self._drawing_eraser_mode
         if thickness is not None:
             self._drawing_eraser_thickness = int(max(4, thickness))
         if mode:
             normalized = str(mode).strip().lower()
             if normalized in {"normal", "stroke"}:
                 self._drawing_eraser_mode = normalized
+        if thickness is not None and thickness != old_thickness:
+            self._record_action(
+                "drawing_eraser_thickness", f"eraser thickness {self._drawing_eraser_thickness}"
+            )
+        if mode and mode != old_mode:
+            self._record_action(
+                "drawing_eraser_mode", f"eraser mode {self._drawing_eraser_mode}"
+            )
 
     def _drawing_brush_bgr(self) -> tuple[int, int, int]:
         value = str(self._drawing_brush_hex or "#FFFFFF").strip().lstrip("#")
@@ -2317,10 +2345,18 @@ class GestureWorker(QObject):
                 success = True
                 self._drawing_control_text = "drawing cleared"
             self.command_detected.emit(self._drawing_control_text)
+            self._record_action(
+                "drawing_undo" if key == "swipe_left" else "drawing_clear",
+                self._drawing_control_text,
+            )
             return success
         self._queue_drawing_request("undo" if key == "swipe_left" else "clear")
         self._drawing_control_text = "drawing undo" if key == "swipe_left" else "drawing cleared"
         self.command_detected.emit(self._drawing_control_text)
+        self._record_action(
+            "drawing_undo" if key == "swipe_left" else "drawing_clear",
+            self._drawing_control_text,
+        )
         return True
 
     def _release_drawing_grab(self) -> None:
