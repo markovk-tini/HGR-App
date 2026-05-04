@@ -122,11 +122,16 @@ class ReleaseInfo:
     fallback_url: str = ""
 
 
+def _strip_v_prefix(version_str: str) -> str:
+    """Strip leading 'v' so 'v1.2.3' and '1.2.3' compare equal."""
+    return re.sub(r"^v", "", str(version_str or "").strip(), flags=re.IGNORECASE)
+
+
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
-    """Convert '1.0.2' → (1, 0, 2). Tolerates leading 'v' and
-    suffixes like '-beta'. Returns (0,) if unparseable, which makes
-    any real version compare as 'newer' (no false positive)."""
-    cleaned = re.sub(r"^v", "", str(version_str or "").strip(), flags=re.IGNORECASE)
+    """Legacy digit-tuple parser kept as a fallback for the rare
+    case where a tag isn't valid PEP 440. Returns (0,) if unparseable,
+    which makes any real version compare as 'newer'."""
+    cleaned = _strip_v_prefix(version_str)
     cleaned = re.split(r"[-+]", cleaned, maxsplit=1)[0]
     parts = re.findall(r"\d+", cleaned)
     if not parts:
@@ -135,7 +140,33 @@ def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
 
 
 def _is_newer(remote: str, local: str) -> bool:
-    return _parse_version_tuple(remote) > _parse_version_tuple(local)
+    """Compare two version strings using PEP 440 semantics so betas
+    and post-releases work correctly:
+
+      1.0.9 < 1.0.9.post1 < 1.0.10 < 1.1.0b1 < 1.1.0rc1 < 1.1.0
+
+    The previous digit-tuple parser stripped letters and treated
+    '1.0.9a' as equal to '1.0.9' — which silently broke updater
+    delivery when 1.0.9a was published. PEP 440 (via the `packaging`
+    library, which is already installed alongside pip) handles all
+    standard release/pre-release/post-release identifiers correctly.
+
+    Falls back to the legacy digit-tuple parser if either string
+    isn't valid PEP 440 (e.g. a hand-tagged release with an exotic
+    suffix). The fallback is conservative: it doesn't claim 'newer'
+    for anything that's purely letter-stripped equal.
+    """
+    try:
+        from packaging.version import Version, InvalidVersion
+    except Exception:
+        # `packaging` should always be present (it ships with pip),
+        # but if for some reason it's missing in a hostile env, fall
+        # straight back to the legacy comparator.
+        return _parse_version_tuple(remote) > _parse_version_tuple(local)
+    try:
+        return Version(_strip_v_prefix(remote)) > Version(_strip_v_prefix(local))
+    except InvalidVersion:
+        return _parse_version_tuple(remote) > _parse_version_tuple(local)
 
 
 class _CheckWorker(QObject):

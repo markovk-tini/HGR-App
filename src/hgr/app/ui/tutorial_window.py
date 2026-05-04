@@ -1017,83 +1017,59 @@ class TutorialWindow(QDialog):
         self.step_title.setText(step.title)
 
         what_is_map = {
-            "swipes": (
-                "You can use these gestures to skip a song, go back to previous song and in chrome forward page and back page. "
-                "in the tutorial, once you moved on from part 1, you can control the previous and next page with the swipes as well "
-                "(next is right swipe and prev is left swipe)"
-            ),
-            "spotify_open": "you can use this gesture to open the spotify app.",
-            "play_pause": "You can use this gesture to pause or play any music or video playing on your computer.",
-            "gesture_wheel": "You can use this gesture to open the gesture wheel and choose one of the Spotify controls.",
-            "mouse_mode": "You can use this part to learn turning mouse mode on, moving your cursor, and clicking targets.",
-            "voice_command": "You can use this gesture to activate voice commands and speak a command like opening youtube on google chrome.",
+            "swipes": "Skip songs in Spotify, and go forward/back in Chrome.",
+            "spotify_open": "Open or focus the Spotify app.",
+            "play_pause": "Pause or play any music or video on your computer.",
+            "gesture_wheel": "Open the gesture wheel for Spotify controls.",
+            "mouse_mode": "Move the cursor and click with your right hand. Toggle on/off with your left.",
+            "voice_command": "Speak commands like \u201copen YouTube on Chrome\u201d.",
         }
         instruction_map = {
             "swipes": (
                 "How to do it:\n"
-                "\u2022 Hand: RIGHT.\n"
-                "\u2022 Pose: open palm. All five fingers extended and held together (no spreading). Palm faces the monitor.\n"
-                "\u2022 Starting position for swipe-right: hand at the LEFT side of the camera frame, roughly elbow-height.\n"
-                "\u2022 Motion: keeping the palm facing the monitor the whole time, sweep horizontally to your RIGHT in one continuous motion. The motion is what triggers it, not the pose alone.\n"
-                "\u2022 Swipe-left is the mirror: start at the right side of the frame and sweep to your left.\n"
-                "\u2022 The skeleton overlay on your live view confirms your hand is being tracked.\n\n"
-                "To complete this part: three right swipes followed by three left swipes. The bbox around your hand turns green each time a swipe is detected."
+                "\u2022 RIGHT hand, open palm (all 5 fingers extended, palm to camera).\n"
+                "\u2022 Swipe right: start on the LEFT, sweep to the right in one motion.\n"
+                "\u2022 Swipe left: start on the RIGHT, sweep to the left.\n"
+                "\u2022 The motion triggers it, not the pose.\n\n"
+                "To complete: 3 right swipes, then 3 left swipes. Bbox turns green on each one."
             ),
             "spotify_open": (
                 "How to do it:\n"
-                "\u2022 Hand: RIGHT. Palm faces the monitor.\n"
-                "\u2022 Index finger: fully extended straight up.\n"
-                "\u2022 Middle finger: fully extended straight up.\n"
-                "\u2022 Spread: index and middle held APART, forming a clear V (peace sign). Don't let them touch \u2014 that's the volume pose, not 'two'.\n"
-                "\u2022 Ring finger: curled down into the palm.\n"
-                "\u2022 Pinky finger: curled down into the palm.\n"
-                "\u2022 Thumb: tucked across the palm or folded down so it doesn't read as a third extended finger.\n"
-                "\u2022 Hold the pose steady for about one second. The bbox turns green when 'two' is recognized.\n\n"
-                "To complete this part: hold the right-hand 'two' gesture until Spotify opens or focuses."
+                "\u2022 RIGHT hand, peace sign \u2014 index + middle up in a V, others curled, thumb tucked.\n"
+                "\u2022 Keep index + middle APART (touching = volume pose, not \u2018two\u2019).\n"
+                "\u2022 Hold ~1 second. Bbox turns green when \u2018two\u2019 is recognized.\n\n"
+                "To complete: hold the pose until Spotify opens."
             ),
             "play_pause": (
                 "How to do it:\n"
-                "\u2022 Hand: RIGHT. Palm faces the monitor.\n"
-                "\u2022 Curl all four main fingers (index, middle, ring, pinky) into the palm, knuckles facing the camera.\n"
-                "\u2022 Wrap the thumb across the front of the curled fingers (or fold it alongside) so it doesn't stick up.\n"
-                "\u2022 Result: a closed fist with the back of your hand facing you and the knuckle silhouette facing the camera.\n"
-                "\u2022 The bbox turns green when 'fist' is recognized; each clean detection toggles play/pause once.\n\n"
-                "To complete this part: trigger the play/pause command twice (form a fist, relax, form a fist again)."
+                "\u2022 RIGHT hand, closed fist \u2014 all four fingers curled in, thumb across the front.\n"
+                "\u2022 Knuckles face the camera.\n"
+                "\u2022 Each clean fist toggles play/pause.\n\n"
+                "To complete: trigger play/pause twice (fist, relax, fist again)."
             ),
             "gesture_wheel": (
                 "How to do it:\n"
-                "\u2022 Hand: RIGHT. Palm faces the monitor.\n"
-                "\u2022 Thumb: fully extended, sticking out to the side.\n"
-                "\u2022 Index finger: fully extended, pointing up.\n"
-                "\u2022 Middle finger: curled down into the palm.\n"
-                "\u2022 Ring finger: curled down into the palm.\n"
-                "\u2022 Pinky finger: fully extended, sticking up.\n"
-                "\u2022 The shape is thumb + index + pinky out, middle + ring tucked \u2014 like a 'rock on' sign with the thumb extended (or an ASL 'Y' with the index added).\n"
-                "\u2022 Hold the pose for about one second. The Spotify wheel appears. Your fingertip becomes the wheel cursor.\n"
-                "\u2022 Move your hand toward one of the slices. Keep your hand on that slice for about one second to activate it.\n\n"
-                "To complete this part: open the wheel and hold on any slice until it activates."
+                "\u2022 RIGHT hand. Thumb out + index up + pinky up, middle and ring curled.\n"
+                "\u2022 Like a \u201crock on\u201d sign with the thumb extended (ASL \u2018Y\u2019 + index).\n"
+                "\u2022 Hold ~1 second \u2014 the wheel opens, your fingertip is the cursor.\n"
+                "\u2022 Move to a slice and hold ~1 second to activate it.\n\n"
+                "To complete: open the wheel and activate any slice."
             ),
             "mouse_mode": (
                 "How to do it:\n"
-                "\u2022 Turn mouse mode ON \u2014 LEFT hand, palm facing the monitor: extend the index, middle, and ring fingers straight up; curl the thumb across the palm and curl the pinky down. Hold briefly until the 'Mouse Mode: On' pill appears.\n"
-                "\u2022 Move the cursor \u2014 RIGHT hand, palm facing the monitor, all five fingers extended and held together. Move the whole hand inside the red 'Mouse control area' box. Your hand position maps to the desktop position; the dot inside the red box mirrors where the actual cursor is.\n"
-                "\u2022 Left-click \u2014 RIGHT hand: bend your index finger down toward the palm, then straighten it back up in one motion.\n"
-                "\u2022 Right-click \u2014 RIGHT hand: bend your middle finger down toward the palm, then straighten it back up.\n"
-                "\u2022 Scroll \u2014 RIGHT hand: extend index AND middle together (touching/together, ring + pinky curled, thumb tucked). Move the hand UP to scroll up, DOWN to scroll down.\n"
-                "\u2022 Turn mouse mode OFF \u2014 same LEFT-hand three-finger pose as the on-toggle. The 'Mouse Mode: Off' pill confirms.\n\n"
-                "To complete this part: turn mouse mode on, click each tutorial target in order, then turn mouse mode off."
+                "\u2022 Turn ON / OFF \u2014 LEFT hand, three fingers up (index + middle + ring), thumb across, pinky curled. Hold until the \u2018Mouse Mode\u2019 pill appears.\n"
+                "\u2022 Move cursor \u2014 RIGHT hand, open palm. Move within the red box; the dot mirrors your real cursor.\n"
+                "\u2022 Left-click \u2014 RIGHT hand: bend index down then up.\n"
+                "\u2022 Right-click \u2014 RIGHT hand: bend middle down then up.\n"
+                "\u2022 Scroll \u2014 RIGHT hand: index + middle together. Move hand UP to scroll up, DOWN to scroll down.\n\n"
+                "To complete: turn on, click every tutorial target, turn off."
             ),
             "voice_command": (
                 "How to do it:\n"
-                "\u2022 Hand: LEFT. Palm faces the monitor.\n"
-                "\u2022 Index finger: fully extended straight up.\n"
-                "\u2022 Middle finger: curled down into the palm.\n"
-                "\u2022 Ring finger: curled down into the palm.\n"
-                "\u2022 Pinky finger: curled down into the palm.\n"
-                "\u2022 Thumb: tucked across the palm.\n"
-                "\u2022 Result: only the index finger is up on your LEFT hand \u2014 a number-one pose. Hold until the listening pill appears.\n"
-                "\u2022 Once the listener is active, speak clearly: \"Open YouTube on Google Chrome\".\n\n"
-                "To complete this part: trigger the voice listener and successfully open YouTube on Google Chrome."
+                "\u2022 LEFT hand, only the index finger up (others curled, thumb tucked).\n"
+                "\u2022 Hold until the listening pill appears.\n"
+                "\u2022 Speak clearly: \u201cOpen YouTube on Google Chrome\u201d.\n\n"
+                "To complete: trigger the listener and open YouTube on Chrome."
             ),
         }
         self.step_desc.setText(what_is_map.get(step.key, step.description))

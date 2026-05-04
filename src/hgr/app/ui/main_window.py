@@ -6662,8 +6662,8 @@ class MainWindow(QMainWindow):
             )
 
         return [
-            make("1.0.9a", "2026-05-03", """
-**Patch release: code signing, gesture binds, custom gestures, and license switch.**
+            make("1.1.0b1", "2026-05-04", """
+**1.1 beta — code signing, Gesture Binds, custom gestures, and license switch.**
 
 Code signing
 - **Every installer + bundled exe is now signed** under "Konstantin Markov" via Azure Trusted Signing. Cert chains to Microsoft's publicly-trusted root, so Windows Defender and most antivirus engines accept the install without flagging it. SmartScreen reputation will build over the first few weeks of typical download volume.
@@ -6691,7 +6691,7 @@ UI polish
 License
 - **Switched from GPL v3 to FSL-1.1-Apache-2.0** (Functional Source License). Source stays public for audit/learning, mandatory attribution stays, but commercial-fork protection is added for the next 2 years; the license auto-converts to Apache 2.0 after that.
 
-<!-- full-installer-url: https://pub-3116ebd541fa4ca18a84371667d029fe.r2.dev/windows/v1.0.9a/Touchless_Installer.exe -->
+<!-- full-installer-url: https://pub-3116ebd541fa4ca18a84371667d029fe.r2.dev/windows/v1.1.0b1/Touchless_Installer.exe -->
 <!-- full-installer-size: 0 -->
 """),
             make("1.0.9", "2026-05-01", """
