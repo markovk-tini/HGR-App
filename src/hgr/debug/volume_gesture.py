@@ -19,12 +19,22 @@ class VolumeGestureTracker:
         self,
         *,
         confirm_frames: int = 3,
-        release_frames: int = 2,
+        # Bumped from 2 -> 5: at 30 fps that's ~165ms of consecutive
+        # invalid frames before deactivating, vs 65ms previously.
+        # Pairs with the active-state hysteresis in
+        # _is_volume_ready_pose so a brief landmark jitter in the
+        # finger-spread metric doesn't toggle volume mode off.
+        release_frames: int = 5,
         hold_seconds: float = 1.5,
         mute_cooldown_seconds: float = 1.0,
         deadzone_fraction: float = 0.20,
         smoothing: float = 0.14,
-        pose_grace_seconds: float = 0.40,
+        # Was 0.40 — bumped to 0.60 so a brief pose-invalid window
+        # (~half a second of bad frames) doesn't deactivate volume
+        # mode while the user is still trying to hold it. Combined
+        # with active-state hysteresis above this gives a much more
+        # forgiving stay-active behavior without changing entry.
+        pose_grace_seconds: float = 0.60,
         no_hand_grace_seconds: float = 0.20,
     ) -> None:
         self.confirm_frames = int(confirm_frames)
@@ -218,9 +228,7 @@ class VolumeGestureTracker:
         # _volume_pose_ready gate. The blended spread.distance
         # ratio is too loose at the base of a V (PIP joints sit
         # close anatomically regardless of spread), so we measure
-        # landmark 8 -> 12 directly and require <= 0.22 * palm_scale.
-        # That admits real volume_pose (fingers tip-to-tip) and
-        # rejects any visible gap.
+        # landmark 8 -> 12 directly.
         try:
             palm_scale = max(float(features.palm_scale), 1e-6)
             dx = float(landmarks[8][0]) - float(landmarks[12][0])
@@ -228,21 +236,38 @@ class VolumeGestureTracker:
             tip_distance_ratio = (dx * dx + dy * dy) ** 0.5 / palm_scale
         except Exception:
             tip_distance_ratio = 1.0
+        # Hysteresis: strict on entry, lenient once we're already
+        # active. Without this, normal landmark jitter while the
+        # user holds the pose drives small fluctuations across the
+        # 0.22 cliff, kicking the tracker on/off ~once per second.
+        # Same idea applied to the per-finger open-score gates and
+        # the spread-state requirement, so a brief "almost too
+        # spread" frame doesn't yank us out of volume mode.
+        max_tip_distance = 0.30 if active else 0.22
+        require_together = not active  # only enforce strict 'together' on entry
         index_middle_close = (
-            spread_states.get('index_middle') == 'together'
-            and tip_distance_ratio <= 0.22
+            (not require_together or spread_states.get('index_middle') == 'together')
+            and tip_distance_ratio <= max_tip_distance
         )
+        if active:
+            min_open = 0.48     # was 0.56
+            max_fold = 0.78     # was 0.70
+            max_thumb = 0.78    # was 0.70
+        else:
+            min_open = 0.56
+            max_fold = 0.70
+            max_thumb = 0.70
         structural_ready = (
             self._is_volume_primary_open(features, 'index')
             and self._is_volume_primary_open(features, 'middle')
             and self._is_folded(features, 'ring')
             and self._is_folded(features, 'pinky')
             and self._is_folded(features, 'thumb', allow_partial=True)
-            and open_scores['index'] >= 0.56
-            and open_scores['middle'] >= 0.56
-            and open_scores['ring'] <= 0.70
-            and open_scores['pinky'] <= 0.70
-            and open_scores['thumb'] <= 0.70
+            and open_scores['index'] >= min_open
+            and open_scores['middle'] >= min_open
+            and open_scores['ring'] <= max_fold
+            and open_scores['pinky'] <= max_fold
+            and open_scores['thumb'] <= max_thumb
             and index_middle_close
         )
         if not structural_ready:

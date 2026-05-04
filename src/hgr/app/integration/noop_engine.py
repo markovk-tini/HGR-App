@@ -1311,6 +1311,12 @@ class GestureWorker(QObject):
             self.command_detected.emit(self._drawing_control_text)
         except Exception:
             pass
+        # Log to recent-actions so gesture-driven drawing toggles show
+        # up in the action history (was previously emit-only).
+        self._record_action(
+            "drawing_mode_on" if self._drawing_mode_enabled else "drawing_mode_off",
+            "drawing mode on" if self._drawing_mode_enabled else "drawing mode off",
+        )
 
     def _handle_drawing_toggle(self, prediction, hand_handedness: str | None, now: float) -> bool:
         left_pred = prediction if hand_handedness == "Left" else self._left_hand_prediction
@@ -3994,6 +4000,13 @@ class GestureWorker(QObject):
                         self.command_detected.emit(f"custom: {fired}")
                     except Exception:
                         pass
+                    # Log custom-gesture fires to recent-actions so
+                    # users can see ALL gesture activity in one place,
+                    # not just the built-in media/volume routes.
+                    self._record_action(
+                        f"custom:{fired}",
+                        f"custom gesture: {fired}",
+                    )
             except Exception as exc:
                 # A bad sample / classifier hiccup must not break the
                 # main pipeline — log once and continue.
@@ -5146,6 +5159,13 @@ class GestureWorker(QObject):
                 )
             except Exception:
                 pass
+            # Log to recent-actions so the user sees gesture-driven
+            # mode toggles in the action history (was previously
+            # only logging media + volume actions).
+            self._record_action(
+                "mouse_mode_on" if update.mode_enabled else "mouse_mode_off",
+                "mouse mode on" if update.mode_enabled else "mouse mode off",
+            )
         action_text = update.control_text
         if not tutorial_demo_only and (update.left_press or update.left_release or update.left_click or update.right_click or update.scroll_steps):
             action_text = self.mouse_controller.message
@@ -6249,6 +6269,7 @@ class GestureWorker(QObject):
     def _start_voice_command(self) -> None:
         chrome_mode_voice = self._chrome_mode_enabled and self.chrome_controller.is_window_open()
         self._start_voice_capture(mode="general", preferred_app="chrome" if chrome_mode_voice else None)
+        self._record_action("voice_command_listen", "voice listening started")
 
     def _start_dictation_capture(self) -> None:
         if self._voice_listening or self._dictation_active:
@@ -6272,6 +6293,7 @@ class GestureWorker(QObject):
         # That path is what the rest of the app's voice features use
         # and is known to actually type into the target window.
         self._start_voice_capture(mode="dictation")
+        self._record_action("dictation_start", "dictation started")
 
     def _stop_dictation_capture(self) -> None:
         if not self._dictation_active:
@@ -6290,6 +6312,7 @@ class GestureWorker(QObject):
         self._dictation_backend = "idle"
         self._voice_mode = "ready"
         self._voice_control_text = "dictation stopped"
+        self._record_action("dictation_stop", "dictation stopped")
         # Flush any pending buffered final before tearing state down.
         try:
             flush = self._dictation_state.get("_flush_pending") if self._dictation_state else None
@@ -7228,6 +7251,7 @@ class GestureWorker(QObject):
                 self.voice_status_overlay.show_result("Canceled", command_text="", duration=1.0)
             except Exception:
                 pass
+            self._record_action("voice_cancel", "voice canceled")
 
     def _reset_voice_state(self) -> None:
         if self._voice_stop_event is not None:

@@ -114,13 +114,18 @@ BUILTIN_PROFILES: Tuple[BuiltinProfile, ...] = (
         spread=(0, 1, 2, 3),
         hands=("Right",),
     ),
-    BuiltinProfile(
-        name="OK sign",
-        description="thumb + index pinched, middle/ring/pinky extended — right-hand: Spotify shuffle",
-        thumb=_CLOSED, index=_CLOSED, middle=_EXTENDED, ring=_EXTENDED, pinky=_EXTENDED,
-        spread=(1, 2, 3),
-        hands=("Right",),
-    ),
+    # NOTE: OK-sign profile removed deliberately. The recognizer
+    # technically emits "ok" labels and the Spotify router fires
+    # shuffle on it, but OK is NOT in the user-visible Gesture Binds
+    # pose gallery (`_GESTURE_BIND_POSES` in src/hgr/config/gesture_bindings.py).
+    # Warning users about a conflict with a gesture they can't see
+    # or rebind was confusing — they'd record a custom OK and get
+    # blocked by a "this conflicts with Spotify shuffle" message
+    # for a pose they don't even know exists in the app. If/when OK
+    # gets added to the user-visible pose gallery, restore the
+    # profile here:
+    #   thumb=_CLOSED, index=_CLOSED, middle=_EXTENDED,
+    #   ring=_EXTENDED, pinky=_EXTENDED, spread=(1, 2, 3), hands=("Right",)
     BuiltinProfile(
         name="Mute (thumb + pinky out)",
         description="thumb + pinky extended, middle three closed — mutes audio",

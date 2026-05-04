@@ -308,6 +308,30 @@ class MousePracticeWidget(QWidget):
             self._status_text,
         )
 
+        # When all targets are cleared AND mouse mode is back off,
+        # paint a giant translucent ✓ centered over the arena so the
+        # user gets clear "you're done" feedback without losing sight
+        # of the targets they just clicked. Painted last so it sits
+        # on top of everything else.
+        if self.completed and not self._mode_enabled:
+            check_color = QColor(
+                self._accent.red(), self._accent.green(), self._accent.blue(), 200
+            )
+            check_size = int(min(arena.width(), arena.height()) * 0.95)
+            check_font = QFont("Segoe UI", max(96, int(check_size * 0.78)))
+            check_font.setBold(True)
+            painter.setFont(check_font)
+            painter.setPen(check_color)
+            painter.drawText(arena, Qt.AlignCenter, "✓")
+            label_font = QFont("Segoe UI", 16)
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            painter.drawText(
+                QRectF(arena.left(), arena.bottom() - 30, arena.width(), 24),
+                Qt.AlignCenter,
+                "Completed!",
+            )
+
 
 class TutorialWindow(QDialog):
     tutorial_closed = Signal(bool, bool, bool)
@@ -1324,21 +1348,27 @@ class TutorialWindow(QDialog):
             self.completion_check_label.hide()
             self.completion_text_label.hide()
             return
-        # The mouse-mode step keeps the practice widget visible (target
-        # dots) below the check, so its check has to stay compact.
-        # Every other step has empty space below — let the check fill
-        # it for a clearer "you're done" signal. Bigger check + bigger
-        # text only on non-mouse steps.
         try:
             step_key = self._practice_steps[self._step_index].key
         except Exception:
             step_key = ""
+        # Mouse mode paints its OWN big checkmark inside the practice
+        # widget (over the target dots), so we suppress the info-area
+        # labels there to avoid duplication. Every other step has
+        # empty info-area space we can fill with a giant check + label.
         if step_key == "mouse_mode":
-            check_px = 52
-            text_px = 18
-        else:
-            check_px = 200
-            text_px = 28
+            self.completion_check_label.hide()
+            self.completion_text_label.hide()
+            # Force a repaint of the practice widget so its overlay
+            # checkmark draws as soon as the step transitions to
+            # completed (otherwise it waits for the next frame tick).
+            try:
+                self.mouse_widget.update()
+            except Exception:
+                pass
+            return
+        check_px = 200
+        text_px = 28
         self.completion_check_label.setStyleSheet(
             f"color: rgb(29, 233, 182); font-size: {check_px}px; font-weight: 900;"
         )
