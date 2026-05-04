@@ -25,6 +25,11 @@ class MiniLiveViewer(QWidget):
         self._user_positioned = False
         self._hover_active = False
         self._gestures_enabled = True
+        # Frozen-pipeline state: while True, raw_frame_ready is
+        # ignored (display holds its current frame, blurred), and
+        # the overlay label below sits on top of the video panel.
+        # Driven by GestureWorker.frozen_state_changed.
+        self._frozen = False
 
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -153,6 +158,26 @@ class MiniLiveViewer(QWidget):
         self.video_label.clear_video("Press START to begin live gesture tracking.")
         layout.addWidget(self.video_label, 1)
 
+        # Centered overlay label on top of the video panel — visible
+        # only while the worker pipeline is frozen (custom-gesture
+        # recorder open). Stretched edge-to-edge with a transparent
+        # background so the blurred frame underneath shows through;
+        # the centered text + dark scrim sits in the middle.
+        self._frozen_overlay = QLabel(self.video_label)
+        self._frozen_overlay.setObjectName("miniFrozenOverlay")
+        self._frozen_overlay.setAlignment(Qt.AlignCenter)
+        self._frozen_overlay.setText("Paused\nRecording custom gesture…")
+        self._frozen_overlay.setStyleSheet(
+            "QLabel#miniFrozenOverlay {"
+            "  background: rgba(0, 0, 0, 0.42);"
+            "  color: #FFFFFF;"
+            "  font-weight: 800;"
+            "  font-size: 13px;"
+            "  border-radius: 12px;"
+            "}"
+        )
+        self._frozen_overlay.hide()
+
         self.gesture_chip = QLabel("Gesture: neutral")
         self.gesture_chip.setObjectName("miniChip")
         self.gesture_chip.setAlignment(Qt.AlignCenter)
@@ -266,6 +291,11 @@ class MiniLiveViewer(QWidget):
                 self._worker.engine_landmarks_ready.disconnect(self._on_worker_landmarks)
             except Exception:
                 pass
+            if hasattr(self._worker, "frozen_state_changed"):
+                try:
+                    self._worker.frozen_state_changed.disconnect(self._on_worker_frozen_changed)
+                except Exception:
+                    pass
         self._worker = worker
         if self._worker is None:
             self._set_idle_state()
@@ -274,6 +304,11 @@ class MiniLiveViewer(QWidget):
             self._worker.raw_frame_ready.connect(self._on_worker_raw_frame)
             self._worker.engine_landmarks_ready.connect(self._on_worker_landmarks)
             self._worker.debug_frame_ready.connect(self._on_worker_debug_frame)
+            if hasattr(self._worker, "frozen_state_changed"):
+                try:
+                    self._worker.frozen_state_changed.connect(self._on_worker_frozen_changed)
+                except Exception:
+                    pass
         except Exception:
             self._worker = None
             self._set_idle_state()
@@ -288,6 +323,11 @@ class MiniLiveViewer(QWidget):
                 self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
             except Exception:
                 pass
+            if hasattr(self._worker, "frozen_state_changed"):
+                try:
+                    self._worker.frozen_state_changed.disconnect(self._on_worker_frozen_changed)
+                except Exception:
+                    pass
         self._worker = None
         self._set_idle_state()
 
@@ -315,6 +355,11 @@ class MiniLiveViewer(QWidget):
         # `capture_ts` is the monotonic time the reader thread
         # decoded this frame.
         if not self.isVisible() or frame is None:
+            return
+        # While the pipeline is frozen, hold the blurred snapshot
+        # already on screen and ignore fresh frames. The overlay
+        # label tells the user we're paused.
+        if self._frozen:
             return
         # Two-stage drop:
         #   (a) Backlog detection: drop this frame if the daemon
@@ -369,6 +414,41 @@ class MiniLiveViewer(QWidget):
         if not self.isVisible():
             return
         self.gesture_chip.setText(str(payload.get("gesture_chip", "Gesture: neutral")))
+
+    def _on_worker_frozen_changed(self, frozen: bool) -> None:
+        self._frozen = bool(frozen)
+        if self._frozen:
+            # Apply a one-shot blur to the last frame so the user
+            # sees a softened version of what the camera was last
+            # showing, then ignore subsequent raw frames until the
+            # recorder closes. cv2 GaussianBlur is fine on the GUI
+            # thread — single ~360x250 BGR frame, sub-millisecond.
+            if self._last_frame is not None:
+                try:
+                    blurred = cv2.GaussianBlur(self._last_frame, (0, 0), sigmaX=9.0)
+                    self.video_label.update_frame(blurred)
+                except Exception:
+                    pass
+            self._reposition_frozen_overlay()
+            self._frozen_overlay.show()
+            self._frozen_overlay.raise_()
+        else:
+            self._frozen_overlay.hide()
+            # Push the most recent (sharp) frame back so the user
+            # sees the live view immediately on unfreeze instead of
+            # waiting for the next raw_frame_ready emit.
+            if self._last_frame is not None:
+                self.video_label.update_frame(self._last_frame)
+
+    def _reposition_frozen_overlay(self) -> None:
+        try:
+            self._frozen_overlay.setGeometry(self.video_label.rect())
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self._reposition_frozen_overlay()
 
     def _set_idle_state(self) -> None:
         self._last_frame = None

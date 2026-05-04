@@ -4869,7 +4869,26 @@ class MainWindow(QMainWindow):
             )
             return
         recorder.saved.connect(lambda _name: self._custom_gestures_panel.refresh_cards())
-        recorder.exec()
+        # Freeze the live pipeline while the recorder is modal: the
+        # recorder runs its own MediaPipe pass on the worker's raw
+        # frames, so a parallel pass in the worker is pure duplicate
+        # cost. Freezing also prevents gesture-action dispatch from
+        # firing while the user intentionally poses for sample
+        # capture. Always lifts on exec() return regardless of how
+        # the dialog closed (Save, cancel, X).
+        if worker is not None and hasattr(worker, "set_pipeline_frozen"):
+            try:
+                worker.set_pipeline_frozen(True)
+            except Exception:
+                pass
+        try:
+            recorder.exec()
+        finally:
+            if worker is not None and hasattr(worker, "set_pipeline_frozen"):
+                try:
+                    worker.set_pipeline_frozen(False)
+                except Exception:
+                    pass
 
     def _open_custom_gesture_sandbox(self) -> None:
         from .custom_gestures_sandbox import SandboxWindow

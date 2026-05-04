@@ -24,6 +24,10 @@ class LiveViewWindow(QMainWindow):
         self._volume_muted = False
         self._volume_active = False
         self._gestures_enabled = True
+        # Frozen-pipeline state: mirror MiniLiveViewer's behavior so
+        # the enlarged view also indicates the worker is paused
+        # while a custom-gesture recorder dialog is open.
+        self._frozen = False
 
         self.setWindowTitle("Touchless Live View")
         self.setMinimumSize(980, 680)
@@ -99,6 +103,25 @@ class LiveViewWindow(QMainWindow):
         self.video_label.setMinimumSize(280, 180)
         self.video_label.clear_video("Press START in the app to begin live gesture tracking.")
         video_layout.addWidget(self.video_label, 1)
+
+        # Centered "paused" overlay shown while the worker pipeline
+        # is frozen for a custom-gesture recording session. Same
+        # treatment as MiniLiveViewer; sized to the video panel via
+        # _reposition_frozen_overlay() on every resize.
+        self._frozen_overlay = QLabel(self.video_label)
+        self._frozen_overlay.setObjectName("debugFrozenOverlay")
+        self._frozen_overlay.setAlignment(Qt.AlignCenter)
+        self._frozen_overlay.setText("Paused\nRecording custom gesture…")
+        self._frozen_overlay.setStyleSheet(
+            "QLabel#debugFrozenOverlay {"
+            "  background: rgba(0, 0, 0, 0.42);"
+            "  color: #FFFFFF;"
+            "  font-weight: 800;"
+            "  font-size: 18px;"
+            "  border-radius: 14px;"
+            "}"
+        )
+        self._frozen_overlay.hide()
 
         # Live latency readout: time from camera-frame decode to
         # this very paint, in milliseconds. EWMA-smoothed so the
@@ -332,6 +355,11 @@ class LiveViewWindow(QMainWindow):
                 self._worker.engine_landmarks_ready.disconnect(self._on_worker_landmarks)
             except Exception:
                 pass
+            if hasattr(self._worker, "frozen_state_changed"):
+                try:
+                    self._worker.frozen_state_changed.disconnect(self._on_worker_frozen_changed)
+                except Exception:
+                    pass
         self._worker = worker
         if self._worker is None:
             self._set_idle_state()
@@ -340,6 +368,11 @@ class LiveViewWindow(QMainWindow):
             self._worker.raw_frame_ready.connect(self._on_worker_raw_frame)
             self._worker.engine_landmarks_ready.connect(self._on_worker_landmarks)
             self._worker.debug_frame_ready.connect(self._on_worker_debug_frame)
+            if hasattr(self._worker, "frozen_state_changed"):
+                try:
+                    self._worker.frozen_state_changed.connect(self._on_worker_frozen_changed)
+                except Exception:
+                    pass
         except Exception:
             self._worker = None
             self._set_idle_state()
@@ -354,6 +387,11 @@ class LiveViewWindow(QMainWindow):
                 self._worker.debug_frame_ready.disconnect(self._on_worker_debug_frame)
             except Exception:
                 pass
+            if hasattr(self._worker, "frozen_state_changed"):
+                try:
+                    self._worker.frozen_state_changed.disconnect(self._on_worker_frozen_changed)
+                except Exception:
+                    pass
         self._worker = None
         self._set_idle_state()
 
@@ -374,6 +412,10 @@ class LiveViewWindow(QMainWindow):
         # rationale. Renders the camera frame at camera fps,
         # bypasses the engine pipeline.
         if not self.isVisible() or frame is None:
+            return
+        if self._frozen:
+            # Hold the blurred snapshot already on screen while a
+            # custom-gesture recorder is open.
             return
         # Two-stage drop (see MiniLiveViewer for full rationale):
         #   (a) Backlog detection: drop if daemon already decoded
@@ -461,6 +503,33 @@ class LiveViewWindow(QMainWindow):
         self._volume_muted = bool(payload.get("volume_muted", False))
         self._volume_active = bool(payload.get("volume_active", False))
         self._update_volume_widgets()
+
+    def _on_worker_frozen_changed(self, frozen: bool) -> None:
+        self._frozen = bool(frozen)
+        if self._frozen:
+            if self._last_frame is not None:
+                try:
+                    blurred = cv2.GaussianBlur(self._last_frame, (0, 0), sigmaX=11.0)
+                    self.video_label.update_frame(blurred)
+                except Exception:
+                    pass
+            self._reposition_frozen_overlay()
+            self._frozen_overlay.show()
+            self._frozen_overlay.raise_()
+        else:
+            self._frozen_overlay.hide()
+            if self._last_frame is not None:
+                self.video_label.update_frame(self._last_frame)
+
+    def _reposition_frozen_overlay(self) -> None:
+        try:
+            self._frozen_overlay.setGeometry(self.video_label.rect())
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self._reposition_frozen_overlay()
 
     def _set_idle_state(self) -> None:
         self._last_frame = None

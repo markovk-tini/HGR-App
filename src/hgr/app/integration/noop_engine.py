@@ -463,6 +463,11 @@ class GestureWorker(QObject):
     # GestureWorker's owning (main) thread, so all post-processing —
     # including overlay widget mutations — stays on the GUI thread.
     _engine_result_ready = Signal(object, object)
+    # Pipeline freeze state. Receivers (live-view widgets) use this
+    # to render a "Paused — recording custom gesture" overlay with
+    # a light blur so the user knows the main app intentionally
+    # stopped reacting while a recording window is open.
+    frozen_state_changed = Signal(bool)
 
     _LOW_FPS_AUTO_THRESHOLD = 18.0
     _LOW_FPS_AUTO_ENTER_SECONDS = 4.0
@@ -498,6 +503,15 @@ class GestureWorker(QObject):
         self.config = config
         self.camera_index_override = camera_index_override
         self._running = False
+        # Pipeline freeze: when True, _tick still emits raw_frame_ready
+        # so subscribers (custom-gesture recorder) keep receiving
+        # camera frames, but skips the entire engine pipeline —
+        # MediaPipe inference, gesture-action dispatch, all of it.
+        # Set via set_pipeline_frozen() while a modal recording window
+        # is open so we don't double-run MediaPipe (the recorder runs
+        # its own pass) and so gesture actions don't fire while the
+        # user is intentionally posing for sample capture.
+        self._frozen = False
         self._cap = None
         self._camera_info = None
         self.engine: GestureRecognitionEngine | None = None
@@ -3392,6 +3406,24 @@ class GestureWorker(QObject):
             return
         self._shutdown_runtime(emit_signal=True)
 
+    def set_pipeline_frozen(self, frozen: bool) -> None:
+        """Freeze / unfreeze the gesture pipeline. While frozen,
+        _tick still emits raw_frame_ready (so the custom-gesture
+        recorder keeps getting frames over its existing connection)
+        but skips MediaPipe inference, gesture-action dispatch, and
+        the debug-payload emit. Live-view widgets observe
+        frozen_state_changed to render their paused/blurred overlay.
+        Idempotent — repeated set_pipeline_frozen(True) calls don't
+        re-emit, so the receiver doesn't churn its overlay state."""
+        new_state = bool(frozen)
+        if new_state == self._frozen:
+            return
+        self._frozen = new_state
+        try:
+            self.frozen_state_changed.emit(new_state)
+        except Exception:
+            pass
+
     def _shutdown_runtime(self, *, emit_signal: bool) -> None:
         self._timer.stop()
         # Stop the background engine runner BEFORE closing the engine,
@@ -3787,6 +3819,16 @@ class GestureWorker(QObject):
             self.raw_frame_ready.emit(frame, capture_ts)
         except Exception:
             pass
+        # Pipeline freeze: the recorder dialog is open. Stop here —
+        # the recorder runs its OWN MediaPipe pass on the raw frame
+        # we just emitted, so a second pass in this worker would be
+        # pure duplicate cost (and was the cause of the user-reported
+        # "camera lags while custom-gesture window is open" stutter).
+        # Gesture actions and debug-payload emits are also short-
+        # circuited so the user can intentionally hold a sample pose
+        # without the worker firing the matching binding.
+        if self._frozen:
+            return
         # Smart skip-frame inference: when Lite Mode is on AND we
         # know the previous frame was empty (no hand), skip MediaPipe
         # this tick and synthesise a "no hand" result. Never skip two
