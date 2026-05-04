@@ -6663,10 +6663,15 @@ class MainWindow(QMainWindow):
 
         return [
             make("1.0.9a", "2026-05-03", """
-**Patch release: code signing, custom gestures, and license switch.**
+**Patch release: code signing, gesture binds, custom gestures, and license switch.**
 
 Code signing
 - **Every installer + bundled exe is now signed** under "Konstantin Markov" via Azure Trusted Signing. Cert chains to Microsoft's publicly-trusted root, so Windows Defender and most antivirus engines accept the install without flagging it. SmartScreen reputation will build over the first few weeks of typical download volume.
+
+Gesture Binds (new settings tab)
+- **Remap any built-in action to a different gesture pose.** Settings → Gesture Binds. Ten built-in actions are rebindable: voice command listen, dictation toggle, mouse mode toggle, drawing mode toggle, cancel voice, open Spotify, play/pause media, system mute, open gesture wheel, open screen wheel.
+- Pick any pose from the gallery (left/right one/two/three/four/fist, mute, wheel pose, screen wheel) and assign it to the action you want.
+- Defaults preserved — if you don't touch this panel, every gesture works exactly as before.
 
 Custom gestures
 - **Handedness-aware**: every saved gesture remembers whether you trained it with your left or right hand, and only fires for that hand. Live overlay shows the bound hand on each card.
@@ -6678,10 +6683,15 @@ Custom gestures
 - **Wizard polish**: Enter no longer accidentally closes the survey window; only Escape closes it, and Enter activates Start when the form is fully valid.
 - **Recording UI**: live "Hand: Left/Right" badge during capture so you can see what MediaPipe is detecting before you save.
 
+UI polish
+- **Runtime status text** is now context-aware. The status pill shows "dictation active", "voice listening…", "Touchless active | drawing mode on", "Touchless active | chrome mode on", or just "Touchless active" depending on what's currently engaged — instead of a single generic state.
+- **Tutorial**: phone-only tutorial path works again (no more wrong-camera lockout for users without a webcam).
+- **GPU Mode toggle** is now always clickable, even when the engine is mid-restart.
+
 License
 - **Switched from GPL v3 to FSL-1.1-Apache-2.0** (Functional Source License). Source stays public for audit/learning, mandatory attribution stays, but commercial-fork protection is added for the next 2 years; the license auto-converts to Apache 2.0 after that.
 
-<!-- full-installer-url: https://hgr-downloads.touchless.app/windows/v1.0.9a/Touchless_Installer.exe -->
+<!-- full-installer-url: https://pub-3116ebd541fa4ca18a84371667d029fe.r2.dev/windows/v1.0.9a/Touchless_Installer.exe -->
 <!-- full-installer-size: 0 -->
 """),
             make("1.0.9", "2026-05-01", """
