@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import queue
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -123,21 +124,15 @@ class SwipeInstructionWidget(QWidget):
             "Swipe Practice",
         )
 
-        count_font = QFont("Segoe UI", 12)
-        count_font.setBold(True)
-        painter.setFont(count_font)
-        painter.setPen(QColor(self._text.red(), self._text.green(), self._text.blue(), 230))
-        painter.drawText(
-            QRectF(card.left() + 18, card.top() + 64, card.width() - 36, 28),
-            Qt.AlignCenter,
-            f"Left: {self._left_count}/3    Right: {self._right_count}/3",
-        )
-
+        # The Left:N/3 Right:N/3 line that used to live here was a
+        # duplicate — the same counts are now shown big-and-bold under
+        # the camera view via tutorial_camera_footer. Keep the hint
+        # so the practice card still has guidance text.
         hint_font = QFont("Segoe UI", 10)
         painter.setFont(hint_font)
         painter.setPen(QColor(self._text.red(), self._text.green(), self._text.blue(), 185))
         painter.drawText(
-            QRectF(card.left() + 24, card.top() + 108, card.width() - 48, 52),
+            QRectF(card.left() + 24, card.top() + 64, card.width() - 48, 60),
             Qt.AlignCenter | Qt.TextWordWrap,
             "Use your right hand and match the swipe direction shown over the live camera view.",
         )
@@ -377,6 +372,15 @@ class TutorialWindow(QDialog):
         self._completion_feedback_until = 0.0
         self._completion_feedback_duration = 2.0
         self._completion_feedback_step = -1
+        # Encouragement-popup state. When a step's _visual_green_until is
+        # newly pushed forward (i.e., the user just got a correct
+        # detection and the hand turned green), pick a random message
+        # and fade it out over 1.5 s at the bottom-center of the
+        # camera view. Throttled to 1 per second so the same swipe
+        # can't stack three popups.
+        self._last_seen_green_until: dict[str, float] = {}
+        self._encouragement_until: float = 0.0
+        self._encouragement_last_at: float = 0.0
         self._play_pause_ready_for_next = True
         self._swipe_goal_index = 0
         self._nav_swipe_cooldown_until = 0.0
@@ -470,18 +474,50 @@ class TutorialWindow(QDialog):
         self.camera_label.setObjectName("tutorialMeta")
         video_layout.addWidget(self.camera_label)
 
+        # Big bold accent-coloured header above the camera view. Used
+        # by the swipes step to call out the current sub-task ("Let's
+        # start with swiping right!" then "Now let's try swiping to
+        # the left!"). Hidden for steps that don't set it.
+        self.tutorial_camera_header = QLabel("")
+        self.tutorial_camera_header.setObjectName("tutorialCameraHeader")
+        self.tutorial_camera_header.setAlignment(Qt.AlignCenter)
+        self.tutorial_camera_header.setWordWrap(True)
+        self.tutorial_camera_header.hide()
+        video_layout.addWidget(self.tutorial_camera_header)
+
         self.video_label = QLabel("The tutorial will show your live hand skeleton here.")
         self.video_label.setObjectName("tutorialVideo")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setWordWrap(True)
         self.video_label.setMinimumSize(480, 360)
+        # Cap height so the header above + counter below stay on
+        # screen without overlap as the window grows.
+        self.video_label.setMaximumHeight(540)
         video_layout.addWidget(self.video_label, 1)
 
         self.gesture_chip = QLabel("Gesture: neutral")
         self.gesture_chip.setObjectName("tutorialChip")
         self.gesture_chip.setAlignment(Qt.AlignCenter)
         video_layout.addWidget(self.gesture_chip, 0, Qt.AlignCenter)
+
+        # Big bold accent-coloured counter below the camera view —
+        # paired with tutorial_camera_header. Swipes step uses it to
+        # show "Completed N/3 right swipes" / "Completed N/3 left
+        # swipes". Hidden for steps that don't set it.
+        self.tutorial_camera_footer = QLabel("")
+        self.tutorial_camera_footer.setObjectName("tutorialCameraFooter")
+        self.tutorial_camera_footer.setAlignment(Qt.AlignCenter)
+        self.tutorial_camera_footer.setWordWrap(True)
+        self.tutorial_camera_footer.hide()
+        video_layout.addWidget(self.tutorial_camera_footer)
         body_layout.addWidget(video_card, 7)
+
+        # Encouragement popup is drawn directly onto the camera frame
+        # via cv2.putText in _render_frame (see _draw_encouragement_overlay).
+        # No QLabel — keeping the popup *inside* the live camera image
+        # rather than overlapping it with a Qt widget so it reads as
+        # part of the video, not a chrome-on-top decoration.
+        self._encouragement_text = ""
 
         info_card = QFrame()
         info_card.setObjectName("tutorialCard")
@@ -665,6 +701,13 @@ class TutorialWindow(QDialog):
                 color: {self.config.accent_color};
                 font-size: 22px;
                 font-weight: 900;
+            }}
+            QLabel#tutorialCameraHeader, QLabel#tutorialCameraFooter {{
+                color: {self.config.accent_color};
+                font-size: 22px;
+                font-weight: 900;
+                background: transparent;
+                padding: 6px 4px;
             }}
             QLabel#tutorialStepDesc {{
                 color: {self.config.text_color};
@@ -1058,45 +1101,237 @@ class TutorialWindow(QDialog):
         self.note_label.clear()
         self.voice_preview_label.clear()
 
+        # The right-info-card "practice box" used to mirror what's now
+        # shown big and bold above + below the camera view. For most
+        # steps that's pure duplication, so we hide the practice_stack
+        # entirely — only the mouse-mode step has an interactive
+        # widget (target dots to clear) that the camera-view text
+        # can't replicate. Header and footer reset before each step so
+        # one step's text never bleeds into another.
+        self.tutorial_camera_header.hide()
+        self.tutorial_camera_footer.hide()
+
         if step.key == "swipes":
-            self.practice_stack.setCurrentWidget(self.swipe_widget)
+            self.practice_stack.hide()
             self.swipe_widget.set_counts(self._swipe_counts["swipe_left"], self._swipe_counts["swipe_right"])
-            status = f"Right: {self._swipe_counts['swipe_right']}/3        Left: {self._swipe_counts['swipe_left']}/3"
-            self.progress_label.setText(status if not self._step_completed else "Completed! Swipe right to move on!")
+            self._refresh_swipe_camera_labels()
+            self.progress_label.clear()
         elif step.key == "gesture_wheel":
-            self.practice_stack.setCurrentWidget(self.wheel_widget)
-            self.progress_label.setText("Waiting for gesture wheel pose." if not self._step_completed else "Completed! Swipe right to move on!")
+            self.practice_stack.hide()
+            self._set_camera_step_labels(
+                header="Hold the wheel pose to open the gesture wheel.",
+                footer=(
+                    "Completed! Swipe right to move on!"
+                    if self._step_completed
+                    else "Waiting for the wheel pose…"
+                ),
+            )
+            self.progress_label.clear()
         elif step.key == "mouse_mode":
+            self.practice_stack.show()
             self.practice_stack.setCurrentWidget(self.mouse_widget)
             if self._step_completed:
-                self.progress_label.setText("Completed! Swipe right to move on!")
+                footer_text = "Completed! Swipe right to move on!"
             elif self._mouse_stage == "enable":
-                self.progress_label.setText("Mouse mode off. Turn it on to begin.")
+                footer_text = "Mouse mode off. Turn it on to begin."
             elif self._mouse_stage == "practice":
-                self.progress_label.setText("Mouse mode on. Clear all tutorial targets.")
+                footer_text = "Mouse mode on. Clear all tutorial targets."
             else:
-                self.progress_label.setText("Targets cleared. Turn mouse mode off to finish.")
+                footer_text = "Targets cleared. Turn mouse mode off to finish."
+            self._set_camera_step_labels(
+                header="Toggle mouse mode and clear the targets.",
+                footer=footer_text,
+            )
+            self.progress_label.clear()
         else:
-            self.practice_stack.setCurrentWidget(self.generic_practice)
-            prompt_map = {
-                "spotify_open": "Right-hand two gesture",
-                "play_pause": "Right-hand fist gesture",
-                "voice_command": "Left-hand one, then say the full command",
+            self.practice_stack.hide()
+            header_map = {
+                "spotify_open": "Open Spotify with right-hand two!",
+                "play_pause": "Play/pause with right-hand fist!",
+                "voice_command": "Hold left-hand one, then say the command.",
             }
-            self.generic_practice.setText(prompt_map.get(step.key, step.description))
-            if step.key == "play_pause":
-                self.progress_label.setText((f"fist detections {self._spotify_toggle_count}/2" if not self._step_completed else "Completed! Swipe right to move on!"))
-            elif step.key == "spotify_open":
-                self.progress_label.setText("waiting for right-hand two" if not self._step_completed else "Completed! Swipe right to move on!")
-            elif step.key == "voice_command":
-                self.progress_label.setText("Waiting for left-hand one and the voice command." if not self._step_completed else "Completed! Swipe right to move on!")
-            else:
-                self.progress_label.setText(step.progress_template)
+            self._set_camera_step_labels(
+                header=header_map.get(step.key, step.description),
+                footer=self._step_progress_footer(step),
+            )
+            self.progress_label.clear()
 
         self.prev_button.setEnabled(self._step_index > 0)
         self.next_button.setEnabled(self._step_index in self._completed_steps)
         self.next_button.setText("Next")
         self._update_completion_feedback(time.monotonic())
+
+    _ENCOURAGEMENT_MESSAGES = (
+        "Good job!",
+        "Nice work!",
+        "Yay!",
+        "Awesome!",
+        "Perfect!",
+        "Got it!",
+        "Nice!",
+        "You got it!",
+        "Way to go!",
+    )
+
+    def _check_encouragement_trigger(self, now: float) -> None:
+        """Watch _visual_green_until for newly-pushed entries — those
+        correspond to a gesture just being detected correctly (the hand
+        turning green in the live view). When that happens, queue a
+        random encouragement message to be drawn ON the camera frame
+        for 1.5 s. Throttled to one per second so a triple-swipe
+        doesn't stack three popups."""
+        triggered = False
+        for key, until in list(self._visual_green_until.items()):
+            prev = self._last_seen_green_until.get(key, 0.0)
+            if until > prev + 0.05:
+                triggered = True
+            self._last_seen_green_until[key] = until
+        if not triggered:
+            return
+        if now - self._encouragement_last_at < 1.0:
+            return
+        self._encouragement_last_at = now
+        try:
+            self._encouragement_text = random.choice(self._ENCOURAGEMENT_MESSAGES)
+        except Exception:
+            self._encouragement_text = "Nice!"
+        self._encouragement_until = now + 1.5
+
+    def _draw_encouragement_overlay(self, frame, now: float) -> None:
+        """Render the active encouragement message centered along the
+        bottom of the camera frame (in pixel space, baked into the
+        image so it scales with the video). Fades over the last 0.5 s
+        of the 1.5 s lifetime via alpha-blended overlay."""
+        if self._encouragement_until <= 0.0 or not self._encouragement_text:
+            return
+        remaining = self._encouragement_until - now
+        if remaining <= 0.0:
+            self._encouragement_until = 0.0
+            self._encouragement_text = ""
+            return
+        text = self._encouragement_text
+        try:
+            h, w = frame.shape[:2]
+        except Exception:
+            return
+        # Scale font with frame size so the message reads at any video
+        # height. Tune for ~720p as the reference point.
+        font = cv2.FONT_HERSHEY_DUPLEX
+        scale = max(1.0, h / 360.0)
+        thickness = max(2, int(round(scale * 1.4)))
+        (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+        cx = w // 2
+        # Position near (but not at) the bottom of the camera frame.
+        margin = max(24, int(round(h * 0.06)))
+        baseline_y = h - margin
+        text_x = cx - tw // 2
+        text_y = baseline_y
+        # Fade: full opacity until the last 0.5 s, then linearly down
+        # to zero. Implemented as alpha-blended draw on top of the
+        # frame so the existing camera content remains crisp.
+        fade_window = 0.5
+        alpha = 1.0 if remaining >= fade_window else max(0.0, remaining / fade_window)
+        if alpha <= 0.01:
+            return
+        # Accent green (BGR) for fill, dark outline for legibility on
+        # busy camera content.
+        accent_bgr = (182, 233, 29)  # = #1DE9B6 → BGR
+        outline_bgr = (10, 25, 35)
+        overlay = frame.copy()
+        # Black outline first (multiple offsets for stroke effect).
+        outline_thickness = max(thickness + 2, 4)
+        cv2.putText(
+            overlay, text, (text_x, text_y), font, scale,
+            outline_bgr, outline_thickness, cv2.LINE_AA,
+        )
+        cv2.putText(
+            overlay, text, (text_x, text_y), font, scale,
+            accent_bgr, thickness, cv2.LINE_AA,
+        )
+        cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0.0, dst=frame)
+
+    def _update_encouragement_visual(self, now: float) -> None:
+        """Compatibility shim — drawing happens during _render_frame
+        via _draw_encouragement_overlay; this just decays the timer
+        when called from non-render code paths."""
+        if self._encouragement_until > 0.0 and now >= self._encouragement_until:
+            self._encouragement_until = 0.0
+            self._encouragement_text = ""
+
+    def _set_step_progress(self, text: str) -> None:
+        """Single setter for per-frame progress strings. Updates the
+        big-bold camera-view footer (new home for this info) AND the
+        legacy right-side progress_label as a fallback. Swipes step
+        owns its own footer text via _refresh_swipe_camera_labels and
+        skips this — its progress is the count, not a sentence."""
+        try:
+            step_key = self._practice_steps[self._step_index].key
+        except Exception:
+            step_key = ""
+        if step_key != "swipes":
+            try:
+                self.tutorial_camera_footer.setText(text)
+                self.tutorial_camera_footer.show()
+            except Exception:
+                pass
+        try:
+            self._set_step_progress(text)
+        except Exception:
+            pass
+
+    def _set_camera_step_labels(self, header: str = "", footer: str = "") -> None:
+        """Show / clear the big-bold accent-coloured header and footer
+        that frame the camera view. Empty strings hide the widget so
+        the layout doesn't reserve space for a blank line."""
+        if header:
+            self.tutorial_camera_header.setText(header)
+            self.tutorial_camera_header.show()
+        else:
+            self.tutorial_camera_header.clear()
+            self.tutorial_camera_header.hide()
+        if footer:
+            self.tutorial_camera_footer.setText(footer)
+            self.tutorial_camera_footer.show()
+        else:
+            self.tutorial_camera_footer.clear()
+            self.tutorial_camera_footer.hide()
+
+    def _step_progress_footer(self, step) -> str:
+        """Compose the footer line shown under the camera view for a
+        non-swipes step. Mirrors what the old progress_label said but
+        rendered big-bold-accent below the live image."""
+        if self._step_completed:
+            return "Completed! Swipe right to move on!"
+        if step.key == "play_pause":
+            return f"Fist detections {self._spotify_toggle_count}/2"
+        if step.key == "spotify_open":
+            return "Waiting for right-hand two…"
+        if step.key == "voice_command":
+            return "Waiting for left-hand one and the voice command."
+        return step.progress_template or ""
+
+    def _refresh_swipe_camera_labels(self) -> None:
+        """Drive the big-bold accent-green header above the camera and
+        the matching counter below it for the swipes step. Phase
+        switches at 3 right swipes: header changes from 'right' to
+        'left', and the counter swaps to track left swipes."""
+        right_count = int(self._swipe_counts.get("swipe_right", 0))
+        left_count = int(self._swipe_counts.get("swipe_left", 0))
+        in_left_phase = right_count >= 3
+        if not in_left_phase:
+            self.tutorial_camera_header.setText(
+                "Let's start with swiping right! Use skeleton hands for help."
+            )
+            self.tutorial_camera_footer.setText(
+                f"Completed {right_count}/3 right swipes"
+            )
+        else:
+            self.tutorial_camera_header.setText("Now let's try swiping to the left!")
+            self.tutorial_camera_footer.setText(
+                f"Completed {left_count}/3 left swipes"
+            )
+        self.tutorial_camera_header.show()
+        self.tutorial_camera_footer.show()
 
     def _complete_step(self, note: str | None = None) -> None:
         self._step_completed = True
@@ -1104,10 +1339,8 @@ class TutorialWindow(QDialog):
         self.next_button.setEnabled(True)
         self._completion_feedback_until = time.monotonic() + self._completion_feedback_duration
         self._completion_feedback_step = self._step_index
-        if note:
-            self.progress_label.setText(note)
-        else:
-            self.progress_label.setText("Completed! Swipe right to move on!")
+        text = note or "Completed! Swipe right to move on!"
+        self._set_step_progress(text)
 
     def _update_completion_feedback(self, now: float) -> None:
         visible = self._step_completed and not self._show_completion_page
@@ -1493,6 +1726,7 @@ class TutorialWindow(QDialog):
                 skeleton_color = (80, 235, 120) if visual_ready else (70, 70, 255)
                 self._draw_user_skeleton_overlay(display, result, skeleton_color)
             self._draw_demo_overlay(display, current_step_key)
+            self._draw_encouragement_overlay(display, monotonic_now)
             self._render_frame(display)
         if current_step_key != "gesture_wheel":
             self._tutorial_wheel_overlay.hide_overlay()
@@ -1511,6 +1745,8 @@ class TutorialWindow(QDialog):
         info_lines = payload.get("info_lines") or []
         if info_lines:
             self.camera_label.setText(str(info_lines[0]))
+        self._check_encouragement_trigger(monotonic_now)
+        self._update_encouragement_visual(monotonic_now)
         self._update_completion_feedback(monotonic_now)
 
     def _update_low_fps_warning(self, payload: dict, now: float, step_key: str) -> None:
@@ -1549,9 +1785,7 @@ class TutorialWindow(QDialog):
                 self._swipe_counts["swipe_right"] = min(3, self._swipe_counts["swipe_right"])
                 self._swipe_counts["swipe_left"] = min(3, self._swipe_counts["swipe_left"])
                 self.swipe_widget.set_counts(self._swipe_counts["swipe_left"], self._swipe_counts["swipe_right"])
-                self.progress_label.setText(
-                    f"Right: {self._swipe_counts['swipe_right']}/3        Left: {self._swipe_counts['swipe_left']}/3"
-                )
+                self._refresh_swipe_camera_labels()
                 return now < self._visual_green_until.get("swipes", 0.0)
 
             expected = "swipe_right" if self._swipe_goal_index < 3 else "swipe_left"
@@ -1563,9 +1797,7 @@ class TutorialWindow(QDialog):
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + self._gesture_flash_seconds)
                 accepted_swipe = True
             self._last_dynamic_label = dynamic_label
-            self.progress_label.setText(
-                f"Right: {self._swipe_counts['swipe_right']}/3        Left: {self._swipe_counts['swipe_left']}/3"
-            )
+            self._refresh_swipe_camera_labels()
             visual_ready = accepted_swipe or now < self._visual_green_until.get("swipes", 0.0)
             if self._swipe_goal_index >= 6:
                 self._complete_step("Both swipes detected! Swipe right to move on!")
@@ -1587,7 +1819,7 @@ class TutorialWindow(QDialog):
             if hold_fired:
                 visual_ready = True
                 self._complete_step("Completed! Swipe right to move on!")
-            self.progress_label.setText("Detected right hand two!" if active else "waiting for right-hand two")
+            self._set_step_progress("Detected right hand two!" if active else "waiting for right-hand two")
             return visual_ready
 
         if step.key == "play_pause":
@@ -1608,7 +1840,7 @@ class TutorialWindow(QDialog):
                 self._spotify_toggle_count = min(2, self._spotify_toggle_count + 1)
                 self._play_pause_ready_for_next = False
                 visual_ready = True
-            self.progress_label.setText(f"fist detections {self._spotify_toggle_count}/2")
+            self._set_step_progress(f"fist detections {self._spotify_toggle_count}/2")
             if self._spotify_toggle_count >= 2:
                 self._complete_step("Completed! Swipe right to move on!")
             return visual_ready
@@ -1620,7 +1852,7 @@ class TutorialWindow(QDialog):
             wheel_visible = bool(payload.get("wheel_visible"))
             self._flash_on_edge("gesture_wheel", active, now)
             visual_ready = now < self._visual_green_until.get("gesture_wheel", 0.0)
-            self.progress_label.setText(
+            self._set_step_progress(
                 "Gesture wheel detected!" if (active or wheel_visible) else "Waiting for gesture wheel pose."
             )
             if active and not self._step_completed:
@@ -1658,7 +1890,7 @@ class TutorialWindow(QDialog):
             if left_click:
                 self.mouse_widget.register_click(cursor_position)
             if self._mouse_stage == "enable":
-                self.progress_label.setText(
+                self._set_step_progress(
                     "Detected left-hand three!" if left_three_active else "Mouse mode off. Turn it on to begin."
                 )
                 self._flash_on_edge("mouse_enable", left_three_active, now)
@@ -1674,12 +1906,12 @@ class TutorialWindow(QDialog):
                 if mouse_mode_enabled:
                     self._mouse_stage = "practice"
             elif self._mouse_stage == "practice":
-                self.progress_label.setText("Mouse mode on. Clear all tutorial targets.")
+                self._set_step_progress("Mouse mode on. Clear all tutorial targets.")
                 visual_ready = False
                 if self.mouse_widget.completed:
                     self._mouse_stage = "disable"
             else:
-                self.progress_label.setText(
+                self._set_step_progress(
                     "Detected left-hand three!" if left_three_active else "Targets cleared. Turn mouse mode off to finish."
                 )
                 self._flash_on_edge("mouse_disable", left_three_active, now)
@@ -1705,7 +1937,7 @@ class TutorialWindow(QDialog):
             voice_control = str(payload.get("voice_control_text", "") or "").lower()
             self._flash_on_edge("voice_command", left_one_active, now)
             visual_ready = now < self._visual_green_until.get("voice_command", 0.0)
-            self.progress_label.setText(
+            self._set_step_progress(
                 "Detected left-hand one!" if left_one_active or voice_listening else "Waiting for left-hand one and the voice command."
             )
             if (
@@ -1743,8 +1975,7 @@ class TutorialWindow(QDialog):
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + 1.0)
                 accepted_swipe = True
             self._last_dynamic_label = dynamic_label
-            target = "Swipe right" if self._swipe_goal_index < 3 else "Swipe left"
-            self.progress_label.setText(f"Swipe right {self._swipe_counts['swipe_right']}/3, swipe left {self._swipe_counts['swipe_left']}/3.")
+            self._refresh_swipe_camera_labels()
             visual_ready = accepted_swipe or now < self._visual_green_until.get("swipes", 0.0)
             if self._swipe_goal_index >= 6:
                 self._complete_step("Completed! Swipe right to move on!")
@@ -1753,7 +1984,7 @@ class TutorialWindow(QDialog):
         if step.key == "spotify_open":
             active = bool(result.found and result.tracked_hand is not None and str(result.tracked_hand.handedness or "").lower() == "right" and result.prediction.stable_label == "two")
             visual_ready = now < self._visual_green_until.get("spotify_open", 0.0)
-            self.progress_label.setText("Detected right-hand two!" if active else "Waiting for right-hand two.")
+            self._set_step_progress("Detected right-hand two!" if active else "Waiting for right-hand two.")
             if self._hold_ready("spotify_open", active, self._spotify_open_hold_seconds, now, cooldown=self._spotify_static_cooldown_seconds):
                 self._complete_step("Completed! Swipe right to move on!")
                 visual_ready = True
@@ -1764,11 +1995,11 @@ class TutorialWindow(QDialog):
             if not active:
                 self._play_pause_ready_for_next = True
             visual_ready = now < self._visual_green_until.get("play_pause", 0.0)
-            self.progress_label.setText("Detected right-hand fist!" if active else f"Fist detections: {self._spotify_toggle_count}/2.")
+            self._set_step_progress("Detected right-hand fist!" if active else f"Fist detections: {self._spotify_toggle_count}/2.")
             if self._play_pause_ready_for_next and self._hold_ready("play_pause", active, self._spotify_play_pause_hold_seconds, now, cooldown=self._spotify_static_cooldown_seconds):
                 self._spotify_toggle_count = min(2, self._spotify_toggle_count + 1)
                 self._play_pause_ready_for_next = False
-                self.progress_label.setText(f"Fist detections: {self._spotify_toggle_count}/2.")
+                self._set_step_progress(f"Fist detections: {self._spotify_toggle_count}/2.")
                 if self._spotify_toggle_count >= 2:
                     self._complete_step("Completed! Swipe right to move on!")
                 visual_ready = True
@@ -1781,7 +2012,7 @@ class TutorialWindow(QDialog):
                 )
             )
             visual_ready = self._visual_ready("gesture_wheel", active, now, self._wheel_hold_seconds)
-            self.progress_label.setText("Wheel pose detected!" if active else "Waiting for wheel pose.")
+            self._set_step_progress("Wheel pose detected!" if active else "Waiting for wheel pose.")
             items = (
                 ("add_playlist", "Add Playlist", 90.0),
                 ("remove_playlist", "Remove Playlist", 38.57),
@@ -1843,18 +2074,18 @@ class TutorialWindow(QDialog):
                 self.mouse_widget.register_click(update.cursor_position)
             if self._mouse_stage == "enable":
                 mouse_enable_active = bool(result.found and result.tracked_hand is not None and str(result.tracked_hand.handedness or "").lower() == "left" and result.prediction.stable_label == "three")
-                self.progress_label.setText("Detected left-hand three!" if mouse_enable_active else "Mouse mode off. Turn it on to begin.")
+                self._set_step_progress("Detected left-hand three!" if mouse_enable_active else "Mouse mode off. Turn it on to begin.")
                 visual_ready = self._visual_ready("mouse_enable", mouse_enable_active, now, self._mouse_tracker.toggle_hold_seconds)
                 if update.mode_enabled:
                     self._mouse_stage = "practice"
             elif self._mouse_stage == "practice":
-                self.progress_label.setText("Mouse mode on. Clear all tutorial targets.")
+                self._set_step_progress("Mouse mode on. Clear all tutorial targets.")
                 visual_ready = update.mode_enabled
                 if self.mouse_widget.completed:
                     self._mouse_stage = "disable"
             else:
                 mouse_disable_active = bool(result.found and result.tracked_hand is not None and str(result.tracked_hand.handedness or "").lower() == "left" and result.prediction.stable_label == "three")
-                self.progress_label.setText("Detected left-hand three!" if mouse_disable_active else "Targets cleared. Turn mouse mode off to finish.")
+                self._set_step_progress("Detected left-hand three!" if mouse_disable_active else "Targets cleared. Turn mouse mode off to finish.")
                 visual_ready = self._visual_ready("mouse_disable", mouse_disable_active, now, self._mouse_tracker.toggle_hold_seconds)
                 if not update.mode_enabled and self.mouse_widget.completed:
                     self._complete_step(f"Mouse mode practice completed. Part {self._step_index + 1}/6 completed!")
@@ -1868,7 +2099,7 @@ class TutorialWindow(QDialog):
             )
             self._flash_on_edge("voice_command", left_one_active, now)
             visual_ready = now < self._visual_green_until.get("voice_command", 0.0)
-            self.progress_label.setText("Detected left-hand one!" if left_one_active or self._voice_listening else "Waiting for left-hand one and the voice command.")
+            self._set_step_progress("Detected left-hand one!" if left_one_active or self._voice_listening else "Waiting for left-hand one and the voice command.")
             if self._hold_ready("voice_command", left_one_active and not self._voice_listening, 0.6, now, cooldown=1.5):
                 if self._worker is not None:
                     try:
@@ -1907,6 +2138,11 @@ class TutorialWindow(QDialog):
         ok, frame = self._cap.read()
         if not ok:
             return
+        # Always mirror to selfie view. The earlier camera_source_is_mirrored
+        # branch caused tutorial / recorder cold-start paths to show
+        # camera-perspective when the config flag was on, which felt
+        # broken to users. Selfie view is what people expect across
+        # every Touchless surface, so we flip unconditionally here.
         frame = cv2.flip(frame, 1)
         result = self._engine.process_frame(frame)
         monotonic_now = time.monotonic()
@@ -1917,6 +2153,7 @@ class TutorialWindow(QDialog):
         display = result.annotated_frame.copy()
         self._draw_demo_overlay(display, self._practice_steps[self._step_index].key)
         self._draw_user_skeleton_overlay(display, result, (80, 235, 120) if visual_ready else (70, 70, 255))
+        self._draw_encouragement_overlay(display, monotonic_now)
         self._render_frame(display)
 
         step_key = self._practice_steps[self._step_index].key
@@ -1932,6 +2169,8 @@ class TutorialWindow(QDialog):
             self.gesture_chip.setText(f"Gesture: {banner}")
         if self._voice_overlay is not None:
             self._voice_overlay.tick(monotonic_now)
+        self._check_encouragement_trigger(monotonic_now)
+        self._update_encouragement_visual(monotonic_now)
         self._update_completion_feedback(monotonic_now)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802

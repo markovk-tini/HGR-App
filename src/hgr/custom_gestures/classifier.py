@@ -276,3 +276,36 @@ class GestureClassifier:
             np.asarray(feature_vector, dtype=np.float32),
             sticky_name=sticky_name,
         )
+
+    def best_score_for(self, landmarks: np.ndarray) -> tuple[Optional[str], float]:
+        """Diagnostic: return (best_gesture_name, score) regardless of
+        threshold. Used by the live runner's debug log so the user can
+        see how close they are to firing — distinguishes 'score=0.86,
+        just below threshold' from 'score=0.20, totally wrong pose'."""
+        if self._matrix is None:
+            self.reload()
+        if self._matrix is None or self._matrix.size == 0:
+            return None, 0.0
+        try:
+            features = normalize_landmarks(landmarks)
+        except Exception:
+            return None, 0.0
+        q = np.array(features, dtype=np.float32, copy=True)
+        dist_start = _LANDMARK_FEATURE_LEN
+        dist_end = dist_start + _DISTANCE_REGION_LEN
+        joint_end = dist_end + _JOINT_ANGLE_FEATURE_LEN
+        class_end = joint_end + _CLASS_REGION_LEN
+        if q.shape[0] >= dist_end:
+            q[dist_start:dist_end] *= _DISTANCE_FEATURE_WEIGHT
+        if q.shape[0] >= joint_end:
+            q[dist_end:joint_end] *= _JOINT_ANGLE_WEIGHT
+        if q.shape[0] >= class_end:
+            q[joint_end:class_end] *= _CLASS_FEATURE_WEIGHT
+        diffs = self._matrix - q
+        distances = np.linalg.norm(diffs, axis=1)
+        best_idx = int(np.argmin(distances))
+        best_distance = float(distances[best_idx])
+        score = _distance_to_score(best_distance)
+        best_g_idx = self._sample_to_gesture_idx[best_idx]
+        best_name = self._gestures[best_g_idx].name
+        return best_name, score

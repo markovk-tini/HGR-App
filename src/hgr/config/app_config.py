@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 APP_NAME = "Touchless"
 CONFIG_DIR = Path.home() / ".touchless"
@@ -209,6 +209,11 @@ class AppConfig:
     # to disable itself with a tooltip when no GPU path is reachable
     # so the user isn't toggling a no-op.
     gpu_mode: bool = False
+    # Maps action_id -> pose_id for the Settings → Gesture Binds tab.
+    # Empty dict means "use default bindings" (see _DEFAULT_GESTURE_BINDS in
+    # main_window.py). Only stores user-changed entries to keep the file
+    # tidy; defaults are resolved on read.
+    gesture_bindings: Dict[str, str] = field(default_factory=dict)
 
 
 DEFAULT_CONFIG = AppConfig()

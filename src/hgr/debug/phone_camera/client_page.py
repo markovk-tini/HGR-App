@@ -262,9 +262,17 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     const res = currentRes();
     const fps = currentFps();
     const wantMic = micSelect.value === "on";
+    // autoGainControl is OFF on purpose. iOS Safari's AGC drags speech
+    // down to RMS ~0.0013 (~50x quieter than a normal desktop mic),
+    // and the AGC curve lags by hundreds of ms when volume changes,
+    // so quiet syllables at the start of a phrase get clipped to
+    // near-silence. With AGC off we receive raw mic signal and apply
+    // our own compressor + limiter inside the AudioWorklet, which
+    // gives the steady, loud, Siri-like presence the PC voice
+    // pipeline needs.
     const constraints = {
       audio: wantMic
-        ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        ? { echoCancellation: true, noiseSuppression: true, autoGainControl: false }
         : false,
       video: {
         facingMode: { ideal: facingSelect.value },
@@ -288,34 +296,136 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   // --- Audio capture + upload ------------------------------------------------
   //
-  // The AudioWorklet inline-registers as "pcm-capture". Each 128-sample tick
-  // (browser default) arrives as Float32, we clamp + convert to Int16, and
-  // post the bytes back to the main thread. Main thread batches ~100ms
-  // worth (9600 bytes at 48kHz mono Int16) then POSTs to /audio.
-  // PHONE_MIC_BOOST: iOS Safari's getUserMedia AGC pass delivers
-  // speech at extremely low float amplitude (RMS ~0.0013 on iPhone
-  // test devices — ~50x below a normal desktop mic at the same
-  // distance). The PC-side voice pipeline needs at least ~0.01 RMS
-  // to cross its activation threshold, so we amplify here before
-  // the Int16 clamp. Peaks past the [-1,1] range just clamp — the
-  // PC side re-normalizes the whole recording to 0.95 peak before
-  // whisper sees it, so mild clipping doesn't degrade recognition.
+  // AudioWorklet "pcm-capture" runs a compressor + brick-wall limiter
+  // on the raw mic stream (AGC off — see openCamera). Stages per
+  // sample:
+  //   1. PRE_GAIN (24dB / 16x) — compensates for iOS Safari's quiet
+  //      mic input. RMS ~0.0013 raw becomes RMS ~0.02, well above
+  //      whisper's activation threshold.
+  //   2. Envelope follower — peak detector with 1ms attack / 80ms
+  //      release tracks transient peaks for the compressor.
+  //   3. Compressor — when envelope crosses COMP_THRESHOLD (-3dBFS),
+  //      gain reduction scales the signal back down. Smoothed by
+  //      GAIN_SMOOTH so we don't pump on every sample.
+  //   4. Hard limiter — anything still above HARD_LIMIT (-0.3dBFS)
+  //      gets clipped. Final safeguard so output never exceeds
+  //      [-1, 1] before Int16 conversion.
+  //
+  // Net effect: quiet speech is loud and clear, shouts don't clip,
+  // and the apparent loudness is stable across distances — what
+  // Siri / Google Assistant get for free from native APIs.
   const PCM_WORKLET_SRC =
-    "const BOOST = 4.0;" +
+    "const PRE_GAIN = 16.0;" +
+    "const COMP_THRESHOLD = 0.7;" +
+    "const HARD_LIMIT = 0.97;" +
+    "const ATTACK_COEF = 0.3;" +
+    "const RELEASE_COEF = 0.0008;" +
+    "const GAIN_SMOOTH = 0.08;" +
+    // Noise gate: a 16x compressor will happily amplify ambient room
+    // noise (RMS ~0.001-0.003 on iPhones with AGC off) up to speech-
+    // like levels, and whisper hallucinates words from that — the
+    // user reports phrases like 'open youtube on google chrome'
+    // followed by a duplicate fragment 'youtube google chrome', which
+    // is whisper interpreting amplified background as a partial echo.
+    // The gate uses a HOLD-style envelope: opens within ~5 samples of
+    // any signal above NOISE_GATE_THRESHOLD, and stays fully open for
+    // ~120 ms after the last above-threshold sample so mid-phrase
+    // pauses don't get clipped. Below threshold AND past the hold
+    // window, output is muted to true zero so whisper sees real
+    // silence at the tail of the utterance and stops cleanly.
+    "const NOISE_GATE_THRESHOLD = 0.004;" +
+    "const NOISE_GATE_HOLD_SAMPLES = 5760;" +  // 120ms at 48kHz
     "class PcmCapture extends AudioWorkletProcessor {" +
+    "  constructor() { super(); this._env = 0; this._gr = 1.0; this._gateHold = 0; }" +
     "  process(inputs) {" +
     "    const ch = inputs[0] && inputs[0][0];" +
     "    if (!ch || !ch.length) return true;" +
     "    const out = new Int16Array(ch.length);" +
+    "    let env = this._env, gr = this._gr, gateHold = this._gateHold;" +
     "    for (let i = 0; i < ch.length; i++) {" +
-    "      let s = ch[i] * BOOST; if (s > 1) s = 1; else if (s < -1) s = -1;" +
+    "      const raw = ch[i];" +
+    "      const abs_raw = raw < 0 ? -raw : raw;" +
+    "      if (abs_raw >= NOISE_GATE_THRESHOLD) gateHold = NOISE_GATE_HOLD_SAMPLES;" +
+    "      if (gateHold <= 0) {" +
+    "        out[i] = 0;" +
+    "        env *= 0.95;" +  // bleed envelope down so we don't pop on next gate-open
+    "        continue;" +
+    "      }" +
+    "      gateHold--;" +
+    "      const boosted = raw * PRE_GAIN;" +
+    "      const abs_s = boosted < 0 ? -boosted : boosted;" +
+    "      if (abs_s > env) env += (abs_s - env) * ATTACK_COEF;" +
+    "      else env += (abs_s - env) * RELEASE_COEF;" +
+    "      const target = env > COMP_THRESHOLD ? COMP_THRESHOLD / env : 1.0;" +
+    "      gr += (target - gr) * GAIN_SMOOTH;" +
+    "      let s = boosted * gr;" +
+    "      if (s > HARD_LIMIT) s = HARD_LIMIT;" +
+    "      else if (s < -HARD_LIMIT) s = -HARD_LIMIT;" +
     "      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;" +
     "    }" +
+    "    this._env = env; this._gr = gr; this._gateHold = gateHold;" +
     "    this.port.postMessage(out.buffer, [out.buffer]);" +
     "    return true;" +
     "  }" +
     "}" +
     "registerProcessor('pcm-capture', PcmCapture);";
+
+  // Plays a near-silent looping audio element so iOS Safari treats
+  // this tab as actively producing audio. Without it, Safari
+  // suspends the AudioContext when the screen dims, a notification
+  // arrives, or the tab loses focus — which is exactly the
+  // "cuts out quickly" symptom on iPhone. The audio is real (not
+  // muted) so iOS keeps the audio session alive; volume is dropped
+  // to 0.001 so the user doesn't hear it. Must be started inside a
+  // user gesture (the Start button click); we kick it off lazily
+  // from startAudioPipeline which only runs on Start.
+  let silentKeepalive = null;
+  function ensureSilentKeepalive() {
+    if (silentKeepalive) return;
+    try {
+      // 1s of stereo silence in a base64 WAV. Loops indefinitely.
+      const wavB64 =
+        "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+      const audio = new Audio("data:audio/wav;base64," + wavB64);
+      audio.loop = true;
+      audio.volume = 0.001;
+      audio.muted = false;
+      audio.preload = "auto";
+      audio.setAttribute("playsinline", "");
+      const playPromise = audio.play();
+      if (playPromise && playPromise.catch) {
+        playPromise.catch(() => { /* will retry on next user gesture */ });
+      }
+      silentKeepalive = audio;
+    } catch (_) { /* best-effort */ }
+  }
+
+  // Resume the AudioContext when iOS suspends it. iOS Safari
+  // suspends the context whenever the audio session is interrupted
+  // (screen lock, incoming call, Siri, another tab playing audio).
+  // Without explicit resume, the worklet stops emitting samples and
+  // the desktop sees a silent stream — the "cuts out" failure.
+  // We listen on three signals: AudioContext.statechange (most
+  // direct), visibilitychange (catch tab refocus), and pageshow
+  // (catch back-forward cache restore).
+  function attachAudioResilienceHandlers() {
+    if (!audioContext) return;
+    const tryResume = () => {
+      if (!audioContext) return;
+      if (audioContext.state === "suspended") {
+        audioContext.resume().catch(() => {});
+      }
+      if (silentKeepalive && silentKeepalive.paused) {
+        silentKeepalive.play().catch(() => {});
+      }
+    };
+    audioContext.addEventListener("statechange", tryResume);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) tryResume();
+    });
+    window.addEventListener("pageshow", tryResume);
+    window.addEventListener("focus", tryResume);
+  }
 
   async function startAudioPipeline(mediaStream) {
     const audioTrack = mediaStream.getAudioTracks()[0];
@@ -355,6 +465,8 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     audioSourceNode.connect(audioWorkletNode);
     // Intentionally NOT connected to destination — we don't want to
     // play the mic back through the phone's speakers.
+    ensureSilentKeepalive();
+    attachAudioResilienceHandlers();
   }
 
   async function flushAudioQueue() {

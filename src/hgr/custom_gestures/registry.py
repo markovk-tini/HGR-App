@@ -210,22 +210,39 @@ class CustomGesture:
     action: Action
     created_at: str  # ISO-8601 UTC timestamp
     description: str = ""
+    # "Left" / "Right" / None. None means "either hand" (legacy
+    # gestures recorded before handedness tracking, or gestures the
+    # user explicitly wants to fire on either hand). The live runner
+    # only fires the gesture when the tracked hand matches this value
+    # (or when this value is None).
+    handedness: Optional[str] = None
+    # Filename (relative to <registry_dir>/gesture_thumbnails/) of the
+    # picked representative frame. Stored as a PNG cropped to ~2× the
+    # hand bbox during recording. Empty string means no thumbnail (legacy
+    # gestures or user skipped the picker).
+    image_filename: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
             "created_at": self.created_at,
+            "handedness": self.handedness,
+            "image_filename": self.image_filename,
             "action": self.action.to_dict(),
             "samples": [s.to_dict() for s in self.samples],
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CustomGesture":
+        raw_hand = data.get("handedness")
+        hand = str(raw_hand) if raw_hand in ("Left", "Right") else None
         return cls(
             name=str(data["name"]),
             description=str(data.get("description", "")),
             created_at=str(data.get("created_at", "")),
+            handedness=hand,
+            image_filename=str(data.get("image_filename", "") or ""),
             action=Action.from_dict(data.get("action") or {}),
             samples=[GestureSample.from_dict(s) for s in data.get("samples", [])],
         )
@@ -290,6 +307,8 @@ class GestureRegistry:
         *,
         description: str = "",
         overwrite: bool = False,
+        handedness: Optional[str] = None,
+        image_filename: str = "",
     ) -> CustomGesture:
         if not self._loaded:
             self.load()
@@ -298,6 +317,10 @@ class GestureRegistry:
             raise ValueError("gesture name must be non-empty")
         if not samples:
             raise ValueError("gesture must have at least one sample")
+        if handedness is not None and handedness not in ("Left", "Right"):
+            raise ValueError(
+                f"handedness must be 'Left', 'Right', or None — got {handedness!r}"
+            )
         with self._lock:
             if name in self._gestures and not overwrite:
                 raise ValueError(
@@ -309,9 +332,33 @@ class GestureRegistry:
                 action=action,
                 created_at=_utc_now_iso(),
                 description=description,
+                handedness=handedness,
+                image_filename=str(image_filename or ""),
             )
             self._gestures[name] = gesture
         return gesture
+
+    def thumbnails_dir(self) -> Path:
+        """Directory holding per-gesture thumbnail PNGs. Created lazily
+        on first read/write."""
+        d = self._path.parent / "gesture_thumbnails"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def thumbnail_path(self, gesture: "CustomGesture") -> Optional[Path]:
+        """Resolve a gesture's stored thumbnail to an absolute path. Returns
+        None if the gesture has no image_filename set or the file doesn't
+        exist on disk."""
+        if not gesture.image_filename:
+            return None
+        candidate = self.thumbnails_dir() / gesture.image_filename
+        try:
+            return candidate if candidate.exists() else None
+        except Exception:
+            return None
 
     def remove(self, name: str) -> bool:
         if not self._loaded:

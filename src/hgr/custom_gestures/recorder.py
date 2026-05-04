@@ -101,16 +101,42 @@ def _bend_angle(v1: np.ndarray, v2: np.ndarray) -> float:
     return float(np.arccos(cos))
 
 
-def _curl_class_features(extension_distances: np.ndarray) -> np.ndarray:
+# Thumb tip-to-index-MCP distance buckets. The thumb is the only
+# finger where wrist-to-tip distance is unreliable across hand
+# orientations: a fist tilted back projects the thumb tip *further*
+# from the wrist (in 2D) even though the thumb itself is still curled.
+# Tip-to-index-MCP is on the hand itself, so it's tilt-invariant —
+# we compute it as a SECONDARY signal and take the more-curled of
+# the two classes so the live recorder doesn't lose track of a curled
+# thumb when the user wrist-tilts. Calibrated against real recordings.
+_THUMB_TO_INDEX_MCP_THRESHOLDS: Tuple[float, float, float, float] = (
+    0.85,  # >= → fully extended (0)
+    0.65,  # >= → slightly curled (1)
+    0.50,  # >= → half curled (2)
+    0.38,  # >= → mostly curled (3)
+    # < 0.38 → closed (4)
+)
+
+
+def _curl_class_features(
+    extension_distances: np.ndarray,
+    landmarks: np.ndarray,
+) -> np.ndarray:
     """5 ordinal curl-class labels per finger (0=fully extended,
     1=slightly curled, 2=half curled, 3=mostly curled, 4=closed/fist).
 
-    Derived from wrist-to-fingertip distance with per-finger thresholds.
-    Distance is more robust than joint-angle sums because MediaPipe's
-    z-coordinate is noisy enough that bend angles for fingers curling
-    forward come out artificially small. Wrist-to-tip distance is a
-    single 2D-dominant measurement that doesn't require accurate depth
-    inference at every joint.
+    Primary signal: wrist-to-fingertip distance. Distance is more robust
+    than joint-angle sums because MediaPipe's z-coordinate is noisy enough
+    that bend angles for fingers curling forward come out artificially
+    small. Wrist-to-tip distance is a single 2D-dominant measurement that
+    doesn't require accurate depth inference at every joint.
+
+    Thumb fallback: when the user tilts their wrist back while making a
+    fist, wrist-to-thumb-tip distance grows (the thumb projects further
+    from the wrist in the rotated frame) even though the thumb is still
+    curled. We compute a SECONDARY thumb signal — thumb tip to
+    index-MCP distance, which lives entirely on the hand and so doesn't
+    move under wrist rotation — and take the more-curled of the two.
 
     Hard bucketing — values snap to a stable integer that doesn't change
     under small landmark noise.
@@ -120,15 +146,36 @@ def _curl_class_features(extension_distances: np.ndarray) -> np.ndarray:
         dist = float(extension_distances[finger_idx])
         thresholds = _CURL_DISTANCE_THRESHOLDS[finger_idx]
         if dist >= thresholds[0]:
-            out.append(0.0)
+            cls = 0.0
         elif dist >= thresholds[1]:
-            out.append(1.0)
+            cls = 1.0
         elif dist >= thresholds[2]:
-            out.append(2.0)
+            cls = 2.0
         elif dist >= thresholds[3]:
-            out.append(3.0)
+            cls = 3.0
         else:
-            out.append(4.0)
+            cls = 4.0
+
+        if finger_idx == 0:
+            # Thumb-tip to index-MCP — tilt-invariant secondary signal.
+            tip_to_idx_mcp = float(np.linalg.norm(landmarks[4] - landmarks[5]))
+            t = _THUMB_TO_INDEX_MCP_THRESHOLDS
+            if tip_to_idx_mcp >= t[0]:
+                alt = 0.0
+            elif tip_to_idx_mcp >= t[1]:
+                alt = 1.0
+            elif tip_to_idx_mcp >= t[2]:
+                alt = 2.0
+            elif tip_to_idx_mcp >= t[3]:
+                alt = 3.0
+            else:
+                alt = 4.0
+            # MAX so a curled thumb that the wrist-distance signal
+            # under-curls (because of tilt) gets promoted to the
+            # correct curl class.
+            cls = max(cls, alt)
+
+        out.append(cls)
     return np.asarray(out, dtype=np.float32)
 
 
@@ -208,7 +255,7 @@ def normalize_landmarks(landmarks: np.ndarray) -> np.ndarray:
     spacing_feats = _spacing_features_from_landmarks(arr)
     extension_feats = _extension_features_from_landmarks(arr)
     joint_feats = _joint_angle_features_from_landmarks(arr)
-    curl_feats = _curl_class_features(extension_feats)
+    curl_feats = _curl_class_features(extension_feats, arr)
     spread_feats = _spread_class_features(spacing_feats)
     return np.concatenate(
         [landmark_feats, spacing_feats, extension_feats, joint_feats,
@@ -290,7 +337,7 @@ def _sample_from_landmarks(lm: np.ndarray) -> GestureSample:
     spacing_feats = _spacing_features_from_landmarks(lm)
     extension_feats = _extension_features_from_landmarks(lm)
     joint_feats = _joint_angle_features_from_landmarks(lm)
-    curl_feats = _curl_class_features(extension_feats)
+    curl_feats = _curl_class_features(extension_feats, lm)
     spread_feats = _spread_class_features(spacing_feats)
     feats = np.concatenate(
         [landmark_feats, spacing_feats, extension_feats, joint_feats,

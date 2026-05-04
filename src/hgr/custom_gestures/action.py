@@ -113,15 +113,51 @@ def _resolve_vk(name: str) -> int:
     raise ValueError(f"unknown key name: {name!r}")
 
 
+# Load a PRIVATE handle to user32 so argtypes set on our SendInput
+# function pointer don't collide with another module's bindings. The
+# dictation path (text_input_controller) sets `SendInput.argtypes` on
+# `ctypes.windll.user32.SendInput` with ITS own INPUT struct type —
+# because windll caches one shared instance, that argtypes setting
+# applies globally and ctypes then rejects our `_INPUT` array as
+# "expected LP_INPUT instance instead of _INPUT_Array_N". Loading a
+# fresh WinDLL gives us our own function-pointer slot to configure.
+_USER32_SENDINPUT = None
+
+
+def _resolve_send_input():
+    global _USER32_SENDINPUT
+    if _USER32_SENDINPUT is not None:
+        return _USER32_SENDINPUT
+    if platform.system() != "Windows":
+        return None
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.SendInput.argtypes = [
+            ctypes.c_uint,
+            ctypes.POINTER(_INPUT),
+            ctypes.c_int,
+        ]
+        user32.SendInput.restype = ctypes.c_uint
+        _USER32_SENDINPUT = user32.SendInput
+    except Exception as exc:
+        print(f"[custom-gestures] SendInput resolve failed: {exc}")
+        _USER32_SENDINPUT = None
+    return _USER32_SENDINPUT
+
+
 def _send_inputs(events: List[_INPUT]) -> bool:
     if not events:
         return True
-    if platform.system() != "Windows":
+    send = _resolve_send_input()
+    if send is None:
         return False
     n = len(events)
     arr_type = _INPUT * n
-    sent = ctypes.windll.user32.SendInput(
-        n, arr_type(*events), ctypes.sizeof(_INPUT)
+    arr = arr_type(*events)
+    sent = send(
+        n,
+        ctypes.cast(arr, ctypes.POINTER(_INPUT)),
+        ctypes.sizeof(_INPUT),
     )
     return int(sent) == n
 

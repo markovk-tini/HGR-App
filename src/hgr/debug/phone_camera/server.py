@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import ssl
 import sys
 import threading
@@ -24,6 +25,75 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from aiohttp import web
+
+
+def _parse_phone_label(user_agent: str) -> str:
+    """Best-effort: derive a friendly device label from a User-Agent
+    string. Returns "iPhone — Safari (iOS 17.5)", "iPad — Safari",
+    "Android — Chrome (122)", etc. Falls back to "Phone" when the UA
+    is unrecognisable.
+
+    Browsers don't expose the actual device name (privacy), so this
+    is the best we can do without asking the user to type one in. It's
+    enough to confirm "yes, my iPhone is talking to my PC"."""
+    if not user_agent:
+        return "Phone"
+    ua = user_agent
+    # Device family
+    device = "Phone"
+    if "iPhone" in ua:
+        device = "iPhone"
+    elif "iPad" in ua:
+        device = "iPad"
+    elif "iPod" in ua:
+        device = "iPod"
+    elif "Android" in ua:
+        device = "Android"
+    elif "Windows" in ua and ("Mobile" in ua or "Phone" in ua):
+        device = "Windows Phone"
+    elif "Macintosh" in ua:
+        device = "Mac"
+    elif "Windows" in ua:
+        device = "Windows"
+    elif "Linux" in ua:
+        device = "Linux"
+    # OS version
+    os_version = ""
+    m = re.search(r"iPhone OS (\d+)[_\.](\d+)(?:[_\.](\d+))?", ua)
+    if m:
+        os_version = f"iOS {m.group(1)}.{m.group(2)}"
+    elif "iPad" in device or "iPod" in device:
+        m = re.search(r"OS (\d+)[_\.](\d+)", ua)
+        if m:
+            os_version = f"iOS {m.group(1)}.{m.group(2)}"
+    elif device == "Android":
+        m = re.search(r"Android (\d+(?:\.\d+)?)", ua)
+        if m:
+            os_version = f"Android {m.group(1)}"
+    # Browser — Safari first because Chrome on iOS reports both
+    # CriOS and Safari, and the device is actually using WebKit
+    # under the hood either way.
+    browser = ""
+    if "CriOS/" in ua or ("Chrome/" in ua and "Edg/" not in ua and device != "iPhone" and device != "iPad"):
+        m = re.search(r"(?:CriOS|Chrome)/(\d+)", ua)
+        browser = f"Chrome {m.group(1)}" if m else "Chrome"
+    elif "FxiOS/" in ua or "Firefox/" in ua:
+        m = re.search(r"(?:FxiOS|Firefox)/(\d+)", ua)
+        browser = f"Firefox {m.group(1)}" if m else "Firefox"
+    elif "Edg/" in ua:
+        m = re.search(r"Edg/(\d+)", ua)
+        browser = f"Edge {m.group(1)}" if m else "Edge"
+    elif "Safari/" in ua:
+        m = re.search(r"Version/(\d+(?:\.\d+)?)", ua)
+        browser = f"Safari {m.group(1)}" if m else "Safari"
+    # Compose: "iPhone — Safari 17.5 (iOS 17.5)" / "Android — Chrome 122"
+    parts = [device]
+    if browser:
+        parts.append(browser)
+    label = " — ".join(parts)
+    if os_version and os_version not in label:
+        label += f" ({os_version})"
+    return label
 
 from .audio_source import PhoneAudioSource
 from .capture import PhoneCameraCapture
@@ -66,6 +136,13 @@ class PhoneCameraServer:
         self._last_frame_at = 0.0
         self._announced_stream = False
         self._announced_audio = False
+        # Friendly device label derived from the phone's User-Agent on
+        # first connection. Stays None until the phone actually opens
+        # the page or sends a frame; the desktop UI reads this to
+        # show "Paired — iPhone — Safari (iOS 17.5)" instead of just
+        # "Paired — https://...".
+        self._connected_phone_label: Optional[str] = None
+        self._connected_phone_user_agent: Optional[str] = None
         self._info: Optional[PhoneCameraServerInfo] = None
         self._cert: Optional[PhoneCameraCertPaths] = None
         # Set of asyncio.Queue objects, one per connected SSE client.
@@ -95,6 +172,40 @@ class PhoneCameraServer:
     @property
     def connected_clients(self) -> int:
         return self._active_clients
+
+    @property
+    def connected_phone_label(self) -> Optional[str]:
+        """Friendly label for the most-recently-connected phone, or None
+        if no phone has loaded the page yet this session."""
+        return self._connected_phone_label
+
+    @property
+    def connected_phone_user_agent(self) -> Optional[str]:
+        """Raw User-Agent header from the most recent connection, kept
+        alongside the friendly label so the desktop can show a tooltip
+        with full detail if it wants to."""
+        return self._connected_phone_user_agent
+
+    def _record_phone_identity(self, request: web.Request) -> bool:
+        """If the request comes from a phone we haven't identified yet,
+        parse its User-Agent and store the derived label. Returns True
+        when a NEW identity was recorded so callers can fire a
+        `phone_identified` status event exactly once per phone.
+
+        We re-record when the UA changes (e.g., user paired a new
+        phone after disconnecting the old one) so the displayed label
+        always reflects the current connection."""
+        try:
+            ua = str(request.headers.get("User-Agent", "") or "")
+        except Exception:
+            ua = ""
+        if not ua:
+            return False
+        if ua == self._connected_phone_user_agent:
+            return False
+        self._connected_phone_user_agent = ua
+        self._connected_phone_label = _parse_phone_label(ua)
+        return True
 
     @property
     def seconds_since_last_frame(self) -> float:
@@ -230,7 +341,16 @@ class PhoneCameraServer:
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         _log(f"GET {request.path} from {self._peer(request)}")
-        self._emit_status("phone_page_loaded", {"peer": self._peer(request)})
+        if self._record_phone_identity(request):
+            _log(f"phone identified as: {self._connected_phone_label!r}")
+            self._emit_status("phone_identified", {
+                "label": self._connected_phone_label,
+                "user_agent": self._connected_phone_user_agent,
+            })
+        self._emit_status("phone_page_loaded", {
+            "peer": self._peer(request),
+            "label": self._connected_phone_label,
+        })
         return web.Response(
             body=CLIENT_HTML.encode("utf-8"),
             content_type="text/html",
@@ -263,6 +383,7 @@ class PhoneCameraServer:
         """Accept a single JPEG frame in the POST body."""
         peer = self._peer(request)
         first = not self._announced_stream
+        identified = self._record_phone_identity(request)
         try:
             payload = await request.read()
         except Exception as exc:
@@ -272,11 +393,20 @@ class PhoneCameraServer:
             return web.Response(status=204, text="")
         self._capture.push_jpeg(payload)
         self._last_frame_at = time.monotonic()
+        if identified:
+            _log(f"phone identified as: {self._connected_phone_label!r}")
+            self._emit_status("phone_identified", {
+                "label": self._connected_phone_label,
+                "user_agent": self._connected_phone_user_agent,
+            })
         if first:
             self._announced_stream = True
             self._active_clients = max(self._active_clients, 1)
             _log(f"POST /frame first frame from {peer} size={len(payload)} bytes")
-            self._emit_status("client_connected", {"total": self._active_clients})
+            self._emit_status("client_connected", {
+                "total": self._active_clients,
+                "label": self._connected_phone_label,
+            })
             self._emit_status("streaming", {"bytes": len(payload)})
         return web.Response(status=204, text="")
 

@@ -85,12 +85,13 @@ from .tutorial_window import TutorialWindow
 SECTION_INSTRUCTIONS = 0
 SECTION_GESTURES = 1
 SECTION_CUSTOM_GESTURE = 2
-SECTION_CAMERA = 3
-SECTION_MICROPHONE = 4
-SECTION_SAVE_LOCATIONS = 5
-SECTION_COLORS = 6
-SECTION_TUTORIAL = 7
-SECTION_UPDATES = 8
+SECTION_GESTURE_BINDS = 3
+SECTION_CAMERA = 4
+SECTION_MICROPHONE = 5
+SECTION_SAVE_LOCATIONS = 6
+SECTION_COLORS = 7
+SECTION_TUTORIAL = 8
+SECTION_UPDATES = 9
 
 
 
@@ -409,8 +410,10 @@ class StartTutorialDialog(QDialog):
         app_icon = QApplication.windowIcon()
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(380)
         self.setObjectName("startTutorialDialog")
+        # Hug the content vertically — no extra slack below the buttons.
+        self.setSizeGripEnabled(False)
         self._build_ui()
         self._apply_theme()
 
@@ -420,16 +423,16 @@ class StartTutorialDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 18)
-        root.setSpacing(14)
+        root.setContentsMargins(20, 16, 20, 14)
+        root.setSpacing(8)
 
-        title = QLabel("Would you like to go through the tutorial?")
+        title = QLabel("Quick 2-min gesture tutorial?")
         title.setObjectName("startDialogTitle")
         title.setWordWrap(True)
         root.addWidget(title)
 
         subtitle = QLabel(
-            "Yes opens the six-part guided tutorial. No skips straight to starting the app."
+            "Yes — walk through the basics. No — start the app now."
         )
         subtitle.setObjectName("startDialogSubtitle")
         subtitle.setWordWrap(True)
@@ -440,6 +443,7 @@ class StartTutorialDialog(QDialog):
         root.addWidget(self.do_not_show_checkbox)
 
         button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 4, 0, 0)
         button_row.addStretch(1)
 
         # Yes is the primary action: positioned first (right side
@@ -2727,6 +2731,199 @@ class _PhoneCameraTestThread(QThread):
         self.finished_with_result.emit(True, f"connected — frame {width}x{height}.")
 
 
+class CameraPreviewDialog(QDialog):
+    """Touchless-themed live preview of a single camera.
+
+    Built so users can sanity-check a camera selection before saving
+    it. Opens the requested device via cv2.VideoCapture on a poll
+    timer (no engine, no inference — just frames), shows them in a
+    rounded card matching the rest of the app's chrome, and exits
+    cleanly on the Exit button or window close.
+
+    Threading note: cv2.VideoCapture.read() runs on the GUI thread
+    here. That's intentional — preview frames are pulled at ~30 FPS
+    on a 30 ms timer and a webcam read is normally <5 ms, so the
+    main loop never noticeably stalls. If we ever want a slow remote
+    source previewable here, move the read off-thread."""
+
+    def __init__(self, config: AppConfig, camera_index: int, camera_label: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self._camera_index = int(camera_index)
+        self._camera_label = str(camera_label or f"Camera {camera_index}")
+        self._cap = None
+        self.setWindowTitle("Camera Preview")
+        from PySide6.QtWidgets import QApplication
+        app_icon = QApplication.windowIcon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+        self.setObjectName("cameraPreviewDialog")
+        self.setModal(False)
+        self.resize(720, 560)
+        self._build_ui()
+        self._apply_theme()
+        # Poll timer driving the read+render loop. 33 ms ≈ 30 FPS — fast
+        # enough to look smooth without hammering the device.
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+        QTimer.singleShot(0, self._open_camera)
+
+    def _build_ui(self) -> None:
+        from PySide6.QtWidgets import QFrame
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(12)
+
+        title = QLabel(self._camera_label)
+        title.setObjectName("cameraPreviewTitle")
+        title.setWordWrap(True)
+        root.addWidget(title)
+
+        self.video_label = QLabel("Opening camera…")
+        self.video_label.setObjectName("cameraPreviewVideo")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setMinimumSize(640, 360)
+        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        root.addWidget(self.video_label, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("cameraPreviewStatus")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.exit_button = QPushButton("Exit Preview")
+        self.exit_button.setObjectName("cameraPreviewButton")
+        self.exit_button.clicked.connect(self.accept)
+        button_row.addWidget(self.exit_button)
+        root.addLayout(button_row)
+
+    def _apply_theme(self) -> None:
+        accent = self.config.accent_color or "#1DE9B6"
+        text = self.config.text_color or "#E5F6FF"
+        surface = self.config.surface_color or "#0F172A"
+        self.setStyleSheet(
+            f"""
+            QDialog#cameraPreviewDialog {{
+                background-color: {surface};
+                color: {text};
+                border: 1px solid rgba(29, 233, 182, 0.30);
+            }}
+            QLabel#cameraPreviewTitle {{
+                color: {accent};
+                font-size: 18px;
+                font-weight: 800;
+                background: transparent;
+            }}
+            QLabel#cameraPreviewVideo {{
+                background-color: rgba(0, 0, 0, 0.35);
+                border-radius: 14px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                color: {text};
+                padding: 6px;
+            }}
+            QLabel#cameraPreviewStatus {{
+                color: {text};
+                font-size: 12px;
+                opacity: 0.8;
+                background: transparent;
+            }}
+            QPushButton#cameraPreviewButton {{
+                background-color: rgba(255, 255, 255, 0.08);
+                color: {text};
+                border: 1px solid rgba(29, 233, 182, 0.45);
+                border-radius: 10px;
+                padding: 9px 20px;
+                font-weight: 700;
+                min-width: 120px;
+            }}
+            QPushButton#cameraPreviewButton:hover {{
+                background-color: rgba(29, 233, 182, 0.18);
+                border: 1px solid {accent};
+            }}
+            """
+        )
+
+    def _open_camera(self) -> None:
+        # camera_utils.open_camera_by_index returns (CameraInfo, cap)
+        # — earlier code stashed the whole tuple on self._cap, which
+        # made every read() raise and the preview never advanced past
+        # "Opening camera…". Unpack cleanly here.
+        try:
+            from ..camera.camera_utils import open_camera_by_index
+            info, cap = open_camera_by_index(self._camera_index)
+        except Exception as exc:
+            self._cap = None
+            self.status_label.setText(f"Couldn't open camera: {type(exc).__name__}: {exc}")
+            return
+        if cap is None:
+            self._cap = None
+            self.status_label.setText(
+                "Couldn't open this camera. It may be in use by another app, or the index changed."
+            )
+            return
+        self._cap = cap
+        if info is not None and getattr(info, "display_name", ""):
+            # Refresh the dialog header with the resolved display name
+            # when Preview was launched from Auto-Select.
+            try:
+                self.findChild(QLabel, "cameraPreviewTitle").setText(info.display_name)
+            except Exception:
+                pass
+        self.status_label.setText("Live preview")
+        self._timer.start()
+
+    def _tick(self) -> None:
+        if self._cap is None:
+            return
+        try:
+            ok, frame = self._cap.read()
+        except Exception:
+            ok, frame = False, None
+        if not ok or frame is None:
+            return
+        # Always mirror — matches the unified selfie convention used
+        # everywhere else in the app (engine, tutorial, recorder).
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        bytes_per_line = w * 3
+        from PySide6.QtGui import QImage as _QImage
+        image = _QImage(rgb.data, w, h, bytes_per_line, _QImage.Format_RGB888).copy()
+        pix = QPixmap.fromImage(image).scaled(
+            self.video_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.video_label.setPixmap(pix)
+
+    def closeEvent(self, event):  # noqa: N802
+        self._teardown()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._teardown()
+        super().reject()
+
+    def accept(self):
+        self._teardown()
+        super().accept()
+
+    def _teardown(self) -> None:
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._cap is not None:
+                self._cap.release()
+        except Exception:
+            pass
+        self._cap = None
+
+
 class _ScrollWheelForwarder(QObject):
     """Event filter that forwards wheel events from focus-trapping
     child widgets (QComboBox, QSpinBox, QSlider, ...) to a parent
@@ -2929,6 +3126,27 @@ class TouchlessNotice(QDialog):
         dlg.exec()
 
 
+# ---------------------------------------------------------------------------
+# Gesture Binds tab — registries of (1) bindable actions and (2) gesture poses
+# the user can pick from. Source of truth lives in
+# `hgr.config.gesture_bindings` so the live engine can read the same data
+# without dragging in PySide6/UI deps via this module.
+# ---------------------------------------------------------------------------
+from ...config.gesture_bindings import (
+    gesture_bind_actions as _gesture_bind_actions,
+    gesture_bind_poses as _gesture_bind_poses,
+    resolve_gesture_binding,
+)
+
+_GESTURE_BIND_ACTIONS = _gesture_bind_actions()
+_GESTURE_BIND_POSES = _gesture_bind_poses()
+
+
+def _gesture_bind_pose_lookup() -> dict[str, tuple[str, str, str, str]]:
+    """Helper: pose_id -> (pose_id, label, image, description)."""
+    return {p[0]: p for p in _GESTURE_BIND_POSES}
+
+
 class MainWindow(QMainWindow):
     # Cross-thread bridge for the off-thread clip export. The
     # worker thread emits this signal after stashing its result on
@@ -2942,6 +3160,11 @@ class MainWindow(QMainWindow):
     # callback would never fire — leaving the processing overlay
     # stuck on screen forever.
     _clip_export_finished_signal = Signal()
+    # Cross-thread bridge for the phone-camera server's status callback.
+    # The server runs on its own daemon thread; emitting this signal
+    # marshals the (event, data) payload onto the GUI thread before we
+    # touch any widgets (specifically: phone_camera_qr_status_label).
+    _phone_server_status_signal = Signal(str, dict)
 
     def __init__(self, config: AppConfig):
         super().__init__()
@@ -2967,10 +3190,22 @@ class MainWindow(QMainWindow):
                 save_config(self.config)
             except Exception:
                 pass
+        # Latest connected-phone label (e.g., "iPhone — Safari (iOS 17.5)").
+        # Stays empty until the phone actually loads the page or sends
+        # a frame; updated via the phone-server status callback.
+        self._phone_connected_label: str = ""
+        # Connect cross-thread signal up front so it's wired before the
+        # server fires its first callback — prevents a race where the
+        # phone announces itself between server.start() and the connect
+        # call below.
+        self._phone_server_status_signal.connect(self._on_phone_server_status_event)
         if bool(getattr(self.config, "phone_camera_qr_paired", False)):
             try:
                 from ..debug.phone_camera import PhoneCameraServer
-                server = PhoneCameraServer(port=8765)
+                server = PhoneCameraServer(
+                    port=8765,
+                    on_status=self._forward_phone_server_status,
+                )
                 server.start()
                 self._phone_camera_qr_server = server
             except Exception as exc:
@@ -3196,6 +3431,11 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("START")
         self.end_button = QPushButton("END")
         self.settings_button = QPushButton("SETTINGS")
+        # Initial state: app launches with the engine stopped, so END
+        # is the inactive button. start_engine / stop_engine swap the
+        # pair below; the QPushButton:disabled rule in the global
+        # stylesheet makes the inactive one visibly greyed out.
+        self.end_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_engine)
         self.end_button.clicked.connect(self.stop_engine)
         self.settings_button.clicked.connect(self.show_settings_page)
@@ -3330,6 +3570,7 @@ class MainWindow(QMainWindow):
         instructions_button = SettingsNavButton("Instructions", SECTION_INSTRUCTIONS, self)
         gestures_button = SettingsNavButton("Control Guide", SECTION_GESTURES, self)
         custom_gesture_button = SettingsNavButton("Custom Gesture", SECTION_CUSTOM_GESTURE, self)
+        gesture_binds_button = SettingsNavButton("Gesture Binds", SECTION_GESTURE_BINDS, self)
         camera_button = SettingsNavButton("Camera", SECTION_CAMERA, self)
         microphone_button = SettingsNavButton("Microphone", SECTION_MICROPHONE, self)
         save_locations_button = SettingsNavButton("Save Locations", SECTION_SAVE_LOCATIONS, self)
@@ -3340,6 +3581,7 @@ class MainWindow(QMainWindow):
             instructions_button,
             gestures_button,
             custom_gesture_button,
+            gesture_binds_button,
             camera_button,
             microphone_button,
             save_locations_button,
@@ -3348,15 +3590,52 @@ class MainWindow(QMainWindow):
             updates_button,
         ]
         self._settings_nav_search_keywords = {
-            instructions_button: "instructions quick start help guide overview",
-            gestures_button: "control guide gesture voice command swipe wheel mouse volume drawing spotify chrome youtube dictation open launch play next previous",
-            custom_gesture_button: "custom gesture create record new",
-            camera_button: "camera webcam device fps resolution auto-select low-fps",
-            microphone_button: "microphone mic input gain audio voice whisper sapi",
-            save_locations_button: "save locations folder path drawings screenshots recordings clips",
-            colors_button: "colors theme accent overlay background",
-            tutorial_button: "tutorial walkthrough practice guided onboarding",
-            updates_button: "updates version release changelog about check",
+            instructions_button: (
+                "instructions quick start help guide overview getting started "
+                "intro readme"
+            ),
+            gestures_button: (
+                "control guide gesture voice command swipe wheel mouse volume "
+                "drawing spotify chrome youtube dictation open launch play next "
+                "previous static dynamic motion pose hand"
+            ),
+            custom_gesture_button: (
+                "custom gesture create record new beta sandbox edit user "
+                "personal recorded mine my own"
+            ),
+            gesture_binds_button: (
+                "gesture binds bindings keybinds keybinding rebind reassign "
+                "action assign remap mapping shortcut shortcuts hotkey trigger "
+                "swap"
+            ),
+            camera_button: (
+                "camera webcam device fps resolution auto-select low-fps "
+                "low fps mode lite mode gpu mode cpu mode performance "
+                "phone camera qr code pair pairing connect phone iphone "
+                "android save camera selection mirror flip"
+            ),
+            microphone_button: (
+                "microphone mic input gain audio voice whisper sapi save "
+                "microphone choice phone microphone phone mic qr pair "
+                "iphone dictation listening"
+            ),
+            save_locations_button: (
+                "save locations folder path directory drawings screenshots "
+                "screen recordings clips save name prefix file name save "
+                "drawings save screenshots save recordings save clips"
+            ),
+            colors_button: (
+                "colors color theme accent primary surface text overlay "
+                "background revert customize palette"
+            ),
+            tutorial_button: (
+                "tutorial walkthrough practice guided onboarding lesson "
+                "demo learn how to part 1 part 2 part 3 part 4 part 5 part 6"
+            ),
+            updates_button: (
+                "updates update version release changelog about check "
+                "history changes news"
+            ),
         }
         for button in self._settings_nav_buttons:
             left_layout.addWidget(button)
@@ -3372,6 +3651,7 @@ class MainWindow(QMainWindow):
         self.settings_content_stack.addWidget(self._build_instructions_panel())
         self.settings_content_stack.addWidget(self._build_gesture_guide_panel())
         self.settings_content_stack.addWidget(self._build_custom_gesture_panel())
+        self.settings_content_stack.addWidget(self._build_gesture_binds_panel())
         self.settings_content_stack.addWidget(self._build_camera_panel())
         self.settings_content_stack.addWidget(self._build_microphone_panel())
         self.settings_content_stack.addWidget(self._build_save_locations_panel())
@@ -3433,8 +3713,9 @@ class MainWindow(QMainWindow):
         # nav button list (same order as settings_content_stack).
         section_for_index = (
             SECTION_INSTRUCTIONS, SECTION_GESTURES, SECTION_CUSTOM_GESTURE,
-            SECTION_CAMERA, SECTION_MICROPHONE, SECTION_SAVE_LOCATIONS,
-            SECTION_COLORS, SECTION_TUTORIAL, SECTION_UPDATES,
+            SECTION_GESTURE_BINDS, SECTION_CAMERA, SECTION_MICROPHONE,
+            SECTION_SAVE_LOCATIONS, SECTION_COLORS, SECTION_TUTORIAL,
+            SECTION_UPDATES,
         )
         # 1. Gesture / voice cards inside the Control Guide. For each
         # GestureGuideCard / VoiceCommandCard in any panel, walk up
@@ -3527,6 +3808,121 @@ class MainWindow(QMainWindow):
                     "section_widget": None,
                     "target_widget": card,
                 })
+
+        # 4. Explicit per-feature entries for toggles, buttons, and
+        # cards that aren't reachable through the generic inner-card
+        # walk above (e.g., toggles tucked inside a row, or features
+        # whose discoverable label doesn't share words with the user's
+        # mental model — "Lite Mode" vs "low resolution model"). Each
+        # entry navigates to the right tab and (when a target widget
+        # is registered) scrolls it into view.
+        feature_entries: list[tuple[str, str, int, object]] = [
+            # (label, extra_haystack_keywords, section_id, target_widget_or_None)
+            (
+                "Camera: GPU Mode",
+                "gpu mode hardware acceleration directml onnx fast",
+                SECTION_CAMERA,
+                getattr(self, "gpu_mode_button", None),
+            ),
+            (
+                "Camera: Lite Mode",
+                "lite mode model complexity speed performance light",
+                SECTION_CAMERA,
+                getattr(self, "lite_mode_button", None),
+            ),
+            (
+                "Camera: Low FPS Mode",
+                "low fps mode slow framerate degrade auto fallback",
+                SECTION_CAMERA,
+                getattr(self, "low_fps_button", None),
+            ),
+            (
+                "Camera: CPU Mode",
+                "cpu mode mediapipe default no gpu fallback software",
+                SECTION_CAMERA,
+                getattr(self, "gpu_mode_button", None),
+            ),
+            (
+                "Camera: Save Camera Selection",
+                "save camera selection preferred device choose remember",
+                SECTION_CAMERA,
+                getattr(self, "save_camera_button", None),
+            ),
+            (
+                "Camera: Use Auto-Select",
+                "auto select clear preferred camera default",
+                SECTION_CAMERA,
+                getattr(self, "clear_camera_button", None),
+            ),
+            (
+                "Camera: Phone Camera (QR)",
+                "phone camera qr code pair pairing iphone android connect mobile",
+                SECTION_CAMERA,
+                getattr(self, "phone_camera_qr_button", None),
+            ),
+            (
+                "Camera: Disconnect Phone",
+                "disconnect phone qr unpair stop",
+                SECTION_CAMERA,
+                getattr(self, "phone_camera_qr_disconnect_button", None),
+            ),
+            (
+                "Camera: Use Phone Camera as Source",
+                "use phone camera source qr active enable",
+                SECTION_CAMERA,
+                getattr(self, "use_phone_camera_qr_checkbox", None),
+            ),
+            (
+                "Microphone: Save Microphone Choice",
+                "save microphone choice mic preferred remember",
+                SECTION_MICROPHONE,
+                getattr(self, "save_microphone_button", None),
+            ),
+            (
+                "Microphone: Use Phone Microphone (QR)",
+                "use phone microphone phone mic qr iphone android",
+                SECTION_MICROPHONE,
+                getattr(self, "use_phone_mic_checkbox", None),
+            ),
+            (
+                "Microphone: Phone Microphone QR",
+                "phone microphone qr pair connect iphone",
+                SECTION_MICROPHONE,
+                getattr(self, "phone_camera_qr_button_mic", None),
+            ),
+        ]
+        # Save Locations: one entry per output kind (drawings, screenshots,
+        # screen recordings, clips). The save-location panel iterates
+        # SAVE_LOCATION_OUTPUT_ORDER on build, so the QLineEdits are
+        # discoverable via objectName once the panel exists.
+        save_panel = self.settings_content_stack.widget(SECTION_SAVE_LOCATIONS)
+        for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
+            label = SAVE_LOCATION_LABELS.get(output_kind, output_kind.title())
+            target = None
+            if save_panel is not None:
+                from PySide6.QtWidgets import QLineEdit
+                target = save_panel.findChild(QLineEdit, f"{output_kind}SaveLocationEdit")
+            feature_entries.append((
+                f"Save Locations: {label}",
+                f"save {output_kind.replace('_', ' ')} {label.lower()} folder path directory",
+                SECTION_SAVE_LOCATIONS,
+                target,
+            ))
+
+        for label_text, keywords, section_id, target_widget in feature_entries:
+            tab_name = (
+                self._settings_nav_buttons[section_id].text()
+                if 0 <= section_id < len(self._settings_nav_buttons)
+                else ""
+            )
+            index.append({
+                "label": label_text,
+                "haystack": f"{tab_name} {label_text} {keywords}".lower(),
+                "section_id": section_id,
+                "section_widget": None,
+                "target_widget": target_widget,
+            })
+
         self._settings_search_index = index
 
     def _on_settings_search_changed(self, text: str) -> None:
@@ -3763,6 +4159,613 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._custom_gestures_panel)
         return panel
 
+    # -------- Gesture Binds tab ------------------------------------------
+    def _resolve_gesture_pose_image(self, image_filename: str) -> "Path | None":
+        """Look up an image path for the Gesture Binds preview.
+
+        Two flavours of image_filename are handled:
+        - Bare filename (e.g., "Mute.png"): search the bundled
+          GestureGuide/ folder. Mirrors GestureMediaWidget's resolution
+          so both source-mode and PyInstaller bundle runs work.
+        - Absolute path (e.g., a user-picked custom gesture thumbnail
+          stored in <registry_dir>/gesture_thumbnails/): treat as
+          already-resolved and just verify the file still exists.
+        """
+        if not image_filename:
+            return None
+        # Absolute path passthrough — used for custom-gesture thumbnails
+        # whose location is registry-dir-relative, not GestureGuide/.
+        try:
+            direct = Path(image_filename)
+            if direct.is_absolute() and direct.exists():
+                return direct
+        except Exception:
+            pass
+        candidate_roots: list[Path] = []
+        try:
+            candidate_roots.append(app_base_path() / "GestureGuide")
+        except Exception:
+            pass
+        try:
+            candidate_roots.append(Path(__file__).resolve().parents[4] / "GestureGuide")
+        except Exception:
+            pass
+        for root in candidate_roots:
+            candidate = root / image_filename
+            try:
+                if candidate.exists():
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    def _all_pose_entries(self) -> list[tuple[str, str, str, str]]:
+        """Static poses + the user's recorded custom gestures, in display order.
+        Custom gestures use pose_id `custom:<name>`; the third tuple slot
+        carries either an empty string (no thumbnail picked) or the
+        absolute path to the user-picked thumbnail PNG so the resolver
+        below can use it directly."""
+        entries: list[tuple[str, str, str, str]] = list(_GESTURE_BIND_POSES)
+        try:
+            from hgr.custom_gestures.registry import GestureRegistry
+            registry = GestureRegistry()
+            registry.load()
+            for g in registry.list():
+                desc = (g.description or "").strip() or "User-recorded custom gesture."
+                thumb = registry.thumbnail_path(g)
+                image_token = str(thumb) if thumb is not None else ""
+                entries.append((f"custom:{g.name}", g.name, image_token, desc))
+        except Exception:
+            pass
+        return entries
+
+    def _describe_custom_action(self, gesture) -> str:
+        """Render a one-line, human-readable description of a custom gesture's
+        bound action for the Action column."""
+        action = getattr(gesture, "action", None)
+        if action is None:
+            return f"Custom: {gesture.name}"
+        kind = getattr(action, "kind", "noop") or "noop"
+        payload = getattr(action, "payload", None) or {}
+        if kind == "keystroke":
+            key = str(payload.get("key", "")).strip()
+            return f"Press {key}" if key else f"Custom keystroke ({gesture.name})"
+        if kind == "hotkey":
+            keys = payload.get("keys") or []
+            combo = "+".join(str(k) for k in keys) if keys else ""
+            return f"Press {combo}" if combo else f"Custom hotkey ({gesture.name})"
+        if kind == "text":
+            text = str(payload.get("text", "")).strip()
+            preview = (text[:32] + "…") if len(text) > 32 else text
+            return f"Type '{preview}'" if preview else f"Type text ({gesture.name})"
+        if kind == "open_url":
+            url = str(payload.get("url", "")).strip()
+            return f"Open {url}" if url else f"Open URL ({gesture.name})"
+        if kind == "run_command":
+            cmd = str(payload.get("command", "")).strip()
+            preview = (cmd[:40] + "…") if len(cmd) > 40 else cmd
+            return f"Run: {preview}" if preview else f"Run command ({gesture.name})"
+        return f"Custom: {gesture.name}"
+
+    def _collect_gesture_bind_actions(self) -> list[tuple[str, str, str]]:
+        """Static action rows + one row per custom gesture, in display order.
+        Custom gesture rows use action_id `custom_action:<name>` with default
+        pose `custom:<name>` (the gesture itself triggers itself)."""
+        rows: list[tuple[str, str, str]] = list(_GESTURE_BIND_ACTIONS)
+        try:
+            from hgr.custom_gestures.registry import GestureRegistry
+            registry = GestureRegistry()
+            registry.load()
+            for g in registry.list():
+                rows.append((
+                    f"custom_action:{g.name}",
+                    self._describe_custom_action(g),
+                    f"custom:{g.name}",
+                ))
+        except Exception:
+            pass
+        return rows
+
+    def _pose_label_for_id(self, pose_id: str) -> str:
+        if not pose_id:
+            return "(unbound)"
+        if pose_id.startswith("custom:"):
+            return pose_id.split(":", 1)[1] or "(custom)"
+        for pid, label, _img, _desc in _GESTURE_BIND_POSES:
+            if pid == pose_id:
+                return label
+        return pose_id
+
+    def _build_gesture_binds_panel(self) -> QWidget:
+        panel, layout = self._make_content_panel(
+            "Gesture Binds",
+            "Reassign which hand pose triggers each action. Click an Active Gesture to "
+            "start a rebind, then pick the new pose from All Gesture Poses on the right. "
+            "Press Esc to cancel. Click Save Changes when you're done.",
+        )
+        accent = self.config.accent_color or "#1DE9B6"
+
+        # Rebind state — pending changes are held in _pending_changes until
+        # the user clicks Save. _pending_action is the action being rebound
+        # right now (None when no rebind is in progress).
+        self._gesture_binds_pending_action: str | None = None
+        self._gesture_binds_pending_changes: dict[str, str] = {}
+        self._gesture_binds_active_buttons: dict[str, QPushButton] = {}
+        self._gesture_binds_hover_timer: QTimer | None = None
+        self._gesture_binds_hover_popup: QFrame | None = None
+        self._gesture_binds_hover_pose_id: str | None = None
+
+        scroll = QScrollArea()
+        scroll.setObjectName("gestureBindsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea#gestureBindsScroll,
+            QScrollArea#gestureBindsScroll > QWidget,
+            QScrollArea#gestureBindsScroll QWidget#qt_scrollarea_viewport {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#gestureBindsScroll QScrollBar:vertical {{
+                background: rgba(255,255,255,0.04);
+                width: 10px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
+            }}
+            QScrollArea#gestureBindsScroll QScrollBar::handle:vertical {{
+                background: {accent};
+                border-radius: 5px;
+                min-height: 32px;
+            }}
+            QScrollArea#gestureBindsScroll QScrollBar::handle:vertical:hover {{
+                background: {accent};
+                border: 1px solid rgba(255,255,255,0.25);
+            }}
+            QScrollArea#gestureBindsScroll QScrollBar::add-line:vertical,
+            QScrollArea#gestureBindsScroll QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: transparent;
+            }}
+            QScrollArea#gestureBindsScroll QScrollBar::add-page:vertical,
+            QScrollArea#gestureBindsScroll QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            """
+        )
+
+        body = QWidget()
+        body.setObjectName("gestureBindsBody")
+        body.setAttribute(Qt.WA_StyledBackground, True)
+        body.setStyleSheet("QWidget#gestureBindsBody { background: transparent; }")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(14)
+
+        # Pill — appears under the subtitle while a rebind is pending.
+        pill = QLabel(
+            "To change this action's activation gesture click on a gesture pose from the "
+            "All Gesture Poses list. Press Esc to cancel."
+        )
+        pill.setObjectName("gestureBindsPill")
+        pill.setWordWrap(True)
+        pill.setVisible(False)
+        pill.setStyleSheet(
+            f"""
+            QLabel#gestureBindsPill {{
+                background: rgba(29, 233, 182, 0.16);
+                border: 1px solid {accent};
+                border-radius: 10px;
+                padding: 10px 14px;
+                color: {self.config.text_color or "#E5F6FF"};
+                font-size: 13px;
+            }}
+            """
+        )
+        self._gesture_binds_pill = pill
+        body_layout.addWidget(pill)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(18)
+
+        # ---- Left column: bindings table ------------------------------------
+        table_box = QFrame()
+        table_box.setObjectName("innerCard")
+        table_layout = QVBoxLayout(table_box)
+        table_layout.setContentsMargins(14, 14, 14, 14)
+        table_layout.setSpacing(8)
+
+        table_header = QLabel("Bindings")
+        table_header.setObjectName("settingsPanelTitle")
+        table_layout.addWidget(table_header)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self._gesture_binds_grid = grid
+
+        col_a = QLabel("Action")
+        col_a.setObjectName("gestureCardSubtitle")
+        col_b = QLabel("Active Gesture")
+        col_b.setObjectName("gestureCardSubtitle")
+        grid.addWidget(col_a, 0, 0)
+        grid.addWidget(col_b, 0, 1)
+
+        self._populate_gesture_binds_table()
+
+        table_layout.addLayout(grid)
+        table_layout.addStretch(1)
+        columns.addWidget(table_box, 3)
+
+        # ---- Right column: All Gesture Poses --------------------------------
+        poses_box = QFrame()
+        poses_box.setObjectName("innerCard")
+        poses_layout = QVBoxLayout(poses_box)
+        poses_layout.setContentsMargins(14, 14, 14, 14)
+        poses_layout.setSpacing(8)
+
+        poses_header = QLabel("All Gesture Poses")
+        poses_header.setObjectName("settingsPanelTitle")
+        poses_layout.addWidget(poses_header)
+
+        poses_hint = QLabel("Hover for 1 second to preview a pose.")
+        poses_hint.setObjectName("gestureCardSubtitle")
+        poses_hint.setWordWrap(True)
+        poses_layout.addWidget(poses_hint)
+
+        poses_list = QListWidget()
+        poses_list.setObjectName("gestureBindsPosesList")
+        poses_list.setMouseTracking(True)
+        poses_list.setSelectionMode(QListWidget.NoSelection)
+        poses_list.itemClicked.connect(self._on_gesture_pose_clicked)
+        poses_list.itemEntered.connect(self._on_gesture_pose_hover_enter)
+        poses_list.viewport().installEventFilter(self)
+        self._gesture_binds_poses_list = poses_list
+        self._refresh_gesture_binds_poses_list()
+        poses_layout.addWidget(poses_list, 1)
+
+        columns.addWidget(poses_box, 2)
+        body_layout.addLayout(columns, 1)
+
+        # ---- Save bar -------------------------------------------------------
+        save_row = QHBoxLayout()
+        save_row.addStretch(1)
+        save_btn = QPushButton("Save Changes")
+        save_btn.setObjectName("primaryAction")
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self._save_gesture_bindings)
+        save_row.addWidget(save_btn)
+        body_layout.addLayout(save_row)
+        self._gesture_binds_save_button = save_btn
+
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+
+        # Style for the active-gesture buttons + the poses list.
+        panel.setStyleSheet(
+            (panel.styleSheet() or "")
+            + f"""
+            QPushButton#gestureBindActiveButton {{
+                text-align: left;
+                padding: 8px 12px;
+                border-radius: 8px;
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.10);
+                color: {self.config.text_color or "#E5F6FF"};
+            }}
+            QPushButton#gestureBindActiveButton:hover {{
+                background: rgba(255, 255, 255, 0.10);
+            }}
+            QPushButton#gestureBindActiveButton[pendingRebind="true"] {{
+                background: rgba(29, 233, 182, 0.18);
+                border: 1px solid {accent};
+                color: {accent};
+            }}
+            QListWidget#gestureBindsPosesList {{
+                background: rgba(10, 28, 39, 0.55);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 4px;
+                color: {self.config.text_color or "#E5F6FF"};
+            }}
+            QListWidget#gestureBindsPosesList::item {{
+                padding: 8px 10px;
+                border-radius: 6px;
+                color: {self.config.text_color or "#E5F6FF"};
+            }}
+            QListWidget#gestureBindsPosesList::item:hover {{
+                background: rgba(255, 255, 255, 0.08);
+                color: {self.config.text_color or "#E5F6FF"};
+            }}
+            QListWidget#gestureBindsPosesList::item:selected {{
+                background: rgba(29, 233, 182, 0.18);
+                color: {self.config.text_color or "#E5F6FF"};
+            }}
+            """
+        )
+        return panel
+
+    def _gesture_binds_registry_changed_since_last_paint(self) -> bool:
+        """Stat the custom-gesture registry file and return True iff its
+        mtime has advanced since the last time we rebuilt the Gesture
+        Binds table. Used to skip the (somewhat expensive) rebuild on
+        re-entry when nothing has actually changed."""
+        try:
+            from hgr.custom_gestures.registry import registry_path
+            path = registry_path()
+            mtime = path.stat().st_mtime if path.exists() else 0.0
+        except Exception:
+            mtime = 0.0
+        last = getattr(self, "_gesture_binds_last_registry_mtime", None)
+        if last is None:
+            # First time we've ever painted Gesture Binds.
+            self._gesture_binds_last_registry_mtime = mtime
+            return True
+        if mtime != last:
+            self._gesture_binds_last_registry_mtime = mtime
+            return True
+        return False
+
+    def _populate_gesture_binds_table(self) -> None:
+        """Fill the bindings grid with one row per static + custom action.
+        Header row 0 is left untouched; rows 1..N are cleared and rebuilt."""
+        grid = getattr(self, "_gesture_binds_grid", None)
+        if grid is None:
+            return
+        # Drop any non-header rows from a prior population (custom gestures
+        # may have been added/removed since the last build).
+        to_remove = []
+        for i in range(grid.count()):
+            item = grid.itemAt(i)
+            if item is None:
+                continue
+            r, _c, _rs, _cs = grid.getItemPosition(i)
+            if r >= 1:
+                to_remove.append(item)
+        for item in to_remove:
+            w = item.widget()
+            grid.removeItem(item)
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._gesture_binds_active_buttons.clear()
+
+        for row_idx, (action_id, action_label, _default_pose) in enumerate(
+            self._collect_gesture_bind_actions(), start=1
+        ):
+            label = QLabel(action_label)
+            label.setObjectName("gestureCardBody")
+            label.setWordWrap(True)
+            grid.addWidget(label, row_idx, 0)
+
+            current_pose = resolve_gesture_binding(self.config, action_id)
+            # If a pending change is in flight (user clicked a pose but hasn't
+            # saved), prefer that so the row reflects what they're about to save.
+            pending = self._gesture_binds_pending_changes.get(action_id) \
+                if hasattr(self, "_gesture_binds_pending_changes") else None
+            if pending:
+                current_pose = pending
+            btn = QPushButton(self._pose_label_for_id(current_pose))
+            btn.setObjectName("gestureBindActiveButton")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("gestureBindActionId", action_id)
+            btn.setAttribute(Qt.WA_Hover, True)
+            btn.installEventFilter(self)
+            btn.clicked.connect(lambda _checked=False, a=action_id: self._on_gesture_bind_active_clicked(a))
+            self._gesture_binds_active_buttons[action_id] = btn
+            grid.addWidget(btn, row_idx, 1)
+
+    def _refresh_gesture_binds_poses_list(self) -> None:
+        lw = getattr(self, "_gesture_binds_poses_list", None)
+        if lw is None:
+            return
+        lw.clear()
+        for pose_id, label, _img, _desc in self._all_pose_entries():
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, pose_id)
+            lw.addItem(item)
+
+    def _on_gesture_bind_active_clicked(self, action_id: str) -> None:
+        # Clear any prior pending state's pressed style.
+        prev = self._gesture_binds_pending_action
+        if prev and prev != action_id:
+            prev_btn = self._gesture_binds_active_buttons.get(prev)
+            if prev_btn is not None:
+                prev_btn.setProperty("pendingRebind", False)
+                prev_btn.style().unpolish(prev_btn)
+                prev_btn.style().polish(prev_btn)
+        self._gesture_binds_pending_action = action_id
+        btn = self._gesture_binds_active_buttons.get(action_id)
+        if btn is not None:
+            btn.setProperty("pendingRebind", True)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        if self._gesture_binds_pill is not None:
+            self._gesture_binds_pill.setVisible(True)
+        # Make sure the panel can receive Esc key presses.
+        self.setFocus()
+
+    def _clear_gesture_bind_pending(self) -> None:
+        action_id = self._gesture_binds_pending_action
+        self._gesture_binds_pending_action = None
+        if action_id:
+            btn = self._gesture_binds_active_buttons.get(action_id)
+            if btn is not None:
+                btn.setProperty("pendingRebind", False)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+        if self._gesture_binds_pill is not None:
+            self._gesture_binds_pill.setVisible(False)
+
+    def _on_gesture_pose_clicked(self, item) -> None:
+        if not self._gesture_binds_pending_action:
+            return
+        pose_id = item.data(Qt.UserRole) if item is not None else None
+        if not pose_id:
+            return
+        action_id = self._gesture_binds_pending_action
+        self._gesture_binds_pending_changes[action_id] = pose_id
+        btn = self._gesture_binds_active_buttons.get(action_id)
+        if btn is not None:
+            btn.setText(self._pose_label_for_id(pose_id))
+        self._clear_gesture_bind_pending()
+
+    def _save_gesture_bindings(self) -> None:
+        if not self._gesture_binds_pending_changes:
+            TouchlessNotice.show_info(self, "Gesture Binds", "No changes to save.")
+            return
+        current = dict(getattr(self.config, "gesture_bindings", None) or {})
+        current.update(self._gesture_binds_pending_changes)
+        # Drop entries that match the default — keeps the JSON tidy.
+        defaults = {a: d for a, _l, d in _GESTURE_BIND_ACTIONS}
+        cleaned = {k: v for k, v in current.items() if defaults.get(k) != v}
+        self.config.gesture_bindings = cleaned
+        try:
+            save_config(self.config)
+        except Exception as exc:
+            TouchlessNotice.show_warn(self, "Save failed", f"Could not write settings: {exc}")
+            return
+        self._gesture_binds_pending_changes.clear()
+        TouchlessNotice.show_info(
+            self,
+            "Gesture Binds",
+            "Bindings saved. Restart Touchless or restart your camera session for them to take effect.",
+        )
+
+    # -------- Hover preview popup ---------------------------------------
+    def _start_gesture_pose_hover_timer(self, pose_id: str) -> None:
+        if not pose_id:
+            return
+        # If the popup is already showing this pose, do nothing.
+        if (
+            self._gesture_binds_hover_popup is not None
+            and self._gesture_binds_hover_pose_id == pose_id
+        ):
+            return
+        # Hide any popup that's currently showing for a DIFFERENT pose,
+        # then start a fresh 2s countdown.
+        if self._gesture_binds_hover_popup is not None:
+            self._hide_gesture_pose_preview()
+        self._gesture_binds_hover_pose_id = pose_id
+        if self._gesture_binds_hover_timer is not None:
+            self._gesture_binds_hover_timer.stop()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda pid=pose_id: self._show_gesture_pose_preview(pid))
+        timer.start(1000)
+        self._gesture_binds_hover_timer = timer
+
+    def _on_gesture_pose_hover_enter(self, item) -> None:
+        if item is None:
+            return
+        pose_id = item.data(Qt.UserRole)
+        self._start_gesture_pose_hover_timer(pose_id)
+
+    def _hide_gesture_pose_preview(self) -> None:
+        if self._gesture_binds_hover_timer is not None:
+            self._gesture_binds_hover_timer.stop()
+            self._gesture_binds_hover_timer = None
+        if self._gesture_binds_hover_popup is not None:
+            self._gesture_binds_hover_popup.hide()
+            self._gesture_binds_hover_popup.deleteLater()
+            self._gesture_binds_hover_popup = None
+        self._gesture_binds_hover_pose_id = None
+
+    def _show_gesture_pose_preview(self, pose_id: str) -> None:
+        if not pose_id or pose_id != self._gesture_binds_hover_pose_id:
+            return
+        # Find the entry in the combined list (static + custom).
+        entry = None
+        for e in self._all_pose_entries():
+            if e[0] == pose_id:
+                entry = e
+                break
+        if entry is None:
+            return
+        _pid, label, image_filename, description = entry
+
+        accent = self.config.accent_color or "#1DE9B6"
+        text_color = self.config.text_color or "#E5F6FF"
+
+        popup = QFrame(self)
+        popup.setObjectName("gestureBindsPreviewPopup")
+        popup.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
+        popup.setAttribute(Qt.WA_DeleteOnClose, True)
+        popup.setStyleSheet(
+            f"""
+            QFrame#gestureBindsPreviewPopup {{
+                background: rgba(15, 23, 42, 0.98);
+                border: 1px solid {accent};
+                border-radius: 12px;
+            }}
+            QLabel#previewTitle {{
+                color: {text_color};
+                font-size: 16px;
+                font-weight: 600;
+            }}
+            QLabel#previewBody {{
+                color: rgba(229, 246, 255, 0.85);
+                font-size: 13px;
+            }}
+            """
+        )
+        # Wider, shorter shape — wider than the Control Guide cards (~480px) and
+        # not as tall, since we drop the Requirements section.
+        popup.setFixedWidth(520)
+
+        h = QHBoxLayout(popup)
+        h.setContentsMargins(14, 14, 14, 14)
+        h.setSpacing(14)
+
+        # Image (or placeholder for custom gestures).
+        image_box = QLabel()
+        image_box.setAlignment(Qt.AlignCenter)
+        image_box.setFixedSize(160, 160)
+        image_box.setStyleSheet("background: rgba(10, 28, 39, 0.72); border-radius: 10px; color: rgba(229, 246, 255, 0.55);")
+        media_path = self._resolve_gesture_pose_image(image_filename) if image_filename else None
+        if media_path is not None:
+            pix = QPixmap(str(media_path))
+            if not pix.isNull():
+                image_box.setPixmap(pix.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                image_box.setText("(no image)")
+        else:
+            image_box.setText("Custom\ngesture")
+        h.addWidget(image_box, 0, Qt.AlignTop)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(8)
+        title_lbl = QLabel(label)
+        title_lbl.setObjectName("previewTitle")
+        title_lbl.setWordWrap(True)
+        body_lbl = QLabel(description)
+        body_lbl.setObjectName("previewBody")
+        body_lbl.setWordWrap(True)
+        text_layout.addWidget(title_lbl)
+        text_layout.addWidget(body_lbl)
+        text_layout.addStretch(1)
+        h.addLayout(text_layout, 1)
+
+        # Position near the cursor without clipping off-screen.
+        cursor_pos = QCursor.pos()
+        screen = self.screen() if hasattr(self, "screen") else None
+        screen_rect = screen.availableGeometry() if screen is not None else None
+        popup.adjustSize()
+        target_x = cursor_pos.x() + 16
+        target_y = cursor_pos.y() + 16
+        if screen_rect is not None:
+            if target_x + popup.width() > screen_rect.right():
+                target_x = max(screen_rect.left(), cursor_pos.x() - popup.width() - 16)
+            if target_y + popup.height() > screen_rect.bottom():
+                target_y = max(screen_rect.top(), cursor_pos.y() - popup.height() - 16)
+        popup.move(target_x, target_y)
+        popup.show()
+        self._gesture_binds_hover_popup = popup
+
     def _open_custom_gesture_creator(self) -> None:
         from PySide6.QtWidgets import QDialog
         from .custom_gestures_recorder import RecordingWindow
@@ -3777,14 +4780,27 @@ class MainWindow(QMainWindow):
         # frame stream — otherwise the recorder opens its own camera so
         # the user doesn't have to start the main live viewer first.
         worker = getattr(self, "_worker", None)
-        recorder = RecordingWindow(
-            worker=worker,
-            accent_color=accent,
-            name=result.name,
-            description=result.description,
-            action=result.action,
-            parent=self,
-        )
+        try:
+            recorder = RecordingWindow(
+                worker=worker,
+                accent_color=accent,
+                name=result.name,
+                description=result.description,
+                action=result.action,
+                parent=self,
+                config=self.config,
+            )
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[custom-gestures] RecordingWindow construction failed:\n{tb}")
+            QMessageBox.critical(
+                self,
+                "Could not open recording window",
+                f"{type(exc).__name__}: {exc}\n\n"
+                "Full traceback printed to the terminal.",
+            )
+            return
         recorder.saved.connect(lambda _name: self._custom_gestures_panel.refresh_cards())
         recorder.exec()
 
@@ -3795,7 +4811,12 @@ class MainWindow(QMainWindow):
         # As with the recorder, pass the worker if alive — sandbox falls
         # back to its own camera otherwise.
         worker = getattr(self, "_worker", None)
-        sandbox = SandboxWindow(worker=worker, accent_color=accent, parent=self)
+        sandbox = SandboxWindow(
+            worker=worker,
+            accent_color=accent,
+            parent=self,
+            config=self.config,
+        )
         sandbox.show()
 
     def _open_custom_gesture_editor(self, name: str) -> None:
@@ -3861,6 +4882,7 @@ class MainWindow(QMainWindow):
                 action=result.action,
                 description=result.description,
                 overwrite=True,
+                handedness=existing.handedness,  # preserve recorded hand
             )
         except ValueError as exc:
             QMessageBox.critical(self, "Edit failed", str(exc))
@@ -4019,13 +5041,22 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(self.camera_combo)
 
         note = QLabel(
-            "Pick a local camera from the list above — the dropdown auto-refreshes each time you open it. "
-            "To actually use the selected device, uncheck 'Use phone camera (QR) as source' below, then click "
-            "Save Camera Selection at the bottom."
+            "Choose from the list of cameras connected to your device. "
+            "Click Preview to see the selected camera's view."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
         box_layout.addWidget(note)
+
+        # Preview button row — opens a Touchless-themed live preview of
+        # whichever camera is currently selected in the dropdown above.
+        preview_row = QHBoxLayout()
+        preview_row.addStretch(1)
+        self.camera_preview_button = QPushButton("Preview")
+        self.camera_preview_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.camera_preview_button.clicked.connect(self._open_camera_preview)
+        preview_row.addWidget(self.camera_preview_button)
+        box_layout.addLayout(preview_row)
 
         self.camera_already_mirrored_checkbox = QCheckBox("This camera source is already mirrored (skip Touchless's flip)")
         self.camera_already_mirrored_checkbox.setObjectName("cameraMirroredCheckbox")
@@ -4037,49 +5068,11 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(self.camera_already_mirrored_checkbox)
 
         # ============================================================
-        # 2. PHONE CAMERA VIA HTTP URL
-        # ============================================================
-        box_layout.addWidget(_section_header("Phone Camera — Via HTTP URL"))
-
-        phone_note = QLabel(
-            "Use your phone's camera over WiFi by pasting an IP-camera URL. "
-            "Install a free phone app (IP Webcam on Android, Iriun / EpocCam on iOS), start the stream, and paste "
-            "the URL shown (like http://192.168.1.50:8080/video). Both devices must be on the same WiFi network."
-        )
-        phone_note.setObjectName("cameraNote")
-        phone_note.setWordWrap(True)
-        box_layout.addWidget(phone_note)
-
-        self.phone_camera_checkbox = QCheckBox("Use phone camera (URL) as source")
-        self.phone_camera_checkbox.setObjectName("phoneCameraCheckbox")
-        self.phone_camera_checkbox.setStyleSheet(
-            checkbox_style_tpl.format(name="phoneCameraCheckbox", text=self.config.text_color, accent=self.config.accent_color)
-        )
-        self.phone_camera_checkbox.setChecked(bool(getattr(self.config, "phone_camera_enabled", False)))
-        self.phone_camera_checkbox.toggled.connect(self._on_phone_camera_toggled)
-        box_layout.addWidget(self.phone_camera_checkbox)
-
-        phone_row = QHBoxLayout()
-        self.phone_camera_url_input = QLineEdit()
-        self.phone_camera_url_input.setPlaceholderText("http://192.168.1.50:8080/video")
-        self.phone_camera_url_input.setText(str(getattr(self.config, "phone_camera_url", "") or ""))
-        self.phone_camera_url_input.editingFinished.connect(self._on_phone_camera_url_changed)
-        phone_row.addWidget(self.phone_camera_url_input, 1)
-
-        self.phone_camera_test_button = QPushButton("Test")
-        self.phone_camera_test_button.setMinimumWidth(72)
-        self.phone_camera_test_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.phone_camera_test_button.clicked.connect(self._on_phone_camera_test_clicked)
-        phone_row.addWidget(self.phone_camera_test_button, 0)
-        box_layout.addLayout(phone_row)
-
-        self.phone_camera_status_label = QLabel("")
-        self.phone_camera_status_label.setObjectName("cameraNote")
-        self.phone_camera_status_label.setWordWrap(True)
-        box_layout.addWidget(self.phone_camera_status_label)
-
-        # ============================================================
-        # 3. PHONE CAMERA VIA QR CODE
+        # 2. PHONE CAMERA VIA QR CODE
+        #    (The legacy "Via HTTP URL" section was removed — QR pairing
+        #    via the embedded HTTPS server replaces it cleanly. The
+        #    related toggles still exist in AppConfig for backwards
+        #    compatibility but the UI surface is gone.)
         # ============================================================
         box_layout.addWidget(_section_header("Phone Camera — Via QR Code"))
 
@@ -4125,9 +5118,21 @@ class MainWindow(QMainWindow):
         self.use_phone_camera_qr_checkbox.setVisible(False)
         box_layout.addWidget(self.use_phone_camera_qr_checkbox)
 
-        self.phone_camera_qr_status_label = QLabel(
-            "Phone paired — tap Start on your phone's browser to connect." if already_paired else ""
-        )
+        # Initial text: if a phone has already identified itself
+        # (server auto-started + phone reconnected before the user
+        # opened Settings), surface its name. Otherwise show the
+        # neutral "tap Start on your phone..." prompt.
+        initial_status = "Phone paired — tap Start on your phone's browser to connect." if already_paired else ""
+        try:
+            srv = getattr(self, "_phone_camera_qr_server", None)
+            if already_paired and srv is not None:
+                cached_label = getattr(srv, "connected_phone_label", None)
+                if cached_label:
+                    self._phone_connected_label = str(cached_label)
+                    initial_status = self._phone_paired_status_text()
+        except Exception:
+            pass
+        self.phone_camera_qr_status_label = QLabel(initial_status)
         self.phone_camera_qr_status_label.setObjectName("cameraNote")
         self.phone_camera_qr_status_label.setWordWrap(True)
         box_layout.addWidget(self.phone_camera_qr_status_label)
@@ -4162,9 +5167,9 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(_section_header("Lite Mode"))
 
         lite_mode_note = QLabel(
-            "Lite Mode runs the lite hand-tracking model and a smaller inference frame for ~2.5× faster processing on every "
-            "machine. Tracking stays accurate for normal poses; very rare extreme angles or heavy occlusions may be slightly "
-            "less stable. A small \"Lite\" badge appears in the live and mini viewers while it's on."
+            "Improves processing by ~2.5x for simple gestures and commands. "
+            "For very extreme angles or heavy occlusion may be slightly less stable. "
+            "\"Lite\" badge will appear in live viewers when activated."
         )
         lite_mode_note.setObjectName("cameraNote")
         lite_mode_note.setWordWrap(True)
@@ -4187,12 +5192,9 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(_section_header("GPU Mode"))
 
         gpu_mode_note = QLabel(
-            "GPU Mode routes hand tracking through ONNX Runtime + DirectML on any "
-            "DX12 GPU (NVIDIA / AMD / Intel). When the toggle is on, Touchless tries "
-            "the GPU inference path and transparently falls back to CPU MediaPipe "
-            "if no GPU path is reachable on your machine — gesture recognition "
-            "keeps working either way. Hover the toggle to see what paths the "
-            "current machine reports as available."
+            "Uses your graphics card to speed up hand tracking when available. "
+            "If your machine can't run it, Touchless quietly falls back to the "
+            "regular path so gestures keep working."
         )
         gpu_mode_note.setObjectName("cameraNote")
         gpu_mode_note.setWordWrap(True)
@@ -4236,9 +5238,8 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(_section_header("Save Camera Selection"))
 
         save_hint = QLabel(
-            "When 'Use phone camera (QR) as source' or 'Use phone camera (URL) as source' is checked, Touchless uses that "
-            "phone feed as its camera — saving below confirms that choice. To switch back to a device in 'Connected Devices', "
-            "uncheck both phone options, select your device from the dropdown, then click Save Camera Selection."
+            "Pick a camera from the list above and click Save to remember it. "
+            "Use Auto-Select to let Touchless choose for you each launch."
         )
         save_hint.setObjectName("cameraNote")
         save_hint.setWordWrap(True)
@@ -4309,6 +5310,64 @@ class MainWindow(QMainWindow):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not enabled)
+
+    def _open_camera_preview(self) -> None:
+        """Show a live preview of the camera currently selected in the
+        Settings → Camera dropdown. Falls back to whichever camera
+        Auto-Select would pick (first device that opens cleanly) when
+        the dropdown is on the auto entry, so the Preview button works
+        out of the box without forcing the user to pick first."""
+        if not hasattr(self, "camera_combo"):
+            return
+        camera_index = None
+        try:
+            idx_data = self.camera_combo.currentData()
+            camera_index = int(idx_data) if idx_data is not None else None
+        except (TypeError, ValueError):
+            camera_index = None
+        # Auto-Select fallback: scan the first few indices and grab
+        # whichever opens. Mirrors what `open_preferred_or_first_available`
+        # does in the live engine, so Preview shows the same camera
+        # the user would actually get.
+        if camera_index is None or camera_index < 0:
+            camera_index = self._auto_select_camera_index()
+            if camera_index is None:
+                TouchlessNotice.show_warn(
+                    self,
+                    "Camera Preview",
+                    "No working camera detected. Plug in a webcam or pick a phone-camera source first.",
+                )
+                return
+        label_text = str(self.camera_combo.currentText() or "").strip()
+        if not label_text or label_text.lower().startswith("auto"):
+            label_text = f"Camera {camera_index} (auto-selected)"
+        dialog = CameraPreviewDialog(
+            self.config, camera_index, camera_label=label_text, parent=self
+        )
+        dialog.show()
+
+    @staticmethod
+    def _auto_select_camera_index() -> "int | None":
+        """Walk the first 8 indices and return the first one that opens
+        cleanly. Used when the user clicks Preview without an explicit
+        camera selection in the dropdown (Auto-Select mode)."""
+        try:
+            for idx in range(8):
+                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if hasattr(cv2, "CAP_DSHOW") else cv2.VideoCapture(idx)
+                try:
+                    if cap is None or not cap.isOpened():
+                        continue
+                    ok, _frame = cap.read()
+                    if ok:
+                        return idx
+                finally:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+        except Exception:
+            return None
+        return None
 
     def _on_camera_already_mirrored_toggled(self, checked: bool) -> None:
         self.config.camera_source_is_mirrored = bool(checked)
@@ -4427,7 +5486,24 @@ class MainWindow(QMainWindow):
             )
         if hasattr(self, "phone_camera_qr_button_mic"):
             self.phone_camera_qr_button_mic.setText("Show QR Code")
-        self.phone_camera_qr_status_label.setText(f"Paired — {server.info.url}")
+        # Keep the manual-pair flow's status label in sync with the
+        # connected-device label that the server will emit once the
+        # phone loads the page. If the phone already announced itself
+        # during the QR dialog, _phone_connected_label is already set
+        # and we reflect it immediately; otherwise we show URL-only
+        # and the status callback updates the line as soon as the
+        # phone identifies itself.
+        if hasattr(self, "_phone_camera_qr_server") and self._phone_camera_qr_server is not None:
+            try:
+                self._phone_camera_qr_server.set_status_callback(self._forward_phone_server_status)
+            except Exception:
+                pass
+        # Pull whatever the server already knows (the QR dialog may
+        # have caught the phone's identity before this commit step).
+        sl = getattr(self._phone_camera_qr_server, "connected_phone_label", None) if self._phone_camera_qr_server is not None else None
+        if sl:
+            self._phone_connected_label = str(sl)
+        self.phone_camera_qr_status_label.setText(self._phone_paired_status_text())
         self.phone_camera_qr_disconnect_button.setVisible(True)
         self.phone_camera_qr_button.setText("Show QR Code")
         # Rebuild camera dropdown so the new "Phone Camera (QR)"
@@ -4438,6 +5514,58 @@ class MainWindow(QMainWindow):
         self._restart_camera_for_phone_toggle()
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText("Last action: phone camera paired via QR")
+
+    # ---- Phone-server status bridge ------------------------------------
+    def _forward_phone_server_status(self, event: str, data: dict) -> None:
+        """Server-thread entry point. Re-emit as a Qt Signal so the
+        slot runs on the GUI thread before touching any widgets."""
+        try:
+            self._phone_server_status_signal.emit(event, dict(data) if data else {})
+        except Exception:
+            pass
+
+    def _on_phone_server_status_event(self, event: str, data) -> None:
+        """GUI-thread receiver for phone-camera server status events.
+
+        Cares about `phone_identified` (UA parsed → friendly label) and
+        the connection lifecycle events that should refresh the
+        Settings → Camera "Paired — ..." line."""
+        if not isinstance(data, dict):
+            data = {}
+        label = str(data.get("label") or "").strip()
+        if event == "phone_identified" and label:
+            self._phone_connected_label = label
+            self._refresh_phone_status_label()
+        elif event in ("client_connected", "phone_page_loaded"):
+            if label:
+                self._phone_connected_label = label
+            self._refresh_phone_status_label()
+
+    def _phone_paired_status_text(self) -> str:
+        """Compose the 'Paired — <device> — <url>' line. Falls back to
+        just the URL when no phone has connected yet this session."""
+        server = getattr(self, "_phone_camera_qr_server", None)
+        info = getattr(server, "info", None) if server is not None else None
+        url = getattr(info, "url", "") if info is not None else ""
+        device = self._phone_connected_label
+        if device and url:
+            return f"Paired — {device} — {url}"
+        if device:
+            return f"Paired — {device}"
+        if url:
+            return f"Paired — {url}"
+        return "Paired"
+
+    def _refresh_phone_status_label(self) -> None:
+        """Re-render the QR status label. Safe to call from anywhere on
+        the GUI thread; no-op if the label hasn't been built yet (e.g.,
+        the user is on the home page and hasn't opened Settings)."""
+        label_widget = getattr(self, "phone_camera_qr_status_label", None)
+        if label_widget is None:
+            return
+        if not bool(getattr(self.config, "phone_camera_qr_paired", False)):
+            return
+        label_widget.setText(self._phone_paired_status_text())
 
     def _on_phone_camera_qr_disconnect_clicked(self) -> None:
         server = getattr(self, "_phone_camera_qr_server", None)
@@ -5849,6 +6977,35 @@ Admin elevation
         # settings page entry.
         if index == SECTION_UPDATES:
             self._ensure_updates_history_loaded()
+        # Refresh the Gesture Binds poses list each time the section is
+        # shown so custom gestures recorded during this session appear
+        # without requiring a restart.
+        if index == SECTION_GESTURE_BINDS:
+            # Lag-fix: only rebuild the table + poses list when the
+            # custom-gesture registry has actually changed since we
+            # last drew the panel. The earlier unconditional rebuild
+            # added a few hundred ms of grid allocation + disk reads
+            # on every navigation into Gesture Binds, which felt slow.
+            if self._gesture_binds_registry_changed_since_last_paint():
+                try:
+                    self._populate_gesture_binds_table()
+                except Exception:
+                    pass
+                try:
+                    self._refresh_gesture_binds_poses_list()
+                except Exception:
+                    pass
+        else:
+            # Cancel any pending rebind when navigating away.
+            if getattr(self, "_gesture_binds_pending_action", None):
+                try:
+                    self._clear_gesture_bind_pending()
+                except Exception:
+                    pass
+            try:
+                self._hide_gesture_pose_preview()
+            except Exception:
+                pass
         # Force the newly-shown panel to recompute geometry. QStackedWidget
         # occasionally skips this for scroll-area children, leaving the viewport
         # at a stale size where wheel/click hit-testing silently misses.
@@ -6104,6 +7261,18 @@ Admin elevation
             background-color: {self.config.accent_color};
             color: #001B24;
             border: 1px solid {self.config.accent_color};
+        }}
+        QPushButton:disabled {{
+            /* Visibly inert state for any disabled QPushButton. The
+               Start / End buttons rely on this so the user can see
+               which one is currently active: when the engine is
+               running, START is greyed; when stopped, END is greyed.
+               Same rule applies anywhere else setEnabled(False) is
+               used (Save Camera while no selection, Update While
+               applying, etc.). */
+            background-color: rgba(255, 255, 255, 0.04);
+            color: rgba(229, 246, 255, 0.30);
+            border: 1px solid rgba(255, 255, 255, 0.08);
         }}
         QPushButton#settingsNavButton {{
             min-width: 0px;
@@ -6381,13 +7550,23 @@ Admin elevation
         return dialog.selected_camera_index, dialog.remember_choice
 
     def _resolve_camera_for_start(self, cameras: list[CameraInfo]) -> Optional[int]:
-        valid_indices = {camera.index for camera in cameras}
-        if self.config.preferred_camera_index in valid_indices:
-            return self.config.preferred_camera_index
+        # Trust a saved preferred_camera_index BEFORE consulting the
+        # discovered list. The list_available_cameras() probe (used for
+        # the dropdown / start-up scan) is best-effort: it walks
+        # indices 0..N and requests one frame each, and on some
+        # machines that probe misses cameras the engine then opens
+        # cleanly via open_camera_by_index — different backend, faster
+        # frame-grab, etc. Symptom reported by users: the tutorial
+        # works (it bypasses this validation), the main app silently
+        # picks a different camera or shows the chooser. Letting the
+        # engine try the saved index first and falling back to the
+        # scan list only when there's no saved preference fixes that.
+        preferred = self.config.preferred_camera_index
+        if preferred is not None:
+            return int(preferred)
 
-        if self.config.preferred_camera_index is not None and self.config.preferred_camera_index not in valid_indices:
-            self.last_action_label.setText("Last action: saved camera was not available")
-
+        if not cameras:
+            return None
         if len(cameras) == 1:
             return cameras[0].index
 
@@ -9748,7 +10927,38 @@ Admin elevation
         if event.type() == QEvent.ActivationChange:
             self._sync_all_button_hover_states()
 
+    def keyPressEvent(self, event):  # noqa: N802
+        # Esc cancels an in-progress Gesture Binds rebind without saving
+        # any partial change.
+        if event.key() == Qt.Key_Escape and getattr(self, "_gesture_binds_pending_action", None):
+            self._clear_gesture_bind_pending()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def eventFilter(self, obj, event):  # noqa: N802
+        # Gesture Binds list viewport: hide hover preview when the cursor
+        # leaves the list entirely. itemEntered fires on item-to-item moves
+        # but never fires when the cursor exits the viewport.
+        poses_list = getattr(self, "_gesture_binds_poses_list", None)
+        if poses_list is not None and obj is poses_list.viewport():
+            if event.type() in (QEvent.Leave, QEvent.HoverLeave):
+                self._hide_gesture_pose_preview()
+        # Gesture Binds active-gesture buttons: same 2s hover preview as
+        # the All Gesture Poses list, keyed off the currently-bound pose
+        # for that action (including any unsaved pending change).
+        if isinstance(obj, QPushButton) and obj.property("gestureBindActionId"):
+            etype = event.type()
+            if etype in (QEvent.Enter, QEvent.HoverEnter):
+                action_id = obj.property("gestureBindActionId")
+                pose_id = self._gesture_binds_pending_changes.get(action_id) \
+                    if hasattr(self, "_gesture_binds_pending_changes") else None
+                if not pose_id:
+                    pose_id = resolve_gesture_binding(self.config, action_id)
+                if pose_id:
+                    self._start_gesture_pose_hover_timer(pose_id)
+            elif etype in (QEvent.Leave, QEvent.HoverLeave):
+                self._hide_gesture_pose_preview()
         if isinstance(obj, QPushButton) and not isinstance(obj, WindowControlButton):
             if event.type() in (
                 QEvent.Enter,
@@ -11064,7 +12274,38 @@ def _stop_screen_recording(self) -> bool:
         if event.type() == QEvent.ActivationChange:
             self._sync_all_button_hover_states()
 
+    def keyPressEvent(self, event):  # noqa: N802
+        # Esc cancels an in-progress Gesture Binds rebind without saving
+        # any partial change.
+        if event.key() == Qt.Key_Escape and getattr(self, "_gesture_binds_pending_action", None):
+            self._clear_gesture_bind_pending()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def eventFilter(self, obj, event):  # noqa: N802
+        # Gesture Binds list viewport: hide hover preview when the cursor
+        # leaves the list entirely. itemEntered fires on item-to-item moves
+        # but never fires when the cursor exits the viewport.
+        poses_list = getattr(self, "_gesture_binds_poses_list", None)
+        if poses_list is not None and obj is poses_list.viewport():
+            if event.type() in (QEvent.Leave, QEvent.HoverLeave):
+                self._hide_gesture_pose_preview()
+        # Gesture Binds active-gesture buttons: same 2s hover preview as
+        # the All Gesture Poses list, keyed off the currently-bound pose
+        # for that action (including any unsaved pending change).
+        if isinstance(obj, QPushButton) and obj.property("gestureBindActionId"):
+            etype = event.type()
+            if etype in (QEvent.Enter, QEvent.HoverEnter):
+                action_id = obj.property("gestureBindActionId")
+                pose_id = self._gesture_binds_pending_changes.get(action_id) \
+                    if hasattr(self, "_gesture_binds_pending_changes") else None
+                if not pose_id:
+                    pose_id = resolve_gesture_binding(self.config, action_id)
+                if pose_id:
+                    self._start_gesture_pose_hover_timer(pose_id)
+            elif etype in (QEvent.Leave, QEvent.HoverLeave):
+                self._hide_gesture_pose_preview()
         if isinstance(obj, QPushButton) and not isinstance(obj, WindowControlButton):
             if event.type() in (
                 QEvent.Enter,

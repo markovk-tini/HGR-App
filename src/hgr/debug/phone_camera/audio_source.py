@@ -36,9 +36,16 @@ class PhoneAudioSource:
     def __init__(
         self,
         sample_rate: int = _DEFAULT_SAMPLE_RATE,
-        max_buffer_seconds: float = 2.5,
+        max_buffer_seconds: float = 5.0,
     ) -> None:
         self._sample_rate = int(sample_rate)
+        # 5-second cap (was 2.5). When iOS Safari resumes its
+        # AudioContext after a suspension (screen lock, Siri, an
+        # incoming notification) it bursts a backlog of buffered
+        # samples in one go. A 2.5s cap dropped the start of that
+        # backlog and the user's first words after the resume were
+        # lost; 5s lets the burst land cleanly while still bounding
+        # memory growth on a truly stalled reader.
         self._max_samples = max(1024, int(sample_rate * max_buffer_seconds))
         # Buffer is a deque of 1D int16 arrays; reads concatenate across
         # chunks as needed.
@@ -48,6 +55,7 @@ class PhoneAudioSource:
         self._cond = threading.Condition(self._lock)
         self._closed = False
         self._push_count = 0
+        self._dropped_samples = 0
         self._last_push_at = 0.0
 
     @property
@@ -61,6 +69,10 @@ class PhoneAudioSource:
     @property
     def push_count(self) -> int:
         return self._push_count
+
+    @property
+    def dropped_samples(self) -> int:
+        return self._dropped_samples
 
     @property
     def seconds_since_last_push(self) -> float:
@@ -84,9 +96,12 @@ class PhoneAudioSource:
             self._push_count += 1
             self._last_push_at = time.monotonic()
             # Drop oldest chunks if we're above max buffer — prevents
-            # unbounded growth when the reader has stalled.
+            # unbounded growth when the reader has stalled. Tracked so
+            # the voice pipeline can log "phone audio overflow, N
+            # samples dropped" instead of silently losing words.
             while self._total_samples > self._max_samples and self._buffer:
                 oldest = self._buffer.popleft()
+                self._dropped_samples += oldest.size
                 self._total_samples -= oldest.size
             self._cond.notify_all()
 

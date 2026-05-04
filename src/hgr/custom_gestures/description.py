@@ -168,6 +168,10 @@ def format_gesture_summary(gesture: CustomGesture) -> str:
     if gesture.description:
         lines.append(f"Description: {gesture.description}")
     lines.append(f"Action:      {describe_action(gesture.action)}")
+    if gesture.handedness in ("Left", "Right"):
+        lines.append(f"Hand:        {gesture.handedness} (only fires on this hand)")
+    else:
+        lines.append("Hand:        either (fires on left or right)")
     lines.append(f"Samples:     {len(gesture.samples)} stored "
                  f"(includes augmentation variants)")
     lines.append("")

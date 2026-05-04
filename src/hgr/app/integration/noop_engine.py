@@ -23,6 +23,14 @@ from ...debug.mouse_controller import MouseController
 from ...debug.mouse_gesture import MouseGestureTracker
 from ...voice.live_dictation import LiveDictationEvent, LiveDictationStreamer
 from ...config.app_config import save_config
+from ...config.gesture_bindings import (
+    STATIC_LABEL_TO_POSE,
+    STATIC_POSE_LABEL_MAP,
+    action_bound_to_pose,
+    default_pose_for_action,
+    pose_id_for_static_label,
+    static_label_for_pose_id,
+)
 from ...debug.low_fps_suggestion_overlay import LowFpsSuggestionOverlay
 from ...debug.screen_volume_overlay import ScreenVolumeOverlay
 from ...debug.spotify_controller import SpotifyController
@@ -831,7 +839,9 @@ class GestureWorker(QObject):
         # the user previously saved is live immediately.
         try:
             from ...custom_gestures.runner import CustomGestureRunner
-            self._custom_gesture_runner = CustomGestureRunner()
+            self._custom_gesture_runner = CustomGestureRunner(
+                binding_resolver=self._custom_runner_binding_resolver,
+            )
         except Exception as exc:
             print(f"[custom-gestures] runner init failed: {exc}")
             self._custom_gesture_runner = None
@@ -912,7 +922,9 @@ class GestureWorker(QObject):
         if runner is None:
             try:
                 from ...custom_gestures.runner import CustomGestureRunner
-                self._custom_gesture_runner = CustomGestureRunner()
+                self._custom_gesture_runner = CustomGestureRunner(
+                    binding_resolver=self._custom_runner_binding_resolver,
+                )
             except Exception as exc:
                 print(f"[custom-gestures] late init failed: {exc}")
             return
@@ -3442,6 +3454,18 @@ class GestureWorker(QObject):
         use_phone_url = bool(getattr(self.config, "phone_camera_enabled", False)) and phone_url
         if self.camera_index_override is not None:
             result = open_camera_by_index(self.camera_index_override, max_index=self.config.camera_scan_limit)
+            # Fallback: if the requested index doesn't open (the device
+            # disappeared, the OpenCV backend that worked at scan time
+            # rejects it now, etc.) fall back to whatever the preferred
+            # / first-available helper finds. Without this, a user
+            # whose saved camera fails to open hits a black "no camera"
+            # screen even though other cameras are present — exactly
+            # the start-button-does-nothing report from the field.
+            if result is None or result[1] is None:
+                result = open_preferred_or_first_available(
+                    self.config.preferred_camera_index,
+                    max_index=self.config.camera_scan_limit,
+                )
         elif phone_qr_capture is not None and phone_qr_capture.isOpened():
             info = SimpleNamespace(
                 index=-2,
@@ -3696,14 +3720,17 @@ class GestureWorker(QObject):
             # enough idle time between ticks to process the
             # queued paint events.
             return
-        # Touchless normally mirrors the camera feed so the user sees the
-        # "selfie" view a webcam gives by convention. If the source already
-        # outputs a mirrored image (some phone-camera apps like Iriun do
-        # this when their own mirror toggle is on), a second flip here
-        # produces an un-mirrored view, which is what the user was hitting.
-        # The config toggle lets them skip our flip.
-        if not bool(getattr(self.config, "camera_source_is_mirrored", False)):
-            frame = cv2.flip(frame, 1)
+        # Always mirror to selfie view. The earlier
+        # `camera_source_is_mirrored` toggle was meant for phone-camera
+        # sources whose host app pre-mirrored the feed (e.g., Iriun
+        # with its own mirror checkbox on), but in practice users
+        # toggled it on for unrelated reasons and ended up with the
+        # main app showing camera-perspective with no obvious cause.
+        # The flag is kept on AppConfig for backwards compatibility
+        # but ignored here so every Touchless surface — engine,
+        # tutorial, recorder, sandbox, preview — shows the same
+        # selfie view consistently.
+        frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
         t_prep = time.perf_counter() if debug_timing else 0.0
         # Decoupled display path: emit the raw frame for receivers
@@ -3832,9 +3859,36 @@ class GestureWorker(QObject):
         # for tracked_hand, result.secondary_prediction for
         # secondary_tracked_hand).
         try:
+            # Pull the runner's currently-held custom gesture (if any)
+            # so we can paint its name as the banner over the matching
+            # hand — same affordance built-in gestures get. Resolved
+            # ONCE per frame; applied to whichever hand's handedness
+            # matches the gesture's stored hand. None when no match.
+            custom_match: Optional[tuple[str, Optional[str]]] = None
+            if self._custom_gesture_runner is not None:
+                try:
+                    custom_match = self._custom_gesture_runner.current_match
+                except Exception:
+                    custom_match = None
+
+            def _apply_custom_label(default_label: str, default_active: bool, hand_handedness: Optional[str]):
+                """Override the banner with the custom gesture's name
+                when it's the gesture being held on this hand."""
+                if custom_match is None:
+                    return default_label, default_active
+                cm_name, cm_hand = custom_match
+                # cm_hand=None means the gesture is bound to either
+                # hand — show on whichever hand is matched. Otherwise
+                # only show on the matching hand.
+                if cm_hand is not None and cm_hand != hand_handedness:
+                    return default_label, default_active
+                return cm_name, True
+
             hands_info: list = []
             if result.found and result.tracked_hand is not None:
                 label, active = self._gesture_banner_label(result.prediction)
+                primary_handedness = getattr(result.tracked_hand, "handedness", None)
+                label, active = _apply_custom_label(label, active, primary_handedness)
                 hands_info.append(
                     self._build_hand_overlay_info(
                         result.tracked_hand,
@@ -3846,6 +3900,8 @@ class GestureWorker(QObject):
             if secondary_hand is not None:
                 sec_pred = getattr(result, "secondary_prediction", None)
                 label, active = self._gesture_banner_label(sec_pred)
+                sec_handedness = getattr(secondary_hand, "handedness", None)
+                label, active = _apply_custom_label(label, active, sec_handedness)
                 hands_info.append(
                     self._build_hand_overlay_info(
                         secondary_hand,
@@ -3899,25 +3955,45 @@ class GestureWorker(QObject):
                 # disk since our last check (recorder / sandbox /
                 # wizard saved a new gesture). Throttled internally to
                 # one stat() per ~3 s, so the per-frame cost is
-                # negligible. Catches the case where the user creates
-                # a gesture mid-run and the save path didn't explicitly
-                # call worker.reload_custom_gestures().
-                self._custom_gesture_runner.maybe_reload_if_changed(time.monotonic())
-                if result.found and result.tracked_hand is not None:
-                    landmarks_arr = getattr(result.tracked_hand, "landmarks", None)
-                    if landmarks_arr is not None:
-                        live_hand = getattr(result.tracked_hand, "handedness", None)
-                        live_hand = str(live_hand) if live_hand in ("Left", "Right") else None
-                        fired = self._custom_gesture_runner.process(
-                            landmarks_arr, time.monotonic(), handedness=live_hand
+                # negligible.
+                runner_now = time.monotonic()
+                self._custom_gesture_runner.maybe_reload_if_changed(runner_now)
+
+                # Fast path: when the engine's hand-tracking runtime is
+                # MediaPipe-compatible AND configured the same way the
+                # recorder uses (model_complexity=1), reuse the engine's
+                # already-extracted landmarks. Skips a redundant private
+                # MediaPipe pass and saves ~5–10 ms/frame.
+                #
+                # Slow path: when the runtime differs from the recorder
+                # (ONNX/DirectML GPU, or lite mode with model_complexity=0),
+                # fall back to the runner's private MediaPipe pass so the
+                # landmark distribution matches what the user trained
+                # against. Without this, classifier scores drop ~0.10–0.15
+                # below the trained baseline and gestures get missed.
+                use_engine_landmarks = self._custom_runner_can_use_engine_landmarks()
+                fired = None
+                if use_engine_landmarks:
+                    hands_for_runner = self._build_engine_hands_for_runner(result)
+                    if hands_for_runner:
+                        fired = self._custom_gesture_runner.process_engine_hands(
+                            hands_for_runner, runner_now
                         )
-                        if fired:
-                            try:
-                                self.command_detected.emit(f"custom: {fired}")
-                            except Exception:
-                                pass
+                    else:
+                        self._custom_gesture_runner.hand_lost(runner_now)
                 else:
-                    self._custom_gesture_runner.hand_lost(time.monotonic())
+                    frame_for_mp = getattr(result, "annotated_frame", None)
+                    if frame_for_mp is not None:
+                        fired = self._custom_gesture_runner.process_frame(
+                            frame_for_mp, runner_now
+                        )
+                    else:
+                        self._custom_gesture_runner.hand_lost(runner_now)
+                if fired:
+                    try:
+                        self.command_detected.emit(f"custom: {fired}")
+                    except Exception:
+                        pass
             except Exception as exc:
                 # A bad sample / classifier hiccup must not break the
                 # main pipeline — log once and continue.
@@ -4293,10 +4369,338 @@ class GestureWorker(QObject):
         pct = int(round(float(final_level) * 100))
         self._record_action(f"volume_{direction}", f"volume {direction} to {pct}%")
 
+    # ----- Gesture Binds dispatch / remap helpers -----------------------
+    # The user's per-action pose remap (Settings → Gesture Binds) is
+    # applied in two places:
+    #   (1) Right-hand prediction at the top of _handle_app_controls.
+    #   (2) Left-hand prediction at the top of _handle_left_hand_voice.
+    # Both sites pass the prediction through _apply_gesture_binding_remap,
+    # which either rewrites stable_label/raw_label so the existing
+    # downstream handlers fire the bound static action, OR — when the
+    # bound action is custom — calls _dispatch_action which fires the
+    # custom gesture's action via fire_once and returns a neutral
+    # prediction so no static handler runs.
+    #
+    # Custom-side: when the runner detects a custom gesture match, it
+    # calls _custom_runner_binding_resolver before fire_once. If the
+    # user has remapped that custom gesture to a static action, the
+    # resolver dispatches the bound action and returns True, telling
+    # the runner to skip its own fire_once.
+    def _dispatch_action(self, action_id: str, now: float) -> bool:
+        """Fire a bound action by id, with a per-action_id cooldown so a
+        held pose doesn't spam the action every frame. Returns True if
+        the action was dispatched, False if it was suppressed by
+        cooldown or could not be performed.
+
+        Side note on "open_gesture_wheel" / "open_screen_wheel": those
+        are stateful overlays driven by frame-to-frame hand tracking,
+        not single-shot actions. Until the wheel state machines learn
+        to honor remapped trigger poses, dispatching them here is a
+        no-op so the user gets a clear "nothing happened" rather than
+        partial wheel state. The Gesture Binds tab still saves their
+        remap; it just won't take effect for those two actions."""
+        if not action_id:
+            return False
+        cooldown_state = getattr(self, "_action_dispatch_last_fire", None)
+        if cooldown_state is None:
+            cooldown_state = {}
+            self._action_dispatch_last_fire = cooldown_state
+        # Two-tier gating: a 1.5s "successful fire" window plus a tight
+        # 50ms "any attempt" window. The latter prevents disk reads /
+        # native API calls from happening every frame while a static
+        # pose is held but the action is in cooldown — without it,
+        # holding a mute-bound-to-custom-action pose for 5 s does up to
+        # 150 registry.load() calls and tanks the frame rate.
+        last = cooldown_state.get(action_id, 0.0)
+        if now - last < 1.5:
+            return False
+        last_attempt_state = getattr(self, "_action_dispatch_last_attempt", None)
+        if last_attempt_state is None:
+            last_attempt_state = {}
+            self._action_dispatch_last_attempt = last_attempt_state
+        last_attempt = last_attempt_state.get(action_id, 0.0)
+        if now - last_attempt < 0.05:
+            return False
+        last_attempt_state[action_id] = now
+
+        fired = False
+        try:
+            if action_id == "voice_command_listen":
+                if not (self._voice_listening or self._dictation_active):
+                    self._start_voice_command()
+                    fired = True
+            elif action_id == "dictation_toggle":
+                if self._dictation_active:
+                    self._stop_dictation_capture()
+                else:
+                    self._start_dictation_capture()
+                fired = True
+            elif action_id == "mouse_mode_toggle":
+                self._mouse_mode_enabled = not self._mouse_mode_enabled
+                try:
+                    self.voice_status_overlay.show_info_hint(
+                        "Mouse Mode: On" if self._mouse_mode_enabled else "Mouse Mode: Off",
+                        duration=3.0,
+                    )
+                except Exception:
+                    pass
+                fired = True
+            elif action_id == "drawing_mode_toggle":
+                try:
+                    self._toggle_drawing_mode(now)
+                    fired = True
+                except Exception:
+                    fired = False
+            elif action_id == "voice_cancel":
+                if self._voice_listening or self._dictation_active or self._save_prompt_active or self._selection_prompt_active:
+                    try:
+                        self._cancel_all_voice_stages()
+                        fired = True
+                    except Exception:
+                        fired = False
+            elif action_id == "open_spotify":
+                try:
+                    if not self.spotify_controller.is_window_active():
+                        self.spotify_controller.focus_or_open_window()
+                    fired = True
+                except Exception:
+                    fired = False
+            elif action_id == "play_pause":
+                try:
+                    self.spotify_controller.dispatch_async(self.spotify_controller.toggle_playback)
+                    fired = True
+                except Exception:
+                    fired = False
+            elif action_id == "system_mute_toggle":
+                try:
+                    toggled = self.volume_controller.toggle_mute()
+                    fired = toggled is not None
+                    if fired:
+                        try:
+                            self.command_detected.emit("Volume mute toggled")
+                        except Exception:
+                            pass
+                except Exception:
+                    fired = False
+            elif action_id in ("open_gesture_wheel", "open_screen_wheel"):
+                # Wheel overlays are stateful. Skipping for now — see
+                # docstring above.
+                fired = False
+            elif action_id.startswith("custom_action:"):
+                name = action_id.split(":", 1)[1]
+                # Reuse the runner's already-loaded registry instead of
+                # opening + parsing the JSON file on every dispatch.
+                # Falls back to a fresh load only when the runner isn't
+                # available (shouldn't happen in practice — the runner
+                # is constructed at engine init).
+                try:
+                    from ...custom_gestures.action import fire_once
+                    runner = getattr(self, "_custom_gesture_runner", None)
+                    registry = getattr(runner, "_registry", None) if runner is not None else None
+                    if registry is None:
+                        from ...custom_gestures.registry import GestureRegistry
+                        registry = GestureRegistry()
+                        registry.load()
+                    gesture = registry.get(name)
+                    if gesture is not None:
+                        fired = bool(fire_once(gesture.name, gesture.action))
+                except Exception:
+                    fired = False
+        except Exception:
+            fired = False
+
+        if fired:
+            cooldown_state[action_id] = now
+        return fired
+
+    def _apply_gesture_binding_remap(self, prediction, hand_handedness, now: float):
+        """Apply the user's static-pose binding remap to a prediction.
+
+        Returns the (possibly rewritten) prediction. When the bound
+        action is custom, also fires the custom gesture's action via
+        _dispatch_action and returns a prediction with stable_label /
+        raw_label set to neutral so the static handlers don't double-
+        process the gesture.
+
+        No-op if the user has not remapped the action away from its
+        default pose, or if the prediction's label doesn't correspond
+        to a known static pose. Cross-handedness remaps are skipped
+        (the engine's left/right code paths are too divergent for a
+        single-frame label rewrite to be safe)."""
+        if prediction is None or not hand_handedness:
+            return prediction
+        stable = str(getattr(prediction, "stable_label", "neutral") or "neutral")
+        if stable == "neutral":
+            return prediction
+        pose_id = pose_id_for_static_label(hand_handedness, stable)
+        if pose_id is None:
+            return prediction
+        cfg = self.config
+        bound_action_id = action_bound_to_pose(cfg, pose_id)
+        if bound_action_id is None:
+            return prediction
+        # Default mapping: nothing to do.
+        if default_pose_for_action(bound_action_id) == pose_id:
+            return prediction
+
+        if bound_action_id.startswith("custom_action:"):
+            # Static pose -> custom action. Fire the custom gesture's
+            # stored action and neutralize the prediction so the static
+            # handlers don't run.
+            self._dispatch_action(bound_action_id, now)
+            return self._neutralize_prediction(prediction)
+
+        # Static pose -> static action. Rewrite the prediction's labels
+        # to the bound action's default pose so the existing engine
+        # code paths fire the right thing.
+        target_pose = default_pose_for_action(bound_action_id)
+        target_label = static_label_for_pose_id(target_pose) if target_pose else None
+        if target_label is None:
+            return prediction
+        target_handedness, target_raw_label = target_label
+        if target_handedness != hand_handedness:
+            # Cross-handedness — skip remap (see docstring).
+            return prediction
+        return self._rewrite_prediction_labels(prediction, target_raw_label)
+
+    @staticmethod
+    def _neutralize_prediction(prediction):
+        """Return a copy of `prediction` with stable_label and raw_label
+        set to "neutral". Uses dataclasses.replace when available so
+        the GesturePrediction dataclass keeps the same identity; falls
+        back to a SimpleNamespace clone for non-dataclass shapes."""
+        try:
+            from dataclasses import is_dataclass, replace
+            if is_dataclass(prediction):
+                return replace(prediction, stable_label="neutral", raw_label="neutral")
+        except Exception:
+            pass
+        try:
+            from types import SimpleNamespace
+            attrs = {k: getattr(prediction, k) for k in dir(prediction) if not k.startswith("_")}
+            attrs["stable_label"] = "neutral"
+            attrs["raw_label"] = "neutral"
+            return SimpleNamespace(**attrs)
+        except Exception:
+            return prediction
+
+    @staticmethod
+    def _rewrite_prediction_labels(prediction, new_label: str):
+        """Return a copy of `prediction` with stable_label / raw_label
+        rewritten to `new_label`. Same dataclass-aware fallback as
+        _neutralize_prediction."""
+        try:
+            from dataclasses import is_dataclass, replace
+            if is_dataclass(prediction):
+                return replace(prediction, stable_label=new_label, raw_label=new_label)
+        except Exception:
+            pass
+        try:
+            from types import SimpleNamespace
+            attrs = {k: getattr(prediction, k) for k in dir(prediction) if not k.startswith("_")}
+            attrs["stable_label"] = new_label
+            attrs["raw_label"] = new_label
+            return SimpleNamespace(**attrs)
+        except Exception:
+            return prediction
+
+    def _custom_runner_can_use_engine_landmarks(self) -> bool:
+        """Whether the engine's hand-tracking output is close enough to
+        the recorder's MediaPipe landmarks that the runner can reuse
+        them and skip its own private MediaPipe pass.
+
+        Three live backends today:
+          - `mediapipe-cpu`: MediaPipe Hands on CPU, model_complexity=1
+            by default — identical landmarks to the recorder. Safe to
+            reuse.
+          - `mediapipe-tasks-gpu`: MediaPipe Tasks API HandLandmarker on
+            GPU. Same models as solutions.hands per the runtime
+            docstring, so coordinates match within a pixel. Safe to
+            reuse.
+          - `onnx-directml`: OpenCV Zoo ONNX export of the same
+            MediaPipe Hands weights run on DirectML. Per the
+            onnx_runtime.py docstring: 'same weights as
+            mediapipe.solutions.hands so accuracy is identical'. Pre-
+            and post-processing differ slightly so coordinates can
+            drift a couple of pixels, but the alternative is paying
+            5–10 ms/frame on a private MediaPipe CPU pass on the main
+            thread — which on phone-camera setups is exactly what
+            drops the live FPS to 14–22. Reusing engine landmarks here
+            is a clear win for fluidity; if a user notices a custom
+            gesture missing in GPU mode they can re-record it from the
+            same mode.
+
+        Lite mode (model_complexity=0) is excluded regardless of
+        backend — the lite landmark model produces visibly different
+        coordinates that drop classifier scores ~0.05–0.10 below the
+        recorder's baseline."""
+        try:
+            engine = getattr(self, "engine", None)
+            detector = getattr(engine, "detector", None) if engine is not None else None
+            runtime = getattr(detector, "runtime", None) if detector is not None else None
+            backend = getattr(runtime, "backend", "") if runtime is not None else ""
+            model_complexity = int(getattr(detector, "model_complexity", 1)) if detector is not None else 1
+        except Exception:
+            return False
+        if backend not in ("mediapipe-cpu", "mediapipe-tasks-gpu", "onnx-directml"):
+            return False
+        if model_complexity != 1:
+            return False
+        return True
+
+    @staticmethod
+    def _build_engine_hands_for_runner(result) -> list:
+        """Collect (landmarks, handedness) tuples from the engine's
+        per-frame result so the runner can classify without running its
+        own MediaPipe pass. Returns an empty list when no hands were
+        detected, in which case the caller should send hand_lost()
+        instead."""
+        out: list = []
+        primary = getattr(result, "tracked_hand", None)
+        if primary is not None and getattr(primary, "landmarks", None) is not None:
+            out.append((
+                primary.landmarks,
+                getattr(primary, "handedness", None) or None,
+            ))
+        secondary = getattr(result, "secondary_tracked_hand", None)
+        if secondary is not None and getattr(secondary, "landmarks", None) is not None:
+            out.append((
+                secondary.landmarks,
+                getattr(secondary, "handedness", None) or None,
+            ))
+        return out
+
+    def _custom_runner_binding_resolver(self, gesture_name: str) -> bool:
+        """Called by CustomGestureRunner just before fire_once on the
+        firing edge. If the user has remapped this custom gesture to a
+        non-default action, dispatch that action and return True so the
+        runner skips its own fire. Return False to let the runner fire
+        the gesture's stored action (default behavior)."""
+        if not gesture_name:
+            return False
+        pose_id = f"custom:{gesture_name}"
+        try:
+            bound_action_id = action_bound_to_pose(self.config, pose_id)
+        except Exception:
+            return False
+        if bound_action_id is None:
+            return False
+        if bound_action_id == f"custom_action:{gesture_name}":
+            return False  # default — runner fires stored action
+        try:
+            return bool(self._dispatch_action(bound_action_id, time.monotonic()))
+        except Exception:
+            return False
+
     def _handle_app_controls(self, prediction, hand_reading, hand_handedness: str | None, now: float) -> None:
         if self._tutorial_mode_enabled:
             self._handle_tutorial_controls(prediction, hand_reading, hand_handedness, now)
             return
+
+        # Apply the user's Gesture Binds remap before any handler reads
+        # prediction.stable_label. If the bound action is custom, this
+        # also fires it via _dispatch_action. See the helper docstring.
+        prediction = self._apply_gesture_binding_remap(prediction, hand_handedness, now)
 
         # When a save-location prompt is awaiting input, give the left-hand voice handler
         # a chance to run before any mode-specific branch returns early. This keeps the
@@ -5688,6 +6092,10 @@ class GestureWorker(QObject):
         return " ".join(words)
 
     def _handle_left_hand_voice(self, prediction, now: float) -> None:
+        # Apply Gesture Binds remap for the left hand. Same semantics
+        # as the right-hand call site in _handle_app_controls — see the
+        # helper docstring for why this is the chokepoint.
+        prediction = self._apply_gesture_binding_remap(prediction, "Left", now)
         stable_label = prediction.stable_label
         trigger_labels = {"one", "two"}
 

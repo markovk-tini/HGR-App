@@ -1,19 +1,30 @@
 """Live runner for custom gestures inside the running gesture engine.
 
 Owns a GestureClassifier + per-frame hold/cooldown state machine. The
-running GestureWorker calls process(landmarks_21x3, now) every frame
-the user has a tracked hand; the runner deals with classification,
+running GestureWorker calls process_frame(frame_bgr, now) every frame
+that has a camera image; the runner runs its OWN MediaPipe pass to
+extract hand landmarks, classifies them, and handles
 hold-to-activate, grace-window flicker tolerance, and cooldown via
 action.fire_once.
 
-This is the glue that makes a saved custom gesture actually fire its
-action while the main app is running. Until this is wired in, custom
-gestures only work in the standalone trainer / sandbox.
+Why a private MediaPipe pass: the live engine may be using an ONNX
+DirectML hand-landmark model (GPU mode), whose landmark coordinates
+drift slightly from raw MediaPipe — enough to push classifier scores
+~0.10–0.15 below their MediaPipe-trained baseline. Running our own
+MediaPipe instance for custom gestures keeps the recognition path
+identical to the recorder/sandbox so the live experience matches
+exactly what the user sees while testing.
+
+CPU cost: ~5–10 ms/frame at 30 fps. The MediaPipe Hands model is
+loaded LAZILY on the first frame, and only when the registry has
+at least one custom gesture, so there's zero overhead for users who
+haven't recorded anything.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
+import cv2
 import numpy as np
 
 from .action import fire_once
@@ -41,6 +52,7 @@ class CustomGestureRunner:
         *,
         default_hold_seconds: float = _DEFAULT_HOLD_SECONDS,
         grace_seconds: float = _DEFAULT_GRACE_SECONDS,
+        binding_resolver=None,
     ) -> None:
         self._registry = GestureRegistry()
         self._classifier: Optional[GestureClassifier] = None
@@ -50,12 +62,38 @@ class CustomGestureRunner:
         self._fired_for_hold = False
         self._default_hold = float(default_hold_seconds)
         self._grace = float(grace_seconds)
+        # Optional callback consulted on the firing edge. Signature:
+        #   binding_resolver(gesture_name: str) -> bool
+        # Returns True if the engine fired a user-remapped action for this
+        # gesture (so the runner skips fire_once on its stored action and
+        # marks the hold as fired). Returns False to let the runner fire
+        # the gesture's stored action as usual. Decoupled from the engine
+        # via callback so the runner stays pure (no engine import).
+        self._binding_resolver = binding_resolver
+        # Idle-throttle: when no candidate is being held, only run the
+        # classifier at ~20 Hz (50 ms intervals) instead of every frame.
+        # Custom gestures need ~1 s of hold to fire, so a 50 ms sampling
+        # interval is plenty for hold detection while halving the
+        # classifier cost when the user isn't actually holding a gesture.
+        # When a hold IS in progress, sample every frame for responsive
+        # release detection.
+        self._idle_sample_interval_s = 0.05
+        self._last_classify_at: float = 0.0
         # Registry file mtime tracking — used by maybe_reload_if_changed()
         # so the live runner picks up gestures saved by the recorder /
         # sandbox / wizard without depending on every save path
         # explicitly calling worker.reload_custom_gestures().
         self._registry_mtime: float = 0.0
         self._last_mtime_check_at: float = 0.0
+        # Throttled per-frame diagnostic — one print every 2 s so the
+        # log isn't flooded but the user can SEE why their custom
+        # gesture isn't firing (no match? wrong hand? score below
+        # threshold?). Set HGR_CUSTOM_GESTURES_DEBUG=0 to silence.
+        self._last_debug_log_at: float = 0.0
+        import os
+        self._debug_enabled: bool = os.environ.get(
+            "HGR_CUSTOM_GESTURES_DEBUG", "1"
+        ).strip() not in ("0", "false", "False", "")
         self.reload()
         self._registry_mtime = self._read_registry_mtime()
 
@@ -88,15 +126,54 @@ class CustomGestureRunner:
             return False
         return bool(self._classifier._gestures)  # internal, but cheap to peek
 
+    @property
+    def current_match(self) -> Optional[Tuple[str, Optional[str]]]:
+        """If a gesture is currently being classified / held this
+        frame, return (name, handedness). Used by the live overlay so
+        the custom gesture's name appears over the hand banner — same
+        affordance built-in gestures get. Returns None when no match
+        is active. `handedness` may be None for legacy/either-hand
+        gestures.
+        """
+        if self._hold_name is None:
+            return None
+        gh: Optional[str] = None
+        if self._registry is not None:
+            try:
+                g = self._registry.get(self._hold_name)
+                if g is not None:
+                    gh = g.handedness
+            except Exception:
+                gh = None
+        return (self._hold_name, gh)
+
     def reload(self) -> None:
         """Re-read the registry from disk and rebuild the classifier.
         Call this after the user adds / edits / deletes a gesture so
         the live pipeline picks up changes without restarting the app.
+
+        Uses the classifier's default threshold — process_frame() runs
+        its own MediaPipe pass to keep landmark distribution identical
+        to the recorder, so live scores match what the sandbox shows.
+        Override via HGR_CUSTOM_GESTURES_LIVE_THRESHOLD env var if
+        needed.
         """
+        import os
+        env_threshold = os.environ.get("HGR_CUSTOM_GESTURES_LIVE_THRESHOLD", "").strip()
+        # Default 0.78 (vs sandbox's 0.88) — real-time live frames have
+        # more landmark jitter than recorded samples, and complex poses
+        # like 'index slightly curled + middle extended + pinky half'
+        # often score in the 0.78–0.85 range even with MediaPipe in
+        # both pipelines. The classifier's confidence-margin check
+        # (0.05) still gates false positives between similar gestures.
+        try:
+            threshold = float(env_threshold) if env_threshold else 0.78
+        except (TypeError, ValueError):
+            threshold = 0.78
         try:
             self._registry = GestureRegistry()
             self._registry.load()
-            classifier = GestureClassifier(self._registry)
+            classifier = GestureClassifier(self._registry, threshold=threshold)
             classifier.reload()
             self._classifier = classifier
         except Exception:
@@ -105,6 +182,155 @@ class CustomGestureRunner:
         # the reload doesn't fire post-reload.
         self._hold_name = None
         self._fired_for_hold = False
+
+    def _ensure_mediapipe(self) -> None:
+        """Lazy-init a private MediaPipe Hands instance. Only runs the
+        first time process_frame() is called WITH gestures registered —
+        zero overhead for users who haven't recorded any."""
+        if getattr(self, "_mp_hands", None) is not None:
+            return
+        try:
+            import mediapipe as mp  # heavy import; deferred to first use
+            self._mp_hands = mp.solutions.hands.Hands(
+                static_image_mode=False,
+                max_num_hands=2,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+        except Exception as exc:
+            print(f"[custom-gestures] MediaPipe init failed: {exc}")
+            self._mp_hands = None
+
+    def _should_skip_classify(self, now: float) -> bool:
+        """Return True if this frame's classifier work can be skipped
+        for throttling. Active only when no hold is in progress —
+        once a candidate gesture is being held, every frame is
+        classified so release detection stays snappy."""
+        if self._hold_name is not None:
+            return False
+        if (now - self._last_classify_at) < self._idle_sample_interval_s:
+            return True
+        return False
+
+    def process_engine_hands(
+        self,
+        hands: list,
+        now: float,
+    ) -> Optional[str]:
+        """Classify using already-extracted hand landmarks from the live
+        engine's hand-tracking pipeline. Skips the runner's private
+        MediaPipe pass entirely — saves ~5–10 ms/frame.
+
+        `hands` is a list of (landmarks_21x3, handedness_or_None) tuples,
+        in arbitrary order. Same hand-picking logic as process_frame:
+        if a gesture is currently being held, prefer the hand whose
+        label matches the held gesture's stored handedness.
+
+        Caller is responsible for ensuring the landmarks are
+        MediaPipe-compatible — i.e., produced by a MediaPipe runtime
+        with the same model_complexity the recorder used (default 1).
+        ONNX/DirectML landmarks drift enough from MediaPipe to push
+        classifier scores 0.10–0.15 below their trained baseline; in
+        that case use process_frame() instead so the private MediaPipe
+        pass keeps the landmark distribution consistent."""
+        if self._classifier is None or not self.has_gestures:
+            return None
+        if not hands:
+            self.hand_lost(now)
+            return None
+        if self._should_skip_classify(now):
+            return None
+        self._last_classify_at = now
+
+        pick: Optional[Tuple[np.ndarray, Optional[str]]] = None
+        if self._hold_name is not None and self._registry is not None:
+            held_g = self._registry.get(self._hold_name)
+            desired = held_g.handedness if held_g is not None else None
+            if desired in ("Left", "Right"):
+                for lm, lab in hands:
+                    if lab == desired:
+                        pick = (lm, lab)
+                        break
+        if pick is None:
+            pick = hands[0]
+
+        return self.process(pick[0], now, handedness=pick[1])
+
+    def process_frame(self, frame_bgr: np.ndarray, now: float) -> Optional[str]:
+        """Run a private MediaPipe pass on the camera frame to extract
+        hand landmarks, then classify + advance hold state. Returns the
+        name of the gesture whose action just fired this frame, or None.
+
+        Bypasses the live engine's hand-landmark runtime (which may be
+        ONNX in GPU mode), so live recognition uses the same MediaPipe
+        landmark distribution the user trained against.
+        """
+        if self._classifier is None or not self.has_gestures:
+            return None
+        if frame_bgr is None:
+            self.hand_lost(now)
+            return None
+        if self._should_skip_classify(now):
+            # Skip both MediaPipe AND classify — they're both wasted
+            # work on this frame. The throttle bound preserves snappy
+            # hold detection while reclaiming the ~5–10 ms MediaPipe
+            # pass on the half of the frames it would have run.
+            return None
+        self._last_classify_at = now
+        self._ensure_mediapipe()
+        if self._mp_hands is None:
+            self.hand_lost(now)
+            return None
+
+        try:
+            # The frame coming into _on_engine_result is ALREADY
+            # cv2.flip'd by noop_engine before the engine runs (so
+            # MP labels are user-perspective). Don't flip again — that
+            # would swap Left and Right back to camera-perspective.
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            result = self._mp_hands.process(rgb)
+        except Exception as exc:
+            self._maybe_debug(now, f"MediaPipe process error: {exc}")
+            return None
+
+        if not result.multi_hand_landmarks:
+            self.hand_lost(now)
+            self._maybe_debug(now, "no hand detected (MP)")
+            return None
+
+        # Build (landmarks, label) for each detected hand.
+        hands: list[Tuple[np.ndarray, Optional[str]]] = []
+        for i, hand_landmarks in enumerate(result.multi_hand_landmarks):
+            label: Optional[str] = None
+            try:
+                if result.multi_handedness and i < len(result.multi_handedness):
+                    raw = str(result.multi_handedness[i].classification[0].label)
+                    label = raw if raw in ("Left", "Right") else None
+            except Exception:
+                pass
+            lm = np.array(
+                [[p.x, p.y, p.z] for p in hand_landmarks.landmark],
+                dtype=np.float32,
+            )
+            hands.append((lm, label))
+
+        # Pick which hand to feed the runner this frame. If we're
+        # already holding a gesture, prefer the hand whose label
+        # matches the held gesture's stored handedness so the timer
+        # doesn't reset when the OTHER hand also enters frame.
+        pick: Optional[Tuple[np.ndarray, Optional[str]]] = None
+        if self._hold_name is not None and self._registry is not None:
+            held_g = self._registry.get(self._hold_name)
+            desired = held_g.handedness if held_g is not None else None
+            if desired in ("Left", "Right"):
+                for lm, lab in hands:
+                    if lab == desired:
+                        pick = (lm, lab)
+                        break
+        if pick is None:
+            pick = hands[0]
+
+        return self.process(pick[0], now, handedness=pick[1])
 
     @staticmethod
     def _hold_seconds_for(gesture: CustomGesture, default: float) -> float:
@@ -129,6 +355,17 @@ class CustomGestureRunner:
             self._hold_name = None
             self._fired_for_hold = False
 
+    def _maybe_debug(self, now: float, *parts: object) -> None:
+        """Print at most one diagnostic line every 2 s. Caller passes
+        the live state as positional args for 'live=...' / 'score=...'
+        formatting. Silenced via HGR_CUSTOM_GESTURES_DEBUG=0."""
+        if not self._debug_enabled:
+            return
+        if now - self._last_debug_log_at < 2.0:
+            return
+        self._last_debug_log_at = now
+        print("[custom-gestures]", *parts)
+
     def process(
         self,
         landmarks_21x3: np.ndarray,
@@ -145,6 +382,7 @@ class CustomGestureRunner:
         None — legacy gestures fire on any hand).
         """
         if self._classifier is None:
+            self._maybe_debug(now, "no classifier (registry empty?)")
             return None
         if landmarks_21x3 is None:
             self.hand_lost(now)
@@ -153,11 +391,28 @@ class CustomGestureRunner:
             match = self._classifier.classify(
                 landmarks_21x3, sticky_name=self._hold_name
             )
-        except Exception:
+        except Exception as exc:
+            self._maybe_debug(now, f"classify error: {exc}")
             return None
 
         if match is None:
             self.hand_lost(now)
+            # Diagnostic best-score lookup is gated on (1) debug being
+            # enabled at all and (2) the 2-second throttle being clear,
+            # because best_score_for() runs a full classifier pass — at
+            # 30 FPS with a hand in frame it was burning ~3-5 ms/frame
+            # on numpy work that nobody saw most of the time.
+            should_log = self._debug_enabled and (now - self._last_debug_log_at >= 2.0)
+            if should_log:
+                try:
+                    top_name, top_score = self._classifier.best_score_for(landmarks_21x3)
+                except Exception:
+                    top_name, top_score = (None, 0.0)
+                self._maybe_debug(
+                    now,
+                    f"hand={handedness} no match — best={top_name!r} "
+                    f"score={top_score:.2f} (threshold {self._classifier.threshold:.2f})",
+                )
             return None
 
         # Handedness gate. Both sides None = legacy/either-hand → allow.
@@ -171,6 +426,11 @@ class CustomGestureRunner:
             and gesture_hand != handedness
         ):
             self.hand_lost(now)
+            self._maybe_debug(
+                now,
+                f"matched {match.gesture.name!r} score={match.score:.2f} "
+                f"but live hand is {handedness!r} — gesture is bound to {gesture_hand!r}",
+            )
             return None
 
         self._last_match_at = now
@@ -181,8 +441,45 @@ class CustomGestureRunner:
 
         held = now - self._hold_started_at
         hold_duration = self._hold_seconds_for(match.gesture, self._default_hold)
+        self._maybe_debug(
+            now,
+            f"matched {match.gesture.name!r} score={match.score:.2f} "
+            f"hand={handedness} held={held:.2f}s/{hold_duration:.2f}s "
+            f"fired={self._fired_for_hold}",
+        )
         if not self._fired_for_hold and held >= hold_duration:
+            # Binding-resolver path: if the user has remapped this custom
+            # gesture to fire a different action via Settings → Gesture
+            # Binds, the engine handles the dispatch and we suppress the
+            # runner's own fire_once. We still mark the hold as fired so
+            # we don't re-trigger every frame for the rest of the hold.
+            if self._binding_resolver is not None:
+                try:
+                    handled = bool(self._binding_resolver(match.gesture.name))
+                except Exception as exc:
+                    handled = False
+                    print(
+                        f"[custom-gestures] binding_resolver error for "
+                        f"{match.gesture.name!r}: {exc}"
+                    )
+                if handled:
+                    self._fired_for_hold = True
+                    print(
+                        f"[custom-gestures] FIRED-REMAPPED {match.gesture.name!r} "
+                        f"(score={match.score:.2f}, hand={handedness})"
+                    )
+                    return match.gesture.name
             if fire_once(match.gesture.name, match.gesture.action):
                 self._fired_for_hold = True
+                print(
+                    f"[custom-gestures] FIRED {match.gesture.name!r} "
+                    f"(score={match.score:.2f}, hand={handedness})"
+                )
                 return match.gesture.name
+            else:
+                self._maybe_debug(
+                    now,
+                    f"hold complete for {match.gesture.name!r} but fire_once "
+                    f"returned False (cooldown still active or action failed)",
+                )
         return None
