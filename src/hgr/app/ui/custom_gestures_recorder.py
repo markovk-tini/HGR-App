@@ -26,7 +26,7 @@ import mediapipe as mp
 import numpy as np
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -234,25 +234,45 @@ class RecordingWindow(QDialog):
 
         self._exit_button = QPushButton("Exit")
         self._exit_button.clicked.connect(self.reject)
+        # Drop focus on the Exit / Restart / Save buttons so a press
+        # of Space-as-shortcut doesn't first fire whichever button
+        # happens to have keyboard focus (Exit is the natural first
+        # tab target, and pressing Space on a focused QPushButton
+        # activates it via Qt's default keyboard click handling).
+        self._exit_button.setFocusPolicy(Qt.NoFocus)
         button_row.addWidget(self._exit_button)
 
         self._restart_button = QPushButton("Restart")
         self._restart_button.clicked.connect(self._on_restart)
+        self._restart_button.setFocusPolicy(Qt.NoFocus)
         self._restart_button.hide()
         button_row.addWidget(self._restart_button)
 
         self._begin_button = QPushButton("Begin Recording")
         self._begin_button.setObjectName("beginBtn")
         self._begin_button.clicked.connect(self._on_begin_recording)
+        self._begin_button.setFocusPolicy(Qt.NoFocus)
         button_row.addWidget(self._begin_button)
 
         self._save_button = QPushButton("Save")
         self._save_button.setObjectName("saveBtn")
         self._save_button.clicked.connect(self._on_save)
+        self._save_button.setFocusPolicy(Qt.NoFocus)
         self._save_button.hide()
         button_row.addWidget(self._save_button)
 
         root.addLayout(button_row)
+
+        # Window-scoped Space shortcut that fires regardless of which
+        # widget currently has focus inside the dialog. The earlier
+        # keyPressEvent override didn't fire when a button (e.g.,
+        # Exit) had focus, because Qt's default handler activates the
+        # focused button on Space before the dialog's keyPressEvent
+        # runs. The shortcut sits above per-widget handling, so it
+        # always reaches our handler first.
+        self._space_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self._space_shortcut.setContext(Qt.WindowShortcut)
+        self._space_shortcut.activated.connect(self._on_space_pressed)
 
     # --- worker connection ----------------------------------------------
 
@@ -662,10 +682,11 @@ class RecordingWindow(QDialog):
     @staticmethod
     def _crop_hand_thumbnail(frame_bgr: np.ndarray, landmarks: np.ndarray) -> Optional[np.ndarray]:
         """Crop a clean hand-centered thumbnail from a BGR frame using
-        the MediaPipe landmarks as a guide. Bbox is expanded to 2× the
-        natural hand bounds so there's breathing room around the pose
-        — matches what the user expects to see when picking which
-        snapshot represents the gesture."""
+        the MediaPipe landmarks as a guide. Bbox is expanded slightly
+        beyond the natural hand bounds (1.4× side length) — tight
+        enough that the hand fills the frame, loose enough that
+        fingertips at the edge of the bbox don't get clipped by
+        per-frame landmark jitter."""
         try:
             h, w = frame_bgr.shape[:2]
         except Exception:
@@ -683,10 +704,11 @@ class RecordingWindow(QDialog):
             return None
         cx = (x_min + x_max) * 0.5
         cy = (y_min + y_max) * 0.5
-        # 2× expansion: keep the side length proportional to the larger
-        # of width/height so a horizontal hand and a vertical hand both
-        # get sensible square crops.
-        side = max(x_max - x_min, y_max - y_min) * 2.0
+        # 1.4× expansion: keep the side length proportional to the
+        # larger of width/height so a horizontal hand and a vertical
+        # hand both get sensible square crops, but tighter than the
+        # original 2× so the hand actually fills the thumbnail.
+        side = max(x_max - x_min, y_max - y_min) * 1.4
         if side < 40:
             return None
         half = side * 0.5
@@ -984,24 +1006,18 @@ class RecordingWindow(QDialog):
 
     # --- close handler --------------------------------------------------
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt API name)
-        # Spacebar = "Begin Recording" shortcut. Only fires when we're
-        # in the idle state and the begin button is enabled — avoids
-        # restarting mid-recording or during the post-recording save
-        # flow. Falls through to the dialog's normal handler for any
-        # other key so tab navigation, Esc-to-close, etc. still work.
-        if (
-            event is not None
-            and event.key() == Qt.Key_Space
-            and self._state == "idle"
-            and getattr(self, "_begin_button", None) is not None
-            and self._begin_button.isVisible()
-            and self._begin_button.isEnabled()
-        ):
-            self._on_begin_recording()
-            event.accept()
+    def _on_space_pressed(self) -> None:
+        """Fired by the dialog-scoped Space QShortcut. Starts recording
+        only when we're in the idle state with the Begin button
+        visible + enabled. No-op during a recording in progress or
+        the post-recording save flow so the shortcut can't restart
+        from the wrong state."""
+        if self._state != "idle":
             return
-        super().keyPressEvent(event)
+        begin = getattr(self, "_begin_button", None)
+        if begin is None or not begin.isVisible() or not begin.isEnabled():
+            return
+        self._on_begin_recording()
 
     def closeEvent(self, event) -> None:
         self._disconnect_worker()

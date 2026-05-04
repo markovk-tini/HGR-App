@@ -4775,22 +4775,8 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(14, 14, 14, 14)
         h.setSpacing(14)
 
-        # Image (or placeholder for custom gestures).
-        image_box = QLabel()
-        image_box.setAlignment(Qt.AlignCenter)
-        image_box.setFixedSize(160, 160)
-        image_box.setStyleSheet("background: rgba(10, 28, 39, 0.72); border-radius: 10px; color: rgba(229, 246, 255, 0.55);")
-        media_path = self._resolve_gesture_pose_image(image_filename) if image_filename else None
-        if media_path is not None:
-            pix = QPixmap(str(media_path))
-            if not pix.isNull():
-                image_box.setPixmap(pix.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                image_box.setText("(no image)")
-        else:
-            image_box.setText("Custom\ngesture")
-        h.addWidget(image_box, 0, Qt.AlignTop)
-
+        # Text on the LEFT, image on the RIGHT (per design: description
+        # reads first, image is the visual anchor on the right).
         text_layout = QVBoxLayout()
         text_layout.setSpacing(8)
         title_lbl = QLabel(label)
@@ -4803,6 +4789,33 @@ class MainWindow(QMainWindow):
         text_layout.addWidget(body_lbl)
         text_layout.addStretch(1)
         h.addLayout(text_layout, 1)
+
+        # Image box on the right. Slightly larger than before since it
+        # has the visual focus now. Falls back to a friendly placeholder
+        # when the gesture has no thumbnail yet (skipped picker, legacy
+        # gesture from before the picker existed, or registry can't
+        # resolve the file).
+        image_box = QLabel()
+        image_box.setAlignment(Qt.AlignCenter)
+        image_box.setFixedSize(180, 180)
+        image_box.setStyleSheet(
+            "background: rgba(10, 28, 39, 0.72); border-radius: 10px; "
+            "color: rgba(229, 246, 255, 0.55); font-size: 12px;"
+        )
+        media_path = self._resolve_gesture_pose_image(image_filename) if image_filename else None
+        if media_path is not None:
+            pix = QPixmap(str(media_path))
+            if not pix.isNull():
+                image_box.setPixmap(pix.scaled(180, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                image_box.setText("(image file\nunreadable)")
+        elif image_filename:
+            # The gesture has an image_filename set but we couldn't
+            # resolve it — file may have been deleted or moved.
+            image_box.setText("(image\nmissing)")
+        else:
+            image_box.setText("No image\nsaved")
+        h.addWidget(image_box, 0, Qt.AlignTop)
 
         # Position near the cursor without clipping off-screen.
         cursor_pos = QCursor.pos()

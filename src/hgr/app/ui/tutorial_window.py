@@ -230,7 +230,7 @@ class MousePracticeWidget(QWidget):
     def set_mode_enabled(self, enabled: bool) -> None:
         self._mode_enabled = bool(enabled)
         if self.completed:
-            self._status_text = "Nice work. Mouse mode is ready to use."
+            self._status_text = "Nice work!"
         elif self._mode_enabled:
             self._status_text = "Move the cursor and left-click each target in order."
         else:
@@ -248,7 +248,7 @@ class MousePracticeWidget(QWidget):
         if math.hypot(position[0] - target[0], position[1] - target[1]) <= 0.12:
             self._active_index += 1
             if self.completed:
-                self._status_text = "Nice work. Mouse mode is ready to use."
+                self._status_text = "Nice work!"
             else:
                 self._status_text = "Great. Keep clicking the highlighted target."
             self.update()
@@ -1124,7 +1124,7 @@ class TutorialWindow(QDialog):
             header_map = {
                 "spotify_open": "Open Spotify with right-hand two!",
                 "play_pause": "Play/pause with right-hand fist!",
-                "voice_command": "Hold left-hand one, then say the command.",
+                "voice_command": "Hold left-hand one to activate voice listening, then say: “Open YouTube on Google Chrome”.",
             }
             self._set_camera_step_labels(
                 header=header_map.get(step.key, step.description),
@@ -1324,8 +1324,27 @@ class TutorialWindow(QDialog):
             self.completion_check_label.hide()
             self.completion_text_label.hide()
             return
-        self.completion_check_label.setStyleSheet("color: rgb(29, 233, 182); font-size: 52px; font-weight: 900;")
-        self.completion_text_label.setStyleSheet("color: rgb(29, 233, 182); font-size: 18px; font-weight: 800;")
+        # The mouse-mode step keeps the practice widget visible (target
+        # dots) below the check, so its check has to stay compact.
+        # Every other step has empty space below — let the check fill
+        # it for a clearer "you're done" signal. Bigger check + bigger
+        # text only on non-mouse steps.
+        try:
+            step_key = self._practice_steps[self._step_index].key
+        except Exception:
+            step_key = ""
+        if step_key == "mouse_mode":
+            check_px = 52
+            text_px = 18
+        else:
+            check_px = 200
+            text_px = 28
+        self.completion_check_label.setStyleSheet(
+            f"color: rgb(29, 233, 182); font-size: {check_px}px; font-weight: 900;"
+        )
+        self.completion_text_label.setStyleSheet(
+            f"color: rgb(29, 233, 182); font-size: {text_px}px; font-weight: 800;"
+        )
         self.completion_check_label.show()
         self.completion_text_label.show()
 
@@ -1436,13 +1455,20 @@ class TutorialWindow(QDialog):
             py = int(pts[index][1] * height)
             cv2.circle(frame, (px, py), 5, color, -1, cv2.LINE_AA)
 
-    def _draw_demo_hand(self, frame, center, pose, *, scale=1.0, tilt_deg=0.0, color=(255,255,255)) -> None:
+    def _draw_demo_hand(self, frame, center, pose, *, scale=1.0, tilt_deg=0.0, color=(255,255,255), mirror=False) -> None:
         cx, cy = center
         theta = math.radians(tilt_deg)
         rot = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]], dtype=np.float32)
+        # mirror=True flips the hand horizontally so a "right hand"
+        # template renders as a left hand (thumb on the right side
+        # instead of the left). Used by left-hand poses like the
+        # voice-command 'one' so the skeleton matches the hand the
+        # user is actually supposed to use.
+        mirror_sign = -1.0 if mirror else 1.0
 
         def tr(pt):
-            xy = (rot @ (np.array(pt, dtype=np.float32) * float(scale))).astype(np.float32)
+            x, y = float(pt[0]) * mirror_sign, float(pt[1])
+            xy = (rot @ (np.array([x, y], dtype=np.float32) * float(scale))).astype(np.float32)
             return int(round(cx + xy[0])), int(round(cy + xy[1]))
 
         open_map = {
@@ -1576,7 +1602,11 @@ class TutorialWindow(QDialog):
             else:
                 self._draw_demo_hand(frame, main_center, "left_three", scale=0.96, color=white)
         elif step_key == "voice_command":
-            self._draw_demo_hand(frame, main_center, "one", scale=1.00, color=white)
+            # Voice listener is bound to LEFT-hand 'one'. Mirror the
+            # right-hand skeleton template so the demo hand visually
+            # matches the user's actual left hand (thumb on the right
+            # side of the silhouette, palm to camera).
+            self._draw_demo_hand(frame, main_center, "one", scale=1.00, color=white, mirror=True)
             cv2.putText(frame, "Voice", (int(width * 0.46), int(height * 0.50)), cv2.FONT_HERSHEY_SIMPLEX, 0.88, accent, 2, cv2.LINE_AA)
     def _drain_voice_queue(self) -> None:
         while True:
@@ -1795,7 +1825,10 @@ class TutorialWindow(QDialog):
             if hold_fired:
                 visual_ready = True
                 self._complete_step("Completed! Swipe right to move on!")
-            self._set_step_progress("Detected right hand two!" if active else "waiting for right-hand two")
+            if self._step_completed:
+                self._set_step_progress("Detected right-hand two! Swipe right to move on.")
+            else:
+                self._set_step_progress("Detected right-hand two!" if active else "Waiting for right-hand two.")
             return visual_ready
 
         if step.key == "play_pause":
@@ -1828,9 +1861,12 @@ class TutorialWindow(QDialog):
             wheel_visible = bool(payload.get("wheel_visible"))
             self._flash_on_edge("gesture_wheel", active, now)
             visual_ready = now < self._visual_green_until.get("gesture_wheel", 0.0)
-            self._set_step_progress(
-                "Gesture wheel detected!" if (active or wheel_visible) else "Waiting for gesture wheel pose."
-            )
+            if self._step_completed:
+                self._set_step_progress("Wheel pose detected! Swipe right to move on.")
+            else:
+                self._set_step_progress(
+                    "Wheel pose detected!" if (active or wheel_visible) else "Waiting for wheel pose."
+                )
             if active and not self._step_completed:
                 self._visual_green_until["gesture_wheel"] = max(self._visual_green_until.get("gesture_wheel", 0.0), now + self._gesture_flash_seconds)
                 visual_ready = True
@@ -1960,10 +1996,13 @@ class TutorialWindow(QDialog):
         if step.key == "spotify_open":
             active = bool(result.found and result.tracked_hand is not None and str(result.tracked_hand.handedness or "").lower() == "right" and result.prediction.stable_label == "two")
             visual_ready = now < self._visual_green_until.get("spotify_open", 0.0)
-            self._set_step_progress("Detected right-hand two!" if active else "Waiting for right-hand two.")
             if self._hold_ready("spotify_open", active, self._spotify_open_hold_seconds, now, cooldown=self._spotify_static_cooldown_seconds):
                 self._complete_step("Completed! Swipe right to move on!")
                 visual_ready = True
+            if self._step_completed:
+                self._set_step_progress("Detected right-hand two! Swipe right to move on.")
+            else:
+                self._set_step_progress("Detected right-hand two!" if active else "Waiting for right-hand two.")
             return visual_ready
 
         if step.key == "play_pause":
@@ -1988,7 +2027,10 @@ class TutorialWindow(QDialog):
                 )
             )
             visual_ready = self._visual_ready("gesture_wheel", active, now, self._wheel_hold_seconds)
-            self._set_step_progress("Wheel pose detected!" if active else "Waiting for wheel pose.")
+            if self._step_completed:
+                self._set_step_progress("Wheel pose detected! Swipe right to move on.")
+            else:
+                self._set_step_progress("Wheel pose detected!" if active else "Waiting for wheel pose.")
             items = (
                 ("add_playlist", "Add Playlist", 90.0),
                 ("remove_playlist", "Remove Playlist", 38.57),

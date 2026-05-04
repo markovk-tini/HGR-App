@@ -60,4 +60,13 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingD
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; Touchless.exe has requireAdministrator in its manifest (uac_admin=True
+; in hgr_app.spec). Inno's default launcher uses CreateProcess which
+; cannot elevate, so the post-install "Launch Touchless" checkbox would
+; fail with error 740 "the requested operation requires elevation". The
+; shellexec flag routes through ShellExecuteEx which honors the manifest
+; and triggers a normal UAC prompt — same as double-clicking the desktop
+; shortcut. runasoriginaluser ensures we elevate from the actual user
+; account that ran the installer (relevant only if the installer ever
+; gets escalated; harmless otherwise).
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent shellexec runasoriginaluser
