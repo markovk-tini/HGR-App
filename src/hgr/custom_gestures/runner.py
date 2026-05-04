@@ -22,6 +22,7 @@ haven't recorded anything.
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional, Tuple
 
 import cv2
@@ -94,6 +95,16 @@ class CustomGestureRunner:
         self._debug_enabled: bool = os.environ.get(
             "HGR_CUSTOM_GESTURES_DEBUG", "1"
         ).strip() not in ("0", "false", "False", "")
+        # Async MediaPipe warm-up state. mp.solutions.hands.Hands()
+        # construction loads the landmark + palm-detect model files
+        # and takes ~1-3 s on first call — historically this ran on
+        # the GUI thread the first time process_frame() saw a hand,
+        # which froze the camera display for the duration. We now
+        # pre-warm in a background thread the moment the runner has
+        # at least one gesture registered. process_frame() handles
+        # _mp_hands is None gracefully (returns None until ready).
+        self._mp_hands = None
+        self._mp_init_in_flight = False
         self.reload()
         self._registry_mtime = self._read_registry_mtime()
 
@@ -182,24 +193,55 @@ class CustomGestureRunner:
         # the reload doesn't fire post-reload.
         self._hold_name = None
         self._fired_for_hold = False
+        # Kick off the async MediaPipe warm-up now that we know
+        # whether the registry has any gestures to classify.
+        self._warm_mediapipe_async()
+
+    def _warm_mediapipe_async(self) -> None:
+        """Construct the private MediaPipe Hands instance on a
+        background thread so the first hand-in-frame after a gesture
+        is added doesn't pay the 1-3 s model-load cost on the main
+        thread. Idempotent — repeated calls are no-ops while a load
+        is in flight or already complete."""
+        if self._mp_hands is not None or self._mp_init_in_flight:
+            return
+        if not self.has_gestures:
+            return
+        self._mp_init_in_flight = True
+
+        def _runner() -> None:
+            try:
+                import mediapipe as mp  # heavy import; deferred to bg thread
+                instance = mp.solutions.hands.Hands(
+                    static_image_mode=False,
+                    max_num_hands=2,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+                # Publish the ready instance with a single attribute
+                # write — process_frame() reads _mp_hands without a
+                # lock, so the GIL guarantees it sees either the old
+                # None or the fully-constructed object, never a
+                # partially-initialised one.
+                self._mp_hands = instance
+            except Exception as exc:
+                print(f"[custom-gestures] MediaPipe init failed: {exc}")
+                self._mp_hands = None
+            finally:
+                self._mp_init_in_flight = False
+
+        threading.Thread(
+            target=_runner,
+            name="custom-gestures-mp-init",
+            daemon=True,
+        ).start()
 
     def _ensure_mediapipe(self) -> None:
-        """Lazy-init a private MediaPipe Hands instance. Only runs the
-        first time process_frame() is called WITH gestures registered —
-        zero overhead for users who haven't recorded any."""
-        if getattr(self, "_mp_hands", None) is not None:
-            return
-        try:
-            import mediapipe as mp  # heavy import; deferred to first use
-            self._mp_hands = mp.solutions.hands.Hands(
-                static_image_mode=False,
-                max_num_hands=2,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
-        except Exception as exc:
-            print(f"[custom-gestures] MediaPipe init failed: {exc}")
-            self._mp_hands = None
+        """Lazy fallback for paths that didn't go through reload() —
+        kicks the same async warm-up. Returns immediately; the
+        caller (process_frame) checks _mp_hands and bails when it
+        is still None."""
+        self._warm_mediapipe_async()
 
     def _should_skip_classify(self, now: float) -> bool:
         """Return True if this frame's classifier work can be skipped

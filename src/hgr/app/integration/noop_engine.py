@@ -579,6 +579,14 @@ class GestureWorker(QObject):
         self._chrome_active_cache_until = 0.0
         self._spotify_active_cache = False
         self._spotify_active_cache_until = 0.0
+        # Stale-while-revalidate flag for the wheel-active probe.
+        # is_active_for_wheel() can fall through to a Spotify Web API
+        # call when the desktop window isn't visible yet (Spotify is
+        # still launching), and that HTTP call can block up to 5 s.
+        # Running it on the worker thread froze the camera display
+        # for the duration of the launch. Now we kick the refresh on
+        # a background thread and return the previous cached value.
+        self._spotify_active_refresh_in_flight = False
         self._chrome_wheel_candidate = "neutral"
         self._chrome_wheel_candidate_since = 0.0
         self._chrome_wheel_visible = False
@@ -5903,13 +5911,39 @@ class GestureWorker(QObject):
     def _spotify_active_for_wheel(self, now: float) -> bool:
         if now < self._spotify_active_cache_until:
             return self._spotify_active_cache
-        if hasattr(self.spotify_controller, "is_active_for_wheel"):
-            active = bool(self.spotify_controller.is_active_for_wheel())
-        else:
-            active = bool(self.spotify_controller.is_active_device_available())
-        self._spotify_active_cache = active
+        # Cache miss. is_active_for_wheel() may HTTP-probe the
+        # Spotify Web API when no desktop window is visible — that
+        # call blocks for up to 5 s while Spotify is still launching.
+        # Run the refresh on a background thread and return the
+        # previous cached value; the bg thread updates the cache and
+        # the next tick reads the fresh result. Push the cache fence
+        # forward so we don't fire a second probe per tick while the
+        # first is still in flight.
         self._spotify_active_cache_until = now + 0.9
-        return active
+        if not self._spotify_active_refresh_in_flight:
+            self._spotify_active_refresh_in_flight = True
+
+            def _refresh() -> None:
+                try:
+                    if hasattr(self.spotify_controller, "is_active_for_wheel"):
+                        active = bool(self.spotify_controller.is_active_for_wheel())
+                    else:
+                        active = bool(self.spotify_controller.is_active_device_available())
+                    self._spotify_active_cache = active
+                except Exception:
+                    pass
+                finally:
+                    self._spotify_active_refresh_in_flight = False
+
+            try:
+                threading.Thread(
+                    target=_refresh,
+                    name="spotify-wheel-active-probe",
+                    daemon=True,
+                ).start()
+            except Exception:
+                self._spotify_active_refresh_in_flight = False
+        return self._spotify_active_cache
 
     def _chrome_wheel_pose_active(self, prediction, now: float) -> bool:
         if prediction is None:
