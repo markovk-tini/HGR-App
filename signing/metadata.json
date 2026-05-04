@@ -1,0 +1,6 @@
+﻿{
+  "Endpoint": "https://eus.codesigning.azure.net/",
+  "CodeSigningAccountName": "touchless-signing",
+  "CertificateProfileName": "touchless-prod",
+  "CorrelationId": "touchless-build"
+}
