@@ -121,3 +121,5 @@ class PhoneCameraCapture:
         self._wait_event.set()
         with self._lock:
             self._frame = None
+
+# Author: Konstantin Markov

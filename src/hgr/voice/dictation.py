@@ -239,3 +239,5 @@ class DictationProcessor:
         rendered = re.sub(r"[ \t]+", " ", rendered)
         rendered = re.sub(r" *\n *", "\n", rendered)
         return rendered
+
+# Author: Konstantin Markov

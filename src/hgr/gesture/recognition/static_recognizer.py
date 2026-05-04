@@ -412,3 +412,5 @@ class StaticGestureRecognizer:
         if best.score < 0.56 or margin < 0.025:
             return "neutral", confidence * 0.60, tuple(ranked[:5]), scores
         return best.label, confidence, tuple(ranked[:5]), scores
+
+# Author: Konstantin Markov

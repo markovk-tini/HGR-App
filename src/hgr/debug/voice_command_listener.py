@@ -1013,3 +1013,5 @@ try {{
 }}
 """
         return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+# Author: Konstantin Markov

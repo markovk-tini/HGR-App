@@ -27,3 +27,5 @@ class ChromeWheelHelperTest(unittest.TestCase):
         self.window._chrome_mode_enabled = True
         prediction = SimpleNamespace(stable_label="wheel_pose", raw_label="wheel_pose", confidence=0.62)
         self.assertTrue(self.window._chrome_wheel_pose_active(prediction, 1.0))
+
+# Author: Konstantin Markov

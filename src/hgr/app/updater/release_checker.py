@@ -429,3 +429,5 @@ class ReleaseHistoryFetcher(QObject):
         self._worker = None
         if thread is not None:
             thread.deleteLater()
+
+# Author: Konstantin Markov

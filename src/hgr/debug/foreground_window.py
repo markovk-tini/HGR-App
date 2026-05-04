@@ -192,3 +192,5 @@ def is_foreground_fullscreen() -> bool:
         )
     except Exception:
         return False
+
+# Author: Konstantin Markov

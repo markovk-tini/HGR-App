@@ -143,3 +143,5 @@ class DynamicGestureTest(unittest.TestCase):
             result = backend.process_landmarks(landmarks, frame, 'Right', timestamp=1.55 + 0.05 * index)
             blocked_scores.append(result.dynamic_candidate_scores.get('swipe_right', 0.0))
         self.assertLess(max(blocked_scores), 0.20)
+
+# Author: Konstantin Markov

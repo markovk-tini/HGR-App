@@ -1105,3 +1105,5 @@ class CaptureRegionOverlay(QWidget):
             painter.drawEllipse(local, 10, 10)
             painter.drawLine(local.x() - 15, local.y(), local.x() + 15, local.y())
             painter.drawLine(local.x(), local.y() - 15, local.x(), local.y() + 15)
+
+# Author: Konstantin Markov

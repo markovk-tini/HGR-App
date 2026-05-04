@@ -178,3 +178,5 @@ def load_config() -> LiveApiConfig:
     )
 
     return cfg
+
+# Author: Konstantin Markov

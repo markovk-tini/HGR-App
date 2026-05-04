@@ -316,3 +316,5 @@ class RealtimeClient:
                 self._on_error(message)
             except Exception as exc:
                 self._logger.exception("on_error_callback_failed", exc)
+
+# Author: Konstantin Markov

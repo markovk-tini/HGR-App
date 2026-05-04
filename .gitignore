@@ -41,6 +41,9 @@ Thumbs.db
 # Logs
 logs/
 *.log
+# Local PyInstaller stdout/stderr captures from builder/windows/build_windows.bat
+build_log.txt
+build_err.txt
 
 # Model weights (downloaded / cached locally; user has a model dir)
 models/

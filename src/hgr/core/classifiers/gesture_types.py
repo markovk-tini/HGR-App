@@ -110,3 +110,5 @@ def clamp01(value: float) -> float:
 
 def closed(score: float) -> float:
     return clamp01(1.0 - score)
+
+# Author: Konstantin Markov

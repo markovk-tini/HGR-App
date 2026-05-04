@@ -297,3 +297,5 @@ class ScreenVolumeOverlay(QWidget):
             return
         clamped = max(0.0, min(1.0, float(level)))
         self._current_fraction = clamped
+
+# Author: Konstantin Markov

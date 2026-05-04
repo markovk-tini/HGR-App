@@ -123,3 +123,5 @@ class DynamicGestureScaffold:
 
     def snapshot(self) -> DynamicMotionState:
         return self._last_state
+
+# Author: Konstantin Markov

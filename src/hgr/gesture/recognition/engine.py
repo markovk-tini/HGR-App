@@ -840,3 +840,5 @@ class GestureRecognitionEngine:
         )
         frame = frame_bgr if frame_bgr is not None else np.zeros((1, 1, 3), dtype=np.uint8)
         return self._analyze_tracked_hand(tracked_hand, frame, timestamp, frame_index)
+
+# Author: Konstantin Markov

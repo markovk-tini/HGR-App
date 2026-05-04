@@ -22,3 +22,5 @@ class StaticGroupBTest(unittest.TestCase):
         prediction = classify_static(features)
         self.assertEqual(prediction.raw_gesture, 'four')
         self.assertGreater(prediction.candidate_scores['four'], prediction.candidate_scores['open_hand'])
+
+# Author: Konstantin Markov

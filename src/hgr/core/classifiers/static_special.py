@@ -76,3 +76,5 @@ def score_special(features: StaticFeatures) -> StaticGestureScores:
         'finger_together': clamp01(0.42 * adjacent_open + 0.58 * close_adjacent),
         'finger_apart': clamp01(0.42 * adjacent_open + 0.58 * wide_adjacent),
     }
+
+# Author: Konstantin Markov

@@ -368,3 +368,5 @@ def _apply_windows_overlay(widget) -> bool:
         return bool(ok)
     except Exception:
         return False
+
+# Author: Konstantin Markov

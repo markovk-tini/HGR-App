@@ -274,3 +274,5 @@ class TouchlessSplash(QWidget):
         window.show()
         window.raise_()
         return window
+
+# Author: Konstantin Markov

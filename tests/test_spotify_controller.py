@@ -225,3 +225,5 @@ class SpotifyControllerTest(unittest.TestCase):
         controller = SpotifyController(env_paths=(), token_paths=(), executable_paths=())
         self.assertFalse(controller.remove_current_track_from_queue())
         self.assertIn("not supported", controller.message)
+
+# Author: Konstantin Markov

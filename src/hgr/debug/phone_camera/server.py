@@ -556,3 +556,5 @@ class PhoneCameraServer:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
                 pass
+
+# Author: Konstantin Markov

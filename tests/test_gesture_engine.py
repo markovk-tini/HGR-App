@@ -416,3 +416,5 @@ class GestureEngineTest(unittest.TestCase):
                 label = result.prediction.dynamic_label
         self.assertEqual(label, "neutral")
         self.assertLess(best, 0.20)
+
+# Author: Konstantin Markov

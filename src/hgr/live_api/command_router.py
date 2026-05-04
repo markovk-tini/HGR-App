@@ -371,3 +371,5 @@ def _humanize_result_message(intent, result, success: bool) -> str:
         if raw_useful:
             return f"Couldn't run that command — {info}"
         return "Couldn't run that command"
+
+# Author: Konstantin Markov

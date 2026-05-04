@@ -381,3 +381,5 @@ def _strip_wrapper_quotes(text: str) -> str:
         else:
             break
     return stripped
+
+# Author: Konstantin Markov

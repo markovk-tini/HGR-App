@@ -70,3 +70,5 @@ if !SIGN_RC! neq 0 (
 
 echo [sign-file] Signed: %TARGET%
 exit /b 0
+
+REM Author: Konstantin Markov

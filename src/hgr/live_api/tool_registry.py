@@ -43,3 +43,5 @@ class ToolRegistry:
 
     def callable_for(self, name: str) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
         return lambda args: self.call(name, args)
+
+# Author: Konstantin Markov

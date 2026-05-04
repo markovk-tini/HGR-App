@@ -1823,3 +1823,5 @@ class VoiceCommandProcessor:
         while tokens and tokens[-1] in EDGE_NOISE_WORDS:
             tokens.pop()
         return " ".join(tokens).strip()
+
+# Author: Konstantin Markov

@@ -375,6 +375,17 @@ class TutorialWindow(QDialog):
             preferred_input_device=getattr(config, "preferred_microphone_name", None),
             input_gain=getattr(config, "mic_input_gain", 1.0),
         )
+        # Phone-mic plumbing: if the user has the phone-as-mic toggle
+        # on AND a paired phone QR server is running on the parent
+        # MainWindow, route its PhoneAudioSource into the tutorial's
+        # voice listener too. Without this, opening the tutorial cold
+        # (before the main app's worker exists) on a phone-only mic
+        # setup left the part-6 voice command listening on a missing
+        # local sounddevice → instant "Command not understood".
+        try:
+            self._wire_phone_mic_to_voice_listener()
+        except Exception:
+            pass
         self._chrome_controller = ChromeController()
         self._spotify_controller = SpotifyController()
         self._voice_processor = VoiceCommandProcessor(
@@ -1216,20 +1227,26 @@ class TutorialWindow(QDialog):
     )
 
     def _check_encouragement_trigger(self, now: float) -> None:
-        """Watch _visual_green_until for newly-pushed entries — those
-        correspond to a gesture just being detected correctly (the hand
-        turning green in the live view). When that happens, queue a
-        random encouragement message to be drawn ON the camera frame
-        for 1.5 s. Throttled to one per second so a triple-swipe
-        doesn't stack three popups."""
-        triggered = False
+        """No-op kept for backwards compatibility. The encouragement
+        popup was previously fired on every newly-pushed
+        _visual_green_until edge (which fires whenever the hand turns
+        green for ANY reason — including detection-only flashes that
+        don't actually trigger an action). The popup now fires from
+        explicit `_trigger_encouragement(now)` calls placed at the
+        actual action-completion sites: each individual swipe count
+        bump, each play/pause toggle, each step completion, etc."""
+        # Keep _last_seen_green_until in sync so we don't burst a flood
+        # of popups if some other code path starts using it.
         for key, until in list(self._visual_green_until.items()):
-            prev = self._last_seen_green_until.get(key, 0.0)
-            if until > prev + 0.05:
-                triggered = True
             self._last_seen_green_until[key] = until
-        if not triggered:
-            return
+
+    def _trigger_encouragement(self, now: float) -> None:
+        """Fire a random encouragement message at the bottom of the
+        camera view for 1.5 s. Throttled to one per second so a
+        rapid burst (e.g., spamming swipes) doesn't stack popups.
+        Call this AFTER the action actually fires (a count was
+        incremented, a step completed, etc.) — not on the gesture
+        detection edge."""
         if now - self._encouragement_last_at < 1.0:
             return
         self._encouragement_last_at = now
@@ -1426,6 +1443,9 @@ class TutorialWindow(QDialog):
         self.next_button.setEnabled(True)
         self._completion_feedback_until = time.monotonic() + self._completion_feedback_duration
         self._completion_feedback_step = self._step_index
+        # Step completion is the canonical action-completion edge for
+        # most parts of the tutorial; fire encouragement here.
+        self._trigger_encouragement(time.monotonic())
         text = note or "Completed! Swipe right to move on!"
         self._set_step_progress(text)
 
@@ -1789,6 +1809,45 @@ class TutorialWindow(QDialog):
         parent_listener = getattr(worker, "voice_listener", None)
         if parent_listener is not None and parent_listener is not self._voice_listener:
             self._voice_listener = parent_listener
+        # Also re-wire phone mic on the (possibly newly-adopted)
+        # listener — adopting the parent's listener doesn't itself
+        # carry over set_external_audio_source state if the parent
+        # configured it later.
+        try:
+            self._wire_phone_mic_to_voice_listener()
+        except Exception:
+            pass
+
+    def _wire_phone_mic_to_voice_listener(self) -> None:
+        """Plumb the parent MainWindow's PhoneCameraServer audio source
+        into our voice listener when the user has the phone-as-mic
+        toggle on. Safe to call multiple times — idempotent on the
+        listener side."""
+        listener = getattr(self, "_voice_listener", None)
+        if listener is None or not hasattr(listener, "set_external_audio_source"):
+            return
+        # Need the parent MainWindow's QR server to read its
+        # PhoneAudioSource. Walk up the parent chain.
+        owner = self.parent()
+        while owner is not None and not hasattr(owner, "_phone_camera_qr_server"):
+            owner = owner.parent() if hasattr(owner, "parent") else None
+        if owner is None:
+            return
+        use_phone_mic = (
+            bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+            and bool(getattr(self.config, "phone_camera_qr_paired", False))
+        )
+        qr_server = getattr(owner, "_phone_camera_qr_server", None)
+        if not use_phone_mic or qr_server is None:
+            try:
+                listener.set_external_audio_source(None)
+            except Exception:
+                pass
+            return
+        try:
+            listener.set_external_audio_source(qr_server.audio_source)
+        except Exception:
+            pass
 
     def _start_voice_practice(self) -> None:
         self._try_adopt_parent_voice_listener()
@@ -1918,6 +1977,10 @@ class TutorialWindow(QDialog):
                 self.swipe_widget.set_counts(self._swipe_counts["swipe_left"], self._swipe_counts["swipe_right"])
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + self._gesture_flash_seconds)
                 accepted_swipe = True
+                # Each successful swipe is its own action-completion
+                # event — fire encouragement now (throttle handles
+                # the burst case).
+                self._trigger_encouragement(now)
             self._last_dynamic_label = dynamic_label
             if self._swipe_goal_index >= 6:
                 self._complete_step("Both swipes detected! Swipe right to move on!")
@@ -1967,6 +2030,7 @@ class TutorialWindow(QDialog):
             ):
                 self._spotify_toggle_count = min(2, self._spotify_toggle_count + 1)
                 self._play_pause_ready_for_next = False
+                self._trigger_encouragement(now)
                 visual_ready = True
             self._set_step_progress(f"fist detections {self._spotify_toggle_count}/2")
             if self._spotify_toggle_count >= 2:
@@ -2134,6 +2198,7 @@ class TutorialWindow(QDialog):
             if self._play_pause_ready_for_next and self._hold_ready("play_pause", active, self._spotify_play_pause_hold_seconds, now, cooldown=self._spotify_static_cooldown_seconds):
                 self._spotify_toggle_count = min(2, self._spotify_toggle_count + 1)
                 self._play_pause_ready_for_next = False
+                self._trigger_encouragement(now)
                 self._set_step_progress(f"Fist detections: {self._spotify_toggle_count}/2.")
                 if self._spotify_toggle_count >= 2:
                     self._complete_step("Completed! Swipe right to move on!")
@@ -2317,3 +2382,5 @@ class TutorialWindow(QDialog):
             self._close_emitted = True
             self.tutorial_closed.emit(False, self._auto_start_on_done, self._launched_from_settings)
         super().closeEvent(event)
+
+# Author: Konstantin Markov

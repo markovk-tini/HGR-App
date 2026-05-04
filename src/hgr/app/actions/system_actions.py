@@ -69,3 +69,5 @@ class SystemActions:
             self.open_settings_callback()
             return "Opened Touchless settings"
         return "No settings callback configured"
+
+# Author: Konstantin Markov

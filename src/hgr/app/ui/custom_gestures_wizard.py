@@ -439,3 +439,5 @@ class CreateGestureWizard(QDialog):
 
     def _error(self, message: str) -> None:
         QMessageBox.warning(self, "Cannot create gesture", message)
+
+# Author: Konstantin Markov

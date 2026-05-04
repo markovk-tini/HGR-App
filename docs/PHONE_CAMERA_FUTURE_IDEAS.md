@@ -54,3 +54,5 @@ Ranked rough order by effort-to-value.
   workflow.
 - **Inventory / kit checklist**: phone scans barcodes against a
   user-authored list, ticks items off, flags missing ones.
+
+<!-- Author: Konstantin Markov -->

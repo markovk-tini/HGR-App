@@ -24,3 +24,5 @@ After gesture-related changes, check:
 - mode exit
 - cancellation path
 - neighboring gestures that often false-trigger
+
+<!-- Author: Konstantin Markov -->

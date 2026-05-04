@@ -309,3 +309,5 @@ class GestureClassifier:
         best_g_idx = self._sample_to_gesture_idx[best_idx]
         best_name = self._gestures[best_g_idx].name
         return best_name, score
+
+# Author: Konstantin Markov

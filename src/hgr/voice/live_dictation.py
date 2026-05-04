@@ -61,3 +61,5 @@ class LiveDictationStreamer:
         if self._sapi is not None:
             return self._sapi.stream(stop_event=stop_event, event_callback=event_callback)
         return False
+
+# Author: Konstantin Markov

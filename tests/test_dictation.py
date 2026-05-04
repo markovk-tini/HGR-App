@@ -105,3 +105,5 @@ class DictationProcessorTest(unittest.TestCase):
         update = processor.ingest("world")
         self.assertEqual(update.text_to_insert, " World")
         self.assertEqual(update.full_text, "Hello. World")
+
+# Author: Konstantin Markov

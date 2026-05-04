@@ -211,3 +211,5 @@ def draw_mouse_monitor_overlay(
         cv2.circle(frame, (anchor_x, anchor_y), 7, (84, 240, 214), thickness=1)
         cv2.line(frame, (anchor_x - 5, anchor_y), (anchor_x + 5, anchor_y), (84, 240, 214), 1, cv2.LINE_AA)
         cv2.line(frame, (anchor_x, anchor_y - 5), (anchor_x, anchor_y + 5), (84, 240, 214), 1, cv2.LINE_AA)
+
+# Author: Konstantin Markov

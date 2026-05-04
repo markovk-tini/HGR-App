@@ -157,3 +157,5 @@ def load_hand_runtime(*, prefer_gpu: bool = False) -> HandRuntime:
         if gpu_runtime is not None:
             return gpu_runtime
     return _load_mediapipe_cpu_runtime()
+
+# Author: Konstantin Markov

@@ -64,3 +64,5 @@ class VoiceTrainingDataTest(unittest.TestCase):
             self.assertTrue(paths["eval"].exists())
             self.assertTrue(paths["corrections"].exists())
             self.assertTrue(paths["summary"].exists())
+
+# Author: Konstantin Markov

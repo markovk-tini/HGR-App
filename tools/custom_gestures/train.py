@@ -48,7 +48,7 @@ from hgr.custom_gestures.registry import (  # noqa: E402
 )
 
 
-_TARGET_SAMPLES = 80
+_TARGET_SAMPLES = 100
 _STABILITY_FRAMES = 3  # consecutive frames of hand present before capture starts
 # Skip this many frames between successive captures so the recording
 # stretches over ~8 seconds at 30fps with the default 80 captures. Gives
@@ -428,3 +428,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Author: Konstantin Markov

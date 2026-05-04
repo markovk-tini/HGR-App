@@ -33,8 +33,11 @@ flips GPU Mode on.
 """
 from __future__ import annotations
 
+import ctypes
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -47,33 +50,97 @@ class GpuProbeResult:
     tasks_gpu_delegate_present: bool   # the enum exists, not necessarily that it works
     onnxruntime_importable: bool
     onnxruntime_directml_provider: bool  # true iff "DmlExecutionProvider" is in get_available_providers()
-    error_notes: tuple[str, ...]
+    onnxruntime_providers: tuple[str, ...] = ()  # full provider list ort returned (or empty if import failed)
+    directml_dll_loadable: bool | None = None    # ctypes.WinDLL('DirectML.dll') succeeded; None on non-Windows
+    directml_dll_error: str = ""                  # OS error string when WinDLL failed (eg "[WinError 5] Access is denied")
+    error_notes: tuple[str, ...] = ()
+
+    @property
+    def _tasks_gpu_path_ok(self) -> bool:
+        return self.mediapipe_tasks_importable and self.tasks_gpu_delegate_present
+
+    @property
+    def _ort_dml_path_ok(self) -> bool:
+        # The ONNX/DML branch additionally requires the DirectML.dll
+        # WinDLL probe to have succeeded (or to be skipped on
+        # non-Windows where directml_dll_loadable is None) — otherwise
+        # the provider being listed in get_available_providers() is
+        # misleading: session creation will throw at LoadLibrary
+        # time, and we'd mis-report "GPU available" while the real
+        # engine swap silently falls back to CPU.
+        return (
+            self.onnxruntime_importable
+            and self.onnxruntime_directml_provider
+            and (self.directml_dll_loadable is None or self.directml_dll_loadable is True)
+        )
 
     @property
     def has_any_gpu_path(self) -> bool:
-        return (
-            (self.mediapipe_tasks_importable and self.tasks_gpu_delegate_present)
-            or (self.onnxruntime_importable and self.onnxruntime_directml_provider)
-        )
+        return self._tasks_gpu_path_ok or self._ort_dml_path_ok
 
     def path_summary(self) -> str:
         """Human-readable one-liner for the Settings tooltip."""
         parts: list[str] = []
-        if self.mediapipe_tasks_importable and self.tasks_gpu_delegate_present:
+        if self._tasks_gpu_path_ok:
             parts.append("MediaPipe Tasks GPU delegate")
-        if self.onnxruntime_importable and self.onnxruntime_directml_provider:
+        if self._ort_dml_path_ok:
             parts.append("ONNX Runtime + DirectML")
-        if not parts:
-            return "No GPU inference path detected on this machine."
-        return "GPU paths available: " + ", ".join(parts)
+        if parts:
+            return "GPU paths available: " + ", ".join(parts)
+        return self._failure_summary()
+
+    def _failure_summary(self) -> str:
+        """Describe WHY no GPU path is reachable in one actionable line.
+        Branches on what the probe actually found so the user gets a
+        specific hint instead of the generic 'no GPU detected'."""
+        # Case A: ONNX wheel didn't even import. Almost always the
+        # bundle is corrupt or AV ate the pyd.
+        if not self.onnxruntime_importable:
+            return (
+                "No GPU inference path detected — ONNX Runtime failed to load. "
+                "Most likely your antivirus quarantined a file under "
+                "Touchless\\_internal\\onnxruntime\\. Add the Touchless install "
+                "folder to your antivirus exclusions and reopen Touchless."
+            )
+        # Case B: ONNX imported but DirectML.dll fails to load. Defender
+        # is the usual culprit; old GPU drivers second.
+        if self.directml_dll_loadable is False:
+            err = self.directml_dll_error or "unknown OS error"
+            return (
+                "No GPU inference path detected — DirectML.dll could not be "
+                f"loaded ({err}). Add the Touchless install folder to your "
+                "antivirus exclusions, then reopen Touchless. If that doesn't "
+                "help, update your graphics driver."
+            )
+        # Case C: DirectML.dll loads but DmlExecutionProvider isn't in
+        # the providers list. Means onnxruntime built without DML, or
+        # the wrong wheel slipped in. Shouldn't happen in shipped builds
+        # but useful diagnostic if a dev install is mis-wired.
+        if self.onnxruntime_importable and not self.onnxruntime_directml_provider:
+            providers = ", ".join(self.onnxruntime_providers) or "<none>"
+            return (
+                "No GPU inference path detected — ONNX Runtime loaded but its "
+                f"DirectML provider is missing (providers: {providers}). This "
+                "build was packaged without onnxruntime-directml; reinstall "
+                "Touchless from the official installer."
+            )
+        # Catch-all (no detail captured). Leaves it generic but honest.
+        return "No GPU inference path detected on this machine."
 
     def diagnostic(self) -> str:
         """Verbose multi-line dump for stderr / a debug panel."""
+        providers_txt = ", ".join(self.onnxruntime_providers) if self.onnxruntime_providers else "<none>"
+        dml_loadable_txt = (
+            "n/a (non-Windows)" if self.directml_dll_loadable is None
+            else ("yes" if self.directml_dll_loadable else f"no ({self.directml_dll_error or 'unknown error'})")
+        )
         lines = [
             f"  mediapipe.tasks importable      : {self.mediapipe_tasks_importable}",
             f"  tasks GPU delegate enum present : {self.tasks_gpu_delegate_present}",
             f"  onnxruntime importable          : {self.onnxruntime_importable}",
             f"  onnxruntime DML provider listed : {self.onnxruntime_directml_provider}",
+            f"  onnxruntime providers           : {providers_txt}",
+            f"  DirectML.dll loadable           : {dml_loadable_txt}",
         ]
         if self.error_notes:
             lines.append("  errors during probe:")
@@ -144,22 +211,67 @@ def probe_gpu_paths() -> GpuProbeResult:
     # tends to be False on most user machines.
     ort_importable = False
     ort_dml = False
+    providers: list[str] = []
     try:
         import onnxruntime as ort
 
         ort_importable = True
         try:
             providers = list(ort.get_available_providers())
-        except Exception:
+        except Exception as exc:
+            errors.append(f"onnxruntime.get_available_providers: {type(exc).__name__}: {exc!s}"[:160])
             providers = []
         ort_dml = "DmlExecutionProvider" in providers
     except Exception as exc:
-        errors.append(f"onnxruntime: {type(exc).__name__}: {exc!s}"[:160])
+        errors.append(f"onnxruntime import: {type(exc).__name__}: {exc!s}"[:160])
+
+    # 3. Direct DirectML.dll loadability probe (Windows only).
+    # The DML provider being listed in get_available_providers() does
+    # NOT prove the actual DirectML.dll will load at session-creation
+    # time — Microsoft Defender, restrictive antivirus, or a corrupted
+    # bundle can block the LoadLibrary call later, which surfaces as a
+    # session-creation exception users have no way to diagnose. By
+    # explicitly trying ctypes.WinDLL("DirectML.dll") here we capture
+    # the OS error code (5 = access denied / quarantined; 126 =
+    # not found; 193 = bad image / arch mismatch) and surface it in
+    # the Settings tooltip so the user knows whether to whitelist
+    # the install folder vs reinstall vs update their GPU driver.
+    # We also try the bundled copy under
+    # _internal\onnxruntime\capi\DirectML.dll so a broken global
+    # search path still gets the right answer for Touchless's bundle.
+    directml_loadable: bool | None = None
+    directml_err = ""
+    if sys.platform.startswith("win"):
+        directml_loadable = False
+        candidates: list[str] = ["DirectML.dll"]
+        try:
+            import onnxruntime as _ort_mod  # noqa: F401 — already imported above on success path
+
+            ort_pkg_dir = Path(_ort_mod.__file__).parent
+            bundled = ort_pkg_dir / "capi" / "DirectML.dll"
+            if bundled.exists():
+                candidates.append(str(bundled))
+        except Exception:
+            pass
+        for candidate in candidates:
+            try:
+                ctypes.WinDLL(candidate)
+                directml_loadable = True
+                break
+            except OSError as exc:
+                directml_err = f"{candidate}: {exc}"[:200]
+            except Exception as exc:
+                directml_err = f"{candidate}: {type(exc).__name__}: {exc}"[:200]
 
     return GpuProbeResult(
         mediapipe_tasks_importable=mp_tasks_importable,
         tasks_gpu_delegate_present=tasks_gpu_present,
         onnxruntime_importable=ort_importable,
         onnxruntime_directml_provider=ort_dml,
+        onnxruntime_providers=tuple(providers),
+        directml_dll_loadable=directml_loadable,
+        directml_dll_error=directml_err,
         error_notes=tuple(errors),
     )
+
+# Author: Konstantin Markov

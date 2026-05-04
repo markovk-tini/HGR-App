@@ -1589,3 +1589,5 @@ class SpotifyController:
         except Exception:
             return {}
         return values
+
+# Author: Konstantin Markov

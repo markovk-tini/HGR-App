@@ -23,3 +23,5 @@ Future flows should support save prompts for drawings, screenshots, screen recor
 - user can say a specific folder/path
 - silence should fall back to the configured default save location
 - user can say `cancel`, `delete`, or `nevermind`
+
+<!-- Author: Konstantin Markov -->

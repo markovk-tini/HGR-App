@@ -47,3 +47,5 @@ Do not use:
 - live camera feed remains responsive the whole time
 - no unrelated gesture wheel behavior changes
 - no normal desktop mouse-control regression after the secondary window closes
+
+<!-- Author: Konstantin Markov -->

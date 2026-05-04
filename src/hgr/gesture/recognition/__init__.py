@@ -7,3 +7,5 @@ __all__ = [
     "GestureRecognitionEngine",
     "StaticGestureRecognizer",
 ]
+
+# Author: Konstantin Markov

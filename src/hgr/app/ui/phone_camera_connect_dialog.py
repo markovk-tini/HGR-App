@@ -341,3 +341,5 @@ class PhoneCameraConnectDialog(QDialog):
     @property
     def server(self) -> Optional[PhoneCameraServer]:
         return self._server
+
+# Author: Konstantin Markov

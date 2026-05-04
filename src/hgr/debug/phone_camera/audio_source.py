@@ -194,3 +194,5 @@ class PhoneAudioSource:
         # Don't close on __exit__ — the source is owned by the phone
         # server and survives individual voice sessions.
         return False
+
+# Author: Konstantin Markov

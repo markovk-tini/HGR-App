@@ -99,3 +99,5 @@ class AppSessionDucker:
             self._vc.set_app_audio_level([process], float(level))
         except Exception:
             pass
+
+# Author: Konstantin Markov

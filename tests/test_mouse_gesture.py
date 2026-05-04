@@ -332,3 +332,5 @@ class MouseGestureTrackerTest(unittest.TestCase):
         lost = self.tracker.update(hand_reading=None, prediction=None, now=2.36)
         self.assertTrue(lost.left_release)
         self.assertFalse(lost.dragging)
+
+# Author: Konstantin Markov

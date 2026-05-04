@@ -302,3 +302,5 @@ def ensure_self_signed_cert(force_regenerate: bool = False) -> PhoneCameraCertPa
         ca_cert_path=_ROOT_CA_CERT,
         lan_ip=lan_ip,
     )
+
+# Author: Konstantin Markov

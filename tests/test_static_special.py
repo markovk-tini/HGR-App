@@ -32,3 +32,5 @@ class StaticSpecialTest(unittest.TestCase):
         features = extract_static_features(make_pose('four'))
         self.assertEqual(features.spread_states['thumb_index'], 'together')
         self.assertEqual(features.spread_states['ring_pinky'], 'together')
+
+# Author: Konstantin Markov

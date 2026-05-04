@@ -533,3 +533,5 @@ class GpuVideoWidget(QWidget):
         if all_points:
             painter.setPen(self._landmark_pen)
             painter.drawPoints(all_points)
+
+# Author: Konstantin Markov

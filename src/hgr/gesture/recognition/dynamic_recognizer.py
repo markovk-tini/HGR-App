@@ -247,3 +247,5 @@ class DynamicGestureRecognizer:
             self._blocked_horizontal_label = "swipe_left"
             self._blocked_horizontal_until = timestamp + 1.2
         return best.label, ranked, scores
+
+# Author: Konstantin Markov

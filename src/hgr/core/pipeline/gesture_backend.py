@@ -210,3 +210,5 @@ class GestureBackend:
             self.engine.process_landmarks(landmarks, frame_bgr=frame, handedness=handedness, timestamp=timestamp),
             timestamp,
         )
+
+# Author: Konstantin Markov

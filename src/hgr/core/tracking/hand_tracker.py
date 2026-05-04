@@ -50,3 +50,5 @@ class HandTracker:
         if self.runtime.drawing_utils is not None and self.runtime.hand_connections is not None:
             self.runtime.drawing_utils.draw_landmarks(frame, hand_landmarks, self.runtime.hand_connections)
         return TrackingResult(True, landmarks, handedness, hand_landmarks, frame)
+
+# Author: Konstantin Markov

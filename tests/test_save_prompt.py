@@ -66,3 +66,5 @@ class ConfiguredSaveDirectoryTest(unittest.TestCase):
             self.assertTrue(drawings_dir.exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+# Author: Konstantin Markov

@@ -28,3 +28,5 @@ __all__ = [
     "ReleaseInfo",
     "Updater",
 ]
+
+# Author: Konstantin Markov

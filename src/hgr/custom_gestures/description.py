@@ -183,3 +183,5 @@ def format_gesture_summary(gesture: CustomGesture) -> str:
         lines.append(f"  {name:<7}  {_curl_range_label(sig[key])}")
     lines.append(f"  Spread:  {_spread_range_label(sig['spread'])}")
     return "\n".join(lines)
+
+# Author: Konstantin Markov

@@ -150,3 +150,5 @@ def estimate_rms(pcm16_bytes: bytes) -> float:
     if arr.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(arr * arr)) / 32768.0)
+
+# Author: Konstantin Markov

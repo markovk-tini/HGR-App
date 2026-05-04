@@ -571,8 +571,12 @@ class RecordingWindow(QDialog):
                 # Snapshot a hand-centered thumbnail at preset sample
                 # indices so the user can later pick one to represent
                 # the gesture in the dropdown / Gesture Binds preview.
+                # Crop from display_bgr (which already has the live
+                # skeleton drawn on it) and overlay a green bbox so the
+                # thumbnails match the look of the preset gesture
+                # cards in the Control Guide.
                 if self._recorder.count in self._thumbnail_capture_indices:
-                    crop = self._crop_hand_thumbnail(mirrored, lm)
+                    crop = self._crop_hand_thumbnail(display_bgr, lm, draw_bbox=True)
                     if crop is not None:
                         self._candidate_thumbnails.append(
                             (int(self._recorder.count), crop)
@@ -703,13 +707,22 @@ class RecordingWindow(QDialog):
         )
 
     @staticmethod
-    def _crop_hand_thumbnail(frame_bgr: np.ndarray, landmarks: np.ndarray) -> Optional[np.ndarray]:
-        """Crop a clean hand-centered thumbnail from a BGR frame using
-        the MediaPipe landmarks as a guide. Bbox is expanded slightly
+    def _crop_hand_thumbnail(
+        frame_bgr: np.ndarray,
+        landmarks: np.ndarray,
+        draw_bbox: bool = False,
+    ) -> Optional[np.ndarray]:
+        """Crop a hand-centered thumbnail from a BGR frame using the
+        MediaPipe landmarks as a guide. Bbox is expanded slightly
         beyond the natural hand bounds (1.4× side length) — tight
         enough that the hand fills the frame, loose enough that
         fingertips at the edge of the bbox don't get clipped by
-        per-frame landmark jitter."""
+        per-frame landmark jitter.
+
+        When draw_bbox=True a green rectangle is drawn around the
+        tight hand bounds inside the crop, so the thumbnail mimics
+        the look of the preset Control Guide gesture cards (which
+        all show a green bbox over the live skeleton)."""
         try:
             h, w = frame_bgr.shape[:2]
         except Exception:
@@ -727,10 +740,6 @@ class RecordingWindow(QDialog):
             return None
         cx = (x_min + x_max) * 0.5
         cy = (y_min + y_max) * 0.5
-        # 1.4× expansion: keep the side length proportional to the
-        # larger of width/height so a horizontal hand and a vertical
-        # hand both get sensible square crops, but tighter than the
-        # original 2× so the hand actually fills the thumbnail.
         side = max(x_max - x_min, y_max - y_min) * 1.4
         if side < 40:
             return None
@@ -741,7 +750,27 @@ class RecordingWindow(QDialog):
         y2 = int(round(min(h, cy + half)))
         if x2 - x1 < 24 or y2 - y1 < 24:
             return None
-        return frame_bgr[y1:y2, x1:x2].copy()
+        crop = frame_bgr[y1:y2, x1:x2].copy()
+        if draw_bbox:
+            try:
+                pad_w = int(round((x2 - x1) * 0.03))
+                pad_h = int(round((y2 - y1) * 0.03))
+                rect_x1 = int(round(max(0, x_min - x1 - pad_w)))
+                rect_y1 = int(round(max(0, y_min - y1 - pad_h)))
+                rect_x2 = int(round(min(crop.shape[1] - 1, x_max - x1 + pad_w)))
+                rect_y2 = int(round(min(crop.shape[0] - 1, y_max - y1 + pad_h)))
+                if rect_x2 > rect_x1 + 4 and rect_y2 > rect_y1 + 4:
+                    cv2.rectangle(
+                        crop,
+                        (rect_x1, rect_y1),
+                        (rect_x2, rect_y2),
+                        (60, 220, 80),  # accent green in BGR
+                        thickness=2,
+                        lineType=cv2.LINE_AA,
+                    )
+            except Exception:
+                pass
+        return crop
 
     def _on_recording_complete(self) -> None:
         self._state = "complete"
@@ -1283,3 +1312,5 @@ class GesturePosePickerDialog(QDialog):
             }}
             """
         )
+
+# Author: Konstantin Markov

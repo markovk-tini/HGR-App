@@ -443,3 +443,5 @@ class VolumeController:
             self._volume = None
             self._message = f"Could not access system speakers: {type(reason).__name__}: {reason}"
             return False
+
+# Author: Konstantin Markov

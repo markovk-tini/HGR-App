@@ -290,3 +290,5 @@ class UpdateDialog(QDialog):
         self.download_button.setText("Retry Download")
         self.later_button.setEnabled(True)
         self.toggle_button.setEnabled(True)
+
+# Author: Konstantin Markov

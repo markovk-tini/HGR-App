@@ -1003,3 +1003,5 @@ def _summarize_args(name: str, args: Dict[str, Any], *, debug: bool) -> Dict[str
         else:
             out[key] = value
     return out
+
+# Author: Konstantin Markov

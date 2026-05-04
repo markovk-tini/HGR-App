@@ -473,3 +473,5 @@ def _resolve_backend_executable(
                         if candidate.exists():
                             return backend, candidate
     return None
+
+# Author: Konstantin Markov

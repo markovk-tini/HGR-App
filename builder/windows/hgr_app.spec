@@ -222,3 +222,5 @@ coll = COLLECT(
     name="Touchless",
     upx=False,
 )
+
+# Author: Konstantin Markov

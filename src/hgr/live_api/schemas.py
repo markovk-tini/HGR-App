@@ -531,3 +531,5 @@ def validate_args(tool_name: str, args: Any) -> Tuple[bool, str, Dict[str, Any]]
             normalised[key] = prop["default"]
 
     return True, "", normalised
+
+# Author: Konstantin Markov

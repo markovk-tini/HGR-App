@@ -120,3 +120,5 @@ def resolve_drawing_path(filename: str, drawings_dir: str | Path) -> Optional[Pa
     except OSError:
         return None
     return None
+
+# Author: Konstantin Markov

@@ -1051,3 +1051,5 @@ def build_onnx_directml_runtime() -> _HandsModuleShim | None:
         return None
 
     return _HandsModuleShim(palm_session, lm_session, anchors)
+
+# Author: Konstantin Markov

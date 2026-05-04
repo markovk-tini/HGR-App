@@ -697,3 +697,5 @@ class VoiceStatusOverlay(QWidget):
             y = cy - 2 - 6 * wave
             size = 8.0 + 3.0 * pulse
             painter.drawEllipse(QRectF(x - size / 2.0, y - size / 2.0, size, size))
+
+# Author: Konstantin Markov

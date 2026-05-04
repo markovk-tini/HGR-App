@@ -555,3 +555,5 @@ class CustomGestureRunner:
                     f"returned False (cooldown still active or action failed)",
                 )
         return None
+
+# Author: Konstantin Markov

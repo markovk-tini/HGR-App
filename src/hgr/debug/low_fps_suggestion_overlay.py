@@ -199,3 +199,5 @@ class LowFpsSuggestionOverlay(QWidget):
             self.hide()
             self._fading_out = False
             self.dismissed.emit()
+
+# Author: Konstantin Markov

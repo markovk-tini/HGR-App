@@ -171,3 +171,5 @@ class MouseController:
             self._message = "mouse input failed"
             return False
         return True
+
+# Author: Konstantin Markov

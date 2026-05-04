@@ -10,3 +10,5 @@ __all__ = [
     "distance",
     "normalize_range",
 ]
+
+# Author: Konstantin Markov

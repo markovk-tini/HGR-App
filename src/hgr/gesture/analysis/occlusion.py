@@ -24,3 +24,5 @@ def estimate_finger_occlusion(
         overlap = max(overlap, clamp01((0.11 - distance(landmarks[tip], other_tip) / scale) / 0.09))
     depth_disagreement = clamp01((abs(float(landmarks[tip][2] - landmarks[pip][2])) - 0.10) / 0.18)
     return clamp01(0.45 * compression + 0.35 * overlap + 0.20 * depth_disagreement)
+
+# Author: Konstantin Markov

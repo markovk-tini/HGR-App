@@ -441,3 +441,5 @@ class VolumeGestureTest(unittest.TestCase):
         )
         self.assertFalse(first.active)
         self.assertTrue(second.active)
+
+# Author: Konstantin Markov

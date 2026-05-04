@@ -58,3 +58,5 @@ class BackendPipelineTest(unittest.TestCase):
             1 for name in ('index', 'middle', 'ring', 'pinky') if second_claw.features is not None and second_claw.features.states[name] == 'closed'
         )
         self.assertLess(closed_count, 4)
+
+# Author: Konstantin Markov

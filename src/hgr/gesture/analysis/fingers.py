@@ -243,3 +243,5 @@ def analyze_fingers(landmarks: np.ndarray, palm_center: np.ndarray, palm_scale: 
         )
 
     return readings
+
+# Author: Konstantin Markov

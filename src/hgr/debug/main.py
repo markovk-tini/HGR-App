@@ -27,3 +27,5 @@ def main() -> int:
         window.setWindowIcon(QIcon(str(icon_path)))
     window.show()
     return app.exec()
+
+# Author: Konstantin Markov

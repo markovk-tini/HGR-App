@@ -651,3 +651,5 @@ def test_action_describe_covers_all_kinds():
     for action in cases:
         s = describe(action)
         assert isinstance(s, str) and s
+
+# Author: Konstantin Markov

@@ -216,3 +216,5 @@ def get_fallback_logger() -> LiveApiLogger:
         default_dir = Path.home() / "Documents" / "Touchless" / "logs" / "live_api"
         _fallback_logger = LiveApiLogger(log_dir=default_dir)
     return _fallback_logger
+
+# Author: Konstantin Markov

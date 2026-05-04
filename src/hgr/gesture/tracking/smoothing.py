@@ -28,3 +28,5 @@ class AdaptiveLandmarkSmoother:
         adaptive_alpha = max(self.min_alpha, min(self.max_alpha, adaptive_alpha))
         self._state = adaptive_alpha * current + (1.0 - adaptive_alpha) * self._state
         return self._state.copy()
+
+# Author: Konstantin Markov

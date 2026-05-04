@@ -488,3 +488,5 @@ class Updater(QObject):
         except Exception:
             pass
         os._exit(0)
+
+# Author: Konstantin Markov

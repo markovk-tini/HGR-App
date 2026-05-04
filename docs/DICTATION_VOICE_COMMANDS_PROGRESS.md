@@ -92,3 +92,5 @@ Expect: the full sentence typed as literal text, NO Enter insertion.
 4. If both pass cleanly, this feature is done — move to the next item on
    the dictation roadmap (grammar-corrector cold-start timeout, or
    long-form typing + correction robustness).
+
+<!-- Author: Konstantin Markov -->

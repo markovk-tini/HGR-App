@@ -107,3 +107,5 @@ def draw_hand_overlay(frame_bgr: np.ndarray, result: GestureFrameResult) -> np.n
                 cv2.LINE_8,
             )
     return frame
+
+# Author: Konstantin Markov

@@ -277,3 +277,5 @@ class HandDetector:
             self._last_secondary_seen_at = 0.0
 
         return DetectionResult(tracked_hand=primary_hand, frame_bgr=frame, secondary_hand=secondary_hand)
+
+# Author: Konstantin Markov

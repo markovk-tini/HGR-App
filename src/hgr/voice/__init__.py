@@ -24,3 +24,5 @@ __all__ = [
     "VoiceProfileStore",
     "WhisperStreamer",
 ]
+
+# Author: Konstantin Markov

@@ -13,3 +13,5 @@ def app_base_path() -> Path:
 
 def resource_path(*parts: str) -> Path:
     return app_base_path().joinpath(*parts)
+
+# Author: Konstantin Markov

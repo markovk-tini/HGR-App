@@ -443,3 +443,5 @@ def landmarks_from_mediapipe(
             f"expected {_LANDMARK_COUNT} landmarks, got {len(rows)}"
         )
     return np.asarray(rows, dtype=np.float32)
+
+# Author: Konstantin Markov

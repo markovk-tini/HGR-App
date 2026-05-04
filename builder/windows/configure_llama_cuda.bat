@@ -18,3 +18,5 @@ cmake -B build_cuda -G Ninja ^
   -DLLAMA_BUILD_TESTS=OFF ^
   -DLLAMA_BUILD_EXAMPLES=OFF
 exit /b %errorlevel%
+
+REM Author: Konstantin Markov

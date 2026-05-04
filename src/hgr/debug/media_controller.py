@@ -25,3 +25,5 @@ class MediaController:
             return True
         except Exception:
             return False
+
+# Author: Konstantin Markov

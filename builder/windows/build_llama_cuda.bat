@@ -38,3 +38,5 @@ if errorlevel 1 (
 
 echo [ok] build complete
 exit /b 0
+
+REM Author: Konstantin Markov

@@ -82,3 +82,5 @@ class HandDetectorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# Author: Konstantin Markov

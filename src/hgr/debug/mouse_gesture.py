@@ -857,3 +857,5 @@ class MouseGestureTracker:
             and finger.curl >= 0.40
             and finger.bend_distal <= 146.0
         )
+
+# Author: Konstantin Markov

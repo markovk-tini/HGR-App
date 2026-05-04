@@ -18,3 +18,5 @@ Each item should show the current path and support:
 - browse to change
 - manually typing a path
 - safe fallback to a valid default if needed
+
+<!-- Author: Konstantin Markov -->

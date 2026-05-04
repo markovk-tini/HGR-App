@@ -592,3 +592,5 @@ class LiveViewWindow(QMainWindow):
         super().resizeEvent(event)
         self._render_frame()
         self._update_volume_widgets()
+
+# Author: Konstantin Markov

@@ -361,3 +361,5 @@ def classify_static(features: StaticFeatures) -> GesturePrediction:
     if best_score < min_score or margin < 0.030:
         return GesturePrediction('neutral', confidence * 0.65, scores)
     return GesturePrediction(best_label, confidence, scores)
+
+# Author: Konstantin Markov

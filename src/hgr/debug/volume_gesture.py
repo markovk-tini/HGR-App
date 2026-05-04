@@ -336,3 +336,5 @@ class VolumeGestureTracker:
             overlay_visible=self._active,
             trigger_mute_toggle=trigger_mute_toggle,
         )
+
+# Author: Konstantin Markov

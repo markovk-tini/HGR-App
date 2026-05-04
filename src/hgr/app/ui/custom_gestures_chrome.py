@@ -59,3 +59,5 @@ def apply_touchless_titlebar(widget) -> None:
         )
     except Exception:
         pass
+
+# Author: Konstantin Markov

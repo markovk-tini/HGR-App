@@ -21,3 +21,5 @@ Do not alter unrelated:
 ## Required mindset
 
 If a new dialog appears while the user still needs hand control, assume the live view and cursor control must continue unless the task explicitly says otherwise.
+
+<!-- Author: Konstantin Markov -->

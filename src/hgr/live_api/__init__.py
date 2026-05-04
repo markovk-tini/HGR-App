@@ -27,3 +27,5 @@ __all__ = [
 # from the package root — they are internal swap-ins managed by
 # LiveApiManager based on `LiveApiConfig.backend`. UI code should never
 # instantiate them directly.
+
+# Author: Konstantin Markov

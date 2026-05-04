@@ -153,3 +153,5 @@ frame.
   event kind later is straightforward: capture the event stream, store
   as `{"kind": "replay", "payload": {"events": [...]}}`, execute via
   SendInput when the gesture fires.
+
+<!-- Author: Konstantin Markov -->

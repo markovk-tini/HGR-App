@@ -156,3 +156,5 @@ class SettingsDialog(QDialog):
 
     def _apply(self) -> None:
         self.settings_applied.emit(self.config)
+
+# Author: Konstantin Markov

@@ -287,3 +287,5 @@ def build_tasks_gpu_runtime() -> object | None:
         return None
 
     return _HandsModuleShim()
+
+# Author: Konstantin Markov

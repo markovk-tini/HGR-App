@@ -259,3 +259,5 @@ def load_config() -> AppConfig:
 def save_config(config: AppConfig) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(asdict(config), indent=2), encoding="utf-8")
+
+# Author: Konstantin Markov

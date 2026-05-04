@@ -199,3 +199,5 @@ try {
     exit 1
 }
 """
+
+# Author: Konstantin Markov

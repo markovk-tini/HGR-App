@@ -25,3 +25,5 @@ HGR App combines:
 - mode flags drifting out of sync
 - gesture routing not being properly scoped by active mode
 - follow-up voice prompts re-enabling listening too early or too late
+
+<!-- Author: Konstantin Markov -->

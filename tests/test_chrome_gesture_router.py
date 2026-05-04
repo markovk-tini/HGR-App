@@ -125,3 +125,5 @@ class ChromeGestureRouterTest(unittest.TestCase):
 
         self.assertEqual(controller.back_calls, 0)
         self.assertFalse(snapshot.consume_other_routes)
+
+# Author: Konstantin Markov

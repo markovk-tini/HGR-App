@@ -74,3 +74,5 @@ def analyze_hand_shape(landmarks: np.ndarray) -> tuple[PalmReading, Dict[str, Sp
         spreads,
         float(pose_confidence),
     )
+
+# Author: Konstantin Markov

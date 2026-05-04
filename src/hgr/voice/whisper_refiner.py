@@ -379,3 +379,5 @@ class WhisperRefiner:
             wf.setsampwidth(2)
             wf.setframerate(self._sample_rate)
             wf.writeframes(pcm.tobytes())
+
+# Author: Konstantin Markov

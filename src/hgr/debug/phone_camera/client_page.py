@@ -69,6 +69,12 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     body.mini .preview-wrap { min-height: 180px; }
     body.mini .controls { grid-template-columns: 1fr; }
     body.mini .ctl-row { padding: 6px 10px; }
+    body.mini .audio-stats { font-size: 10px; }
+
+    .audio-stats { font-size: 11px; opacity: 0.55; margin-top: 8px;
+      font-variant-numeric: tabular-nums; text-align: center;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      min-height: 14px; line-height: 14px; }
 
     /* Toast notifications pushed from the PC via SSE.
        Sit fixed at the top of the viewport, slide-in/fade-out,
@@ -162,7 +168,15 @@ CLIENT_HTML = r"""<!DOCTYPE html>
         <option value="on">send to PC</option>
       </select>
     </label>
+    <label class="ctl-row">
+      <span class="ctl-label">Mic distance</span>
+      <select class="ctl-select" id="distSelect">
+        <option value="near" selected>near (close-talk)</option>
+        <option value="far">far (~1 m)</option>
+      </select>
+    </label>
   </div>
+  <div id="audioStats" class="audio-stats"></div>
 
   <div class="buttons">
     <button id="start">Start</button>
@@ -199,6 +213,8 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   const qualSelect = document.getElementById("qualSelect");
   const facingSelect = document.getElementById("facingSelect");
   const micSelect = document.getElementById("micSelect");
+  const distSelect = document.getElementById("distSelect");
+  const audioStatsEl = document.getElementById("audioStats");
 
   let stream = null;
   let canvas = null;
@@ -296,75 +312,172 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 
   // --- Audio capture + upload ------------------------------------------------
   //
-  // AudioWorklet "pcm-capture" runs a compressor + brick-wall limiter
-  // on the raw mic stream (AGC off — see openCamera). Stages per
-  // sample:
-  //   1. PRE_GAIN (24dB / 16x) — compensates for iOS Safari's quiet
-  //      mic input. RMS ~0.0013 raw becomes RMS ~0.02, well above
-  //      whisper's activation threshold.
-  //   2. Envelope follower — peak detector with 1ms attack / 80ms
-  //      release tracks transient peaks for the compressor.
-  //   3. Compressor — when envelope crosses COMP_THRESHOLD (-3dBFS),
-  //      gain reduction scales the signal back down. Smoothed by
-  //      GAIN_SMOOTH so we don't pump on every sample.
-  //   4. Hard limiter — anything still above HARD_LIMIT (-0.3dBFS)
-  //      gets clipped. Final safeguard so output never exceeds
-  //      [-1, 1] before Int16 conversion.
+  // AudioWorklet "pcm-capture" runs a multi-stage processing chain on
+  // the raw mic stream (AGC off — see openCamera). Per sample:
+  //   1. DC-blocking high-pass at ~100 Hz — kills HVAC rumble, fan
+  //      noise, monitor PSU hum, table thumps. These dominate the
+  //      noise floor at distance and steal headroom from the compressor.
+  //   2. Speech-band emphasis (gentle high-shelf, ~+4 dB above 2 kHz).
+  //      Boosts consonants (s/t/k/ch) which lose disproportionate
+  //      energy at distance and matter most for whisper's WER.
+  //   3. Adaptive noise gate. Threshold tracks an estimated room-
+  //      noise floor (rolling minimum of per-window mean RMS over
+  //      ~10 s) so the gate self-tunes to the user's environment.
+  //      Slew-limited rises stop a fluky speech-only window from
+  //      slamming the gate shut; falls are instant so moving to a
+  //      quieter spot recovers immediately. HOLD-style envelope as
+  //      before: opens within a few samples of any signal above
+  //      threshold, stays open for 120 ms after the last
+  //      above-threshold sample so mid-phrase pauses don't get
+  //      chopped, then mutes to true zero so whisper sees real
+  //      silence at the tail and stops cleanly.
+  //   4. PRE_GAIN — configurable per "mic distance" mode. Near (16x)
+  //      matches the original close-talk tuning that compensates
+  //      for iOS Safari's quiet baseline (AGC off pushes RMS to
+  //      ~0.0013 raw); Far (32x) accounts for speech being ~5 dB
+  //      quieter at monitor distance vs close-talk.
+  //   5. Envelope follower — peak detector with 1 ms attack /
+  //      80 ms release.
+  //   6. Compressor with mode-dependent threshold (Near -3 dBFS,
+  //      Far -7 dBFS so far speech also gets compressed reliably).
+  //   7. Hard limiter at -0.3 dBFS — final safeguard before Int16.
   //
-  // Net effect: quiet speech is loud and clear, shouts don't clip,
-  // and the apparent loudness is stable across distances — what
-  // Siri / Google Assistant get for free from native APIs.
+  // The worklet posts two kinds of messages on its port:
+  //   - ArrayBuffer (Int16 PCM) — audio samples to upload
+  //   - { type:'stats', noiseFloor, gateThreshold, gainReduction,
+  //       envelope, gateOpen } — periodic telemetry for the live
+  //     UI readout
+  // The worklet accepts config messages of the form
+  //   { preGain:number, compThreshold:number }
+  // so changing the mic-distance mode doesn't require restarting
+  // the audio stream.
   const PCM_WORKLET_SRC =
-    "const PRE_GAIN = 16.0;" +
-    "const COMP_THRESHOLD = 0.7;" +
     "const HARD_LIMIT = 0.97;" +
     "const ATTACK_COEF = 0.3;" +
     "const RELEASE_COEF = 0.0008;" +
     "const GAIN_SMOOTH = 0.08;" +
-    // Noise gate: a 16x compressor will happily amplify ambient room
-    // noise (RMS ~0.001-0.003 on iPhones with AGC off) up to speech-
-    // like levels, and whisper hallucinates words from that — the
-    // user reports phrases like 'open youtube on google chrome'
-    // followed by a duplicate fragment 'youtube google chrome', which
-    // is whisper interpreting amplified background as a partial echo.
-    // The gate uses a HOLD-style envelope: opens within ~5 samples of
-    // any signal above NOISE_GATE_THRESHOLD, and stays fully open for
-    // ~120 ms after the last above-threshold sample so mid-phrase
-    // pauses don't get clipped. Below threshold AND past the hold
-    // window, output is muted to true zero so whisper sees real
-    // silence at the tail of the utterance and stops cleanly.
-    "const NOISE_GATE_THRESHOLD = 0.004;" +
-    "const NOISE_GATE_HOLD_SAMPLES = 5760;" +  // 120ms at 48kHz
+    // 1-pole DC-blocking HPF: y = a * (y_prev + x - x_prev),
+    // a = 1 - 2*pi*fc/Fs. fc = 100 Hz at Fs = 48 kHz → a = 0.9869.
+    "const HPF_ALPHA = 0.9869;" +
+    // 1-pole LPF cutoff for the high-shelf split.
+    // alpha = 2*pi*fc/Fs ≈ 0.245 at fc = 1.9 kHz, Fs = 48 kHz.
+    "const SHELF_LP_ALPHA = 0.245;" +
+    // High-band gain. Output = lp + (1 + SHELF_GAIN) * (x - lp);
+    // 0.6 → +4.1 dB shelf above ~2 kHz.
+    "const SHELF_GAIN = 0.6;" +
+    "const NOISE_GATE_HOLD_SAMPLES = 5760;" +  // 120 ms at 48 kHz
+    // Adaptive noise floor (Martin-style minimum statistics):
+    // accumulate per-window mean RMS, store in a ring of recent
+    // windows, take the minimum. Speech can never push the minimum
+    // smaller — only true silence does — so this is robust to long
+    // monologues with no obvious gaps.
+    "const NOISE_HISTORY_LEN = 40;" +     // 40 windows × ~267 ms ≈ 10.7 s
+    "const NOISE_BLOCKS_PER_WIN = 100;" + // ~267 ms at 128-sample blocks
+    "const NOISE_FLOOR_MIN = 0.0005;" +   // never trust an estimate below this (true silence + ADC noise)
+    "const NOISE_FLOOR_SCALE = 3.0;" +    // gate opens at noise_floor × this (~+9.5 dB above floor)
+    "const NOISE_RISE_PER_WIN = 1.06;" +  // +0.5 dB per 267 ms ≈ +1.9 dB/s — slew-limit upward jumps
+    "const STATS_BLOCKS = 50;" +          // post stats every ~133 ms
     "class PcmCapture extends AudioWorkletProcessor {" +
-    "  constructor() { super(); this._env = 0; this._gr = 1.0; this._gateHold = 0; }" +
+    "  constructor() {" +
+    "    super();" +
+    "    this._preGain = 16.0;" +
+    "    this._compThreshold = 0.7;" +
+    "    this._env = 0; this._gr = 1.0; this._gateHold = 0;" +
+    "    this._hpfX = 0; this._hpfY = 0; this._shelfLp = 0;" +
+    "    this._noiseFloor = 0.002;" +
+    "    this._gateThreshold = this._noiseFloor * NOISE_FLOOR_SCALE;" +
+    "    this._noiseHist = new Float32Array(NOISE_HISTORY_LEN);" +
+    "    this._noiseHist.fill(1.0);" +
+    "    this._noiseHistIdx = 0;" +
+    "    this._noiseHistFilled = 0;" +
+    "    this._winSqSum = 0; this._winSamples = 0; this._winBlocks = 0;" +
+    "    this._statsBlocks = 0;" +
+    "    this.port.onmessage = (e) => {" +
+    "      const d = e && e.data;" +
+    "      if (!d || typeof d !== 'object') return;" +
+    "      if (typeof d.preGain === 'number' && d.preGain > 0) this._preGain = d.preGain;" +
+    "      if (typeof d.compThreshold === 'number' && d.compThreshold > 0) this._compThreshold = d.compThreshold;" +
+    "    };" +
+    "  }" +
     "  process(inputs) {" +
     "    const ch = inputs[0] && inputs[0][0];" +
     "    if (!ch || !ch.length) return true;" +
     "    const out = new Int16Array(ch.length);" +
     "    let env = this._env, gr = this._gr, gateHold = this._gateHold;" +
+    "    let hpfX = this._hpfX, hpfY = this._hpfY, shelfLp = this._shelfLp;" +
+    "    const preGain = this._preGain, compThreshold = this._compThreshold;" +
+    "    const gateThreshold = this._gateThreshold;" +
+    "    let winSqSum = this._winSqSum;" +
     "    for (let i = 0; i < ch.length; i++) {" +
-    "      const raw = ch[i];" +
-    "      const abs_raw = raw < 0 ? -raw : raw;" +
-    "      if (abs_raw >= NOISE_GATE_THRESHOLD) gateHold = NOISE_GATE_HOLD_SAMPLES;" +
+    "      const xin = ch[i];" +
+    // 1. DC-blocking HPF
+    "      const newY = HPF_ALPHA * (hpfY + xin - hpfX);" +
+    "      hpfX = xin; hpfY = newY;" +
+    // 2. High-shelf via low-pass split
+    "      shelfLp += SHELF_LP_ALPHA * (newY - shelfLp);" +
+    "      const high = newY - shelfLp;" +
+    "      const shaped = newY + high * SHELF_GAIN;" +
+    // Accumulate energy on the SHAPED, pre-gain signal so the noise
+    // floor we compare against has the same spectral shape as what
+    // hits the gate.
+    "      winSqSum += shaped * shaped;" +
+    // 3. Adaptive noise gate
+    "      const absS = shaped < 0 ? -shaped : shaped;" +
+    "      if (absS >= gateThreshold) gateHold = NOISE_GATE_HOLD_SAMPLES;" +
     "      if (gateHold <= 0) {" +
     "        out[i] = 0;" +
     "        env *= 0.95;" +  // bleed envelope down so we don't pop on next gate-open
     "        continue;" +
     "      }" +
     "      gateHold--;" +
-    "      const boosted = raw * PRE_GAIN;" +
-    "      const abs_s = boosted < 0 ? -boosted : boosted;" +
-    "      if (abs_s > env) env += (abs_s - env) * ATTACK_COEF;" +
-    "      else env += (abs_s - env) * RELEASE_COEF;" +
-    "      const target = env > COMP_THRESHOLD ? COMP_THRESHOLD / env : 1.0;" +
+    // 4. Pre-gain
+    "      const boosted = shaped * preGain;" +
+    // 5. Envelope follower
+    "      const absB = boosted < 0 ? -boosted : boosted;" +
+    "      if (absB > env) env += (absB - env) * ATTACK_COEF;" +
+    "      else env += (absB - env) * RELEASE_COEF;" +
+    // 6. Compressor
+    "      const target = env > compThreshold ? compThreshold / env : 1.0;" +
     "      gr += (target - gr) * GAIN_SMOOTH;" +
     "      let s = boosted * gr;" +
+    // 7. Hard limiter
     "      if (s > HARD_LIMIT) s = HARD_LIMIT;" +
     "      else if (s < -HARD_LIMIT) s = -HARD_LIMIT;" +
     "      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;" +
     "    }" +
     "    this._env = env; this._gr = gr; this._gateHold = gateHold;" +
+    "    this._hpfX = hpfX; this._hpfY = hpfY; this._shelfLp = shelfLp;" +
+    "    this._winSqSum = winSqSum;" +
+    "    this._winSamples += ch.length;" +
+    "    this._winBlocks++;" +
+    "    if (this._winBlocks >= NOISE_BLOCKS_PER_WIN) {" +
+    "      const winRms = Math.sqrt(this._winSqSum / Math.max(1, this._winSamples));" +
+    "      this._noiseHist[this._noiseHistIdx % NOISE_HISTORY_LEN] = winRms;" +
+    "      this._noiseHistIdx++;" +
+    "      if (this._noiseHistFilled < NOISE_HISTORY_LEN) this._noiseHistFilled++;" +
+    "      let minVal = this._noiseHist[0];" +
+    "      const N = this._noiseHistFilled;" +
+    "      for (let k = 1; k < N; k++) { if (this._noiseHist[k] < minVal) minVal = this._noiseHist[k]; }" +
+    "      let target = minVal < NOISE_FLOOR_MIN ? NOISE_FLOOR_MIN : minVal;" +
+    "      const maxRise = this._noiseFloor * NOISE_RISE_PER_WIN;" +
+    "      this._noiseFloor = target > this._noiseFloor ? (target < maxRise ? target : maxRise) : target;" +
+    "      this._gateThreshold = this._noiseFloor * NOISE_FLOOR_SCALE;" +
+    "      this._winSqSum = 0; this._winSamples = 0; this._winBlocks = 0;" +
+    "    }" +
     "    this.port.postMessage(out.buffer, [out.buffer]);" +
+    "    this._statsBlocks++;" +
+    "    if (this._statsBlocks >= STATS_BLOCKS) {" +
+    "      this._statsBlocks = 0;" +
+    "      this.port.postMessage({" +
+    "        type: 'stats'," +
+    "        noiseFloor: this._noiseFloor," +
+    "        gateThreshold: this._gateThreshold," +
+    "        gainReduction: this._gr," +
+    "        envelope: this._env," +
+    "        gateOpen: this._gateHold > 0," +
+    "        preGain: this._preGain" +
+    "      });" +
+    "    }" +
     "    return true;" +
     "  }" +
     "}" +
@@ -452,17 +565,28 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     audioSourceNode = audioContext.createMediaStreamSource(mediaStream);
     audioWorkletNode = new AudioWorkletNode(audioContext, "pcm-capture");
     audioWorkletNode.port.onmessage = (e) => {
-      if (!sending) return;
-      const buf = e.data;  // ArrayBuffer of Int16
-      if (!buf || !(buf instanceof ArrayBuffer)) return;
-      audioQueue.push(buf);
-      audioQueuedBytes += buf.byteLength;
-      // Fire-and-forget flush at ~100ms worth of samples.
-      if (audioQueuedBytes >= AUDIO_CHUNK_BYTES) {
-        flushAudioQueue();
+      const d = e.data;
+      // The worklet posts two message kinds: ArrayBuffer (Int16 PCM)
+      // for upload, or a plain object for stats / telemetry.
+      if (d instanceof ArrayBuffer) {
+        if (!sending) return;
+        audioQueue.push(d);
+        audioQueuedBytes += d.byteLength;
+        // Fire-and-forget flush at ~100ms worth of samples.
+        if (audioQueuedBytes >= AUDIO_CHUNK_BYTES) {
+          flushAudioQueue();
+        }
+        return;
+      }
+      if (d && typeof d === "object" && d.type === "stats") {
+        renderAudioStats(d);
       }
     };
     audioSourceNode.connect(audioWorkletNode);
+    // Push the initial config (pre_gain + comp_threshold) corresponding
+    // to the currently-selected "Mic distance" mode. Mode changes after
+    // this just re-post a config message; no need to rebuild the worklet.
+    sendAudioConfigForMode(distSelect ? distSelect.value : "near");
     // Intentionally NOT connected to destination — we don't want to
     // play the mic back through the phone's speakers.
     ensureSilentKeepalive();
@@ -493,6 +617,45 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     finally { audioInflight = false; }
   }
 
+  // Mode → worklet config table. Near matches the original close-talk
+  // tuning. Far bumps pre-gain by 6 dB (16x → 32x) and lowers the
+  // compressor threshold from -3 dBFS to -7 dBFS so far-field speech,
+  // which has a smaller dynamic range, also gets reliably compressed
+  // up to a steady output level.
+  function audioConfigForMode(mode) {
+    if (mode === "far") return { preGain: 32.0, compThreshold: 0.45 };
+    return { preGain: 16.0, compThreshold: 0.7 };
+  }
+
+  function sendAudioConfigForMode(mode) {
+    if (!audioWorkletNode) return;
+    try { audioWorkletNode.port.postMessage(audioConfigForMode(mode)); }
+    catch (_) {}
+  }
+
+  // Live audio readout. Shows the estimated room-noise floor, the
+  // gate threshold (= floor × scale), and an open/quiet indicator,
+  // so the user can see at a glance whether the mic is in a
+  // workable environment and pick a phone position accordingly.
+  function renderAudioStats(s) {
+    if (!audioStatsEl) return;
+    const dB = (v) => v > 1e-7 ? (20 * Math.log10(v)).toFixed(0) + " dBFS" : "-inf";
+    const status = s.gateOpen ? "speech" : "silence";
+    const gainTxt = s.preGain ? Math.round(s.preGain) + "x" : "";
+    audioStatsEl.style.display = "block";
+    audioStatsEl.textContent =
+      "noise " + dB(s.noiseFloor) +
+      " · gate " + dB(s.gateThreshold) +
+      " · " + status +
+      (gainTxt ? " · " + gainTxt : "");
+  }
+
+  function clearAudioStats() {
+    if (!audioStatsEl) return;
+    audioStatsEl.style.display = "none";
+    audioStatsEl.textContent = "";
+  }
+
   function stopAudioPipeline() {
     if (audioWorkletNode) {
       try { audioWorkletNode.disconnect(); } catch (_) {}
@@ -510,6 +673,7 @@ CLIENT_HTML = r"""<!DOCTYPE html>
     audioQueue = [];
     audioQueuedBytes = 0;
     audioInflight = false;
+    clearAudioStats();
   }
 
   async function startLoop() {
@@ -709,6 +873,12 @@ CLIENT_HTML = r"""<!DOCTYPE html>
   fpsSelect.addEventListener("change", restartStreamOnSettingsChange);
   facingSelect.addEventListener("change", restartStreamOnSettingsChange);
   micSelect.addEventListener("change", restartStreamOnSettingsChange);
+  // Mic-distance mode just re-pushes config to the running worklet —
+  // no need to re-open the camera/audio stream, so the user gets an
+  // immediate change with no hiccup in the active conversation.
+  if (distSelect) {
+    distSelect.addEventListener("change", () => sendAudioConfigForMode(distSelect.value));
+  }
 
   // ESC / back-gesture to exit fullscreen
   document.addEventListener("fullscreenchange", () => {
@@ -813,3 +983,5 @@ CLIENT_HTML = r"""<!DOCTYPE html>
 </body>
 </html>
 """
+
+# Author: Konstantin Markov

@@ -282,3 +282,5 @@ def open_preferred_or_first_available(preferred_index: Optional[int], max_index:
     if cap is None:
         return None, None
     return selected, cap
+
+# Author: Konstantin Markov

@@ -527,3 +527,5 @@ class MiniLiveViewer(QWidget):
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
         QTimer.singleShot(0, self._sync_hover_state)
+
+# Author: Konstantin Markov

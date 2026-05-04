@@ -87,3 +87,5 @@ Current candidates, roughly ranked by impact:
 2. **PowerShell removal (2.1)** — actively breaks installs for other users. Dropping SAPI is a prereq for cleaning up the dictation stack too.
 3. **Motion blur (2.2)** — quality issue, app still works.
 4. **Selector window cursor (4.1)** — roadmap feature.
+
+<!-- Author: Konstantin Markov -->

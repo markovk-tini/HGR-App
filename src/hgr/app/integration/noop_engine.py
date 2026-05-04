@@ -7461,3 +7461,5 @@ class GestureWorker(QObject):
         self._save_prompt_active = True
         self._start_voice_capture(mode="save_prompt", preferred_app=None)
         return True
+
+# Author: Konstantin Markov

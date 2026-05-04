@@ -28,3 +28,5 @@ class GestureSmoother:
         if self._count >= self.required_frames and confidence >= 0.60:
             self._stable = raw_gesture
         return self._stable, self._count
+
+# Author: Konstantin Markov

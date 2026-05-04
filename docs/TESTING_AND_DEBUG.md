@@ -26,3 +26,5 @@ The cleanup wave should answer:
 
 Never stop at 'feature now works'.
 A task is only done when it also survives the likely neighboring regressions.
+
+<!-- Author: Konstantin Markov -->

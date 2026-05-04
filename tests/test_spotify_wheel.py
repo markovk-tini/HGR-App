@@ -38,3 +38,5 @@ class SpotifyWheelHelperTest(unittest.TestCase):
     def test_clean_playlist_reply_strips_filler(self) -> None:
         cleaned = self.window._clean_playlist_reply("please add this song to my chill mix playlist")
         self.assertEqual(cleaned, "chill mix")
+
+# Author: Konstantin Markov

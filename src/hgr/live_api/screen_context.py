@@ -119,3 +119,5 @@ class ScreenContext:
                 self._logger.exception("screen_capture_debug_save_failed", exc)
 
         return frame
+
+# Author: Konstantin Markov

@@ -188,3 +188,5 @@ class SpotifyGestureRouter:
         if controller.is_window_active():
             return True
         return False
+
+# Author: Konstantin Markov

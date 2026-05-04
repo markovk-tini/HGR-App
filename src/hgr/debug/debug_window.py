@@ -966,3 +966,5 @@ class DebugWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_session()
         super().closeEvent(event)
+
+# Author: Konstantin Markov

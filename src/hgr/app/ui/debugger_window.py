@@ -9,3 +9,5 @@ class DebuggerWindow(LiveViewWindow):
 
     def show_compact(self) -> None:
         self.hide()
+
+# Author: Konstantin Markov

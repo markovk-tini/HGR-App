@@ -665,3 +665,5 @@ class FfmpegMjpegCapture:
             self.release()
         except Exception:
             pass
+
+# Author: Konstantin Markov

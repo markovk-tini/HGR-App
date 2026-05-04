@@ -84,3 +84,5 @@ def score_swipe_right(context: DynamicDetectionContext) -> dict[str, float]:
         * (0.45 + 0.55 * axis_ratio_gate)
     )
     return {'swipe_right': score}
+
+# Author: Konstantin Markov

@@ -103,3 +103,5 @@ def score_group_a(features: StaticFeatures) -> StaticGestureScores:
             + 0.08 * zero_any_close
         ),
     }
+
+# Author: Konstantin Markov

@@ -21,3 +21,5 @@ def build_bounds(landmarks: np.ndarray, padding: float = 0.12) -> HandBounds:
         center_y=float(center[1]),
         area=float(padded_size[0] * padded_size[1]),
     )
+
+# Author: Konstantin Markov

@@ -3336,12 +3336,27 @@ class MainWindow(QMainWindow):
         # release (or one strictly newer that they later dismissed),
         # don't pester them on every launch. Re-prompt only when
         # GitHub ships a newer version than the dismissed one.
+        # Manual checks bypass this — if the user explicitly clicked
+        # "Check for Updates" they're asking for the dialog regardless
+        # of past dismissals, and we clear the dismissal so future
+        # auto-prompts work too (their earlier Later was effectively
+        # withdrawn).
+        manual = bool(getattr(self, "_in_manual_update_check", False))
         try:
             from ..updater.release_checker import _parse_version_tuple
             dismissed = str(getattr(self.config, "last_dismissed_update_version", "") or "").strip()
-            if dismissed:
+            if dismissed and not manual:
                 if _parse_version_tuple(info.version) <= _parse_version_tuple(dismissed):
                     return
+            if manual and dismissed:
+                # Withdraw the dismissal so the auto-check path also
+                # surfaces this version next launch, in case the
+                # download fails midway and they want a retry prompt.
+                try:
+                    self.config.last_dismissed_update_version = ""
+                    save_config(self.config)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -3604,6 +3619,11 @@ class MainWindow(QMainWindow):
         self._settings_search_results.setVisible(False)
         self._settings_search_results.itemActivated.connect(self._on_settings_search_result_clicked)
         self._settings_search_results.itemClicked.connect(self._on_settings_search_result_clicked)
+        # Explicit color on every state — without an explicit `color`
+        # rule on :hover and :selected, Qt sometimes paints the text
+        # with the platform's system selection-foreground colour,
+        # which on Windows can match the green-tinted highlight
+        # background and look like an empty bar.
         self._settings_search_results.setStyleSheet(
             "QListWidget#settingsSearchResults {"
             "  background-color: rgba(15,23,42,0.96);"
@@ -3612,11 +3632,33 @@ class MainWindow(QMainWindow):
             "  border-radius: 8px;"
             "  padding: 4px;"
             "}"
-            "QListWidget#settingsSearchResults::item { padding: 6px 8px; border-radius: 4px; }"
-            "QListWidget#settingsSearchResults::item:hover { background-color: rgba(29,233,182,0.18); }"
-            "QListWidget#settingsSearchResults::item:selected { background-color: rgba(29,233,182,0.28); }"
+            "QListWidget#settingsSearchResults::item {"
+            "  padding: 8px 10px; border-radius: 4px; color: #E5F6FF;"
+            "  min-height: 22px;"
+            "}"
+            "QListWidget#settingsSearchResults::item:hover {"
+            "  background-color: rgba(29,233,182,0.18); color: #E5F6FF;"
+            "}"
+            "QListWidget#settingsSearchResults::item:selected {"
+            "  background-color: rgba(29,233,182,0.28); color: #E5F6FF;"
+            "}"
         )
-        self._settings_search_results.setMaximumHeight(220)
+        # Was 220 — too short on the default window size, so single-
+        # letter search results got vertically squished and rendered
+        # as a near-empty bar with the matching label cropped to a
+        # pixel-tall sliver. 320 gives ~10 items room without
+        # crowding the rest of the sidebar.
+        self._settings_search_results.setMaximumHeight(320)
+        # Ensure the dropdown gets at least enough vertical room to
+        # show the highlighted result legibly even when other
+        # sidebar widgets compete for space.
+        self._settings_search_results.setMinimumHeight(160)
+        # Make each row taller so the text isn't crushed against the
+        # row borders, and doesn't blur the selection background.
+        try:
+            self._settings_search_results.setUniformItemSizes(True)
+        except Exception:
+            pass
         left_layout.addWidget(self._settings_search_results)
         # Populated lazily after settings_content_stack is built.
         self._settings_search_index: list = []
@@ -3998,20 +4040,45 @@ class MainWindow(QMainWindow):
             self._settings_search_results.setVisible(False)
             return
         tokens = [tok for tok in query.split() if tok]
+        # While searching, hide ALL nav buttons so the dropdown owns
+        # the sidebar visually — otherwise filtered nav buttons stack
+        # beneath the dropdown and the page reads as a confused mix
+        # of "matching entries" and "matching tabs". Restoring them is
+        # handled by the empty-query branch above.
         for button in self._settings_nav_buttons:
-            haystack = f"{button.text().lower()} {self._settings_nav_search_keywords.get(button, '')}"
-            button.setVisible(all(tok in haystack for tok in tokens))
+            button.setVisible(False)
         # Populate the results dropdown with entries whose haystack
-        # contains every token. Limit to ~12 to avoid a giant list.
+        # contains every token. Skip entries with empty labels (those
+        # were causing the "empty row" reports), and rank by relevance
+        # so a single letter like "s" surfaces "Save Locations" near
+        # the top instead of burying it among substring-matched
+        # gesture-card entries.
         from PySide6.QtWidgets import QListWidgetItem
         from PySide6.QtCore import Qt as _Qt
         self._settings_search_results.clear()
-        matches: list[dict] = []
+        scored: list[tuple[int, int, dict]] = []
         for entry in self._settings_search_index:
-            haystack = entry["haystack"]
-            if all(tok in haystack for tok in tokens):
-                matches.append(entry)
-        matches = matches[:12]
+            label = str(entry.get("label") or "").strip()
+            haystack = str(entry.get("haystack") or "")
+            if not label or not haystack:
+                continue
+            if not all(tok in haystack for tok in tokens):
+                continue
+            label_lower = label.lower()
+            # Lower score = higher priority. The triple-tier ranking:
+            #   0  label starts with the query (e.g., 's' -> 'Save…')
+            #   1  any haystack word starts with the FIRST token
+            #   2  pure substring match (the loosest tier)
+            if label_lower.startswith(tokens[0]):
+                score = 0
+            elif any(word.startswith(tokens[0]) for word in haystack.split()):
+                score = 1
+            else:
+                score = 2
+            scored.append((score, len(label), entry))
+        # Stable sort: same-score entries keep insertion order.
+        scored.sort(key=lambda triple: (triple[0], triple[1]))
+        matches = [t[2] for t in scored[:12]]
         for entry in matches:
             item = QListWidgetItem(entry["label"])
             item.setData(_Qt.UserRole, entry)
@@ -4398,13 +4465,24 @@ class MainWindow(QMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(14)
 
-        # Pill — appears under the subtitle while a rebind is pending.
+        # ---- Floating pills -------------------------------------------
+        # Both the rebind-hint pill and the conflict warning pill float
+        # at the bottom of the panel — they're parented to `panel` (NOT
+        # the scrolled body) so they stay anchored as the user scrolls
+        # through the bindings table or the All Gesture Poses list.
+        # Positioned manually via _position_gesture_binds_pill, kicked
+        # off on showEvent + every panel resize (event filter installed
+        # below). When both are visible, the warning sits ABOVE the
+        # rebind hint so the warning is read first.
         pill = QLabel(
             "To change this action's activation gesture click on a gesture pose from the "
-            "All Gesture Poses list. Press Esc to cancel."
+            "All Gesture Poses list. Press Esc to cancel.",
+            panel,
         )
         pill.setObjectName("gestureBindsPill")
         pill.setWordWrap(True)
+        pill.setAlignment(Qt.AlignCenter)
+        pill.setMaximumWidth(560)
         pill.setVisible(False)
         pill.setStyleSheet(
             f"""
@@ -4412,14 +4490,38 @@ class MainWindow(QMainWindow):
                 background: rgba(29, 233, 182, 0.16);
                 border: 1px solid {accent};
                 border-radius: 10px;
-                padding: 10px 14px;
-                color: {self.config.text_color or "#E5F6FF"};
+                padding: 10px 16px;
+                color: {accent};
                 font-size: 13px;
+                font-weight: 600;
             }}
             """
         )
         self._gesture_binds_pill = pill
-        body_layout.addWidget(pill)
+
+        warning_pill = QLabel("", panel)
+        warning_pill.setObjectName("gestureBindsPillWarning")
+        warning_pill.setWordWrap(True)
+        warning_pill.setAlignment(Qt.AlignCenter)
+        warning_pill.setMaximumWidth(560)
+        warning_pill.setVisible(False)
+        warning_pill.setStyleSheet(
+            f"""
+            QLabel#gestureBindsPillWarning {{
+                background: rgba(255, 193, 7, 0.18);
+                border: 1px solid rgba(255, 193, 7, 0.85);
+                border-radius: 10px;
+                padding: 10px 16px;
+                color: #FFC107;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            """
+        )
+        self._gesture_binds_pill_warning = warning_pill
+        # Watch the panel's resize so both floating pills stay anchored
+        # to the bottom-center as the user resizes the window.
+        panel.installEventFilter(self)
 
         columns = QHBoxLayout()
         columns.setSpacing(18)
@@ -4507,12 +4609,12 @@ class MainWindow(QMainWindow):
                 text-align: left;
                 padding: 8px 12px;
                 border-radius: 8px;
-                background: rgba(255, 255, 255, 0.06);
-                border: 1px solid rgba(255, 255, 255, 0.10);
+                background: rgba(127, 127, 127, 0.10);
+                border: 1px solid rgba(127, 127, 127, 0.22);
                 color: {self.config.text_color or "#E5F6FF"};
             }}
             QPushButton#gestureBindActiveButton:hover {{
-                background: rgba(255, 255, 255, 0.10);
+                background: rgba(127, 127, 127, 0.18);
             }}
             QPushButton#gestureBindActiveButton[pendingRebind="true"] {{
                 background: rgba(29, 233, 182, 0.18);
@@ -4520,8 +4622,8 @@ class MainWindow(QMainWindow):
                 color: {accent};
             }}
             QListWidget#gestureBindsPosesList {{
-                background: rgba(10, 28, 39, 0.55);
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: rgba(127, 127, 127, 0.12);
+                border: 1px solid rgba(127, 127, 127, 0.22);
                 border-radius: 8px;
                 padding: 4px;
                 color: {self.config.text_color or "#E5F6FF"};
@@ -4532,7 +4634,7 @@ class MainWindow(QMainWindow):
                 color: {self.config.text_color or "#E5F6FF"};
             }}
             QListWidget#gestureBindsPosesList::item:hover {{
-                background: rgba(255, 255, 255, 0.08);
+                background: rgba(127, 127, 127, 0.22);
                 color: {self.config.text_color or "#E5F6FF"};
             }}
             QListWidget#gestureBindsPosesList::item:selected {{
@@ -4613,6 +4715,69 @@ class MainWindow(QMainWindow):
             self._gesture_binds_active_buttons[action_id] = btn
             grid.addWidget(btn, row_idx, 1)
 
+        # Conflict scan after the table rebuilds: highlights any pose
+        # bound to 2+ actions in a yellow warning pill above the
+        # table.
+        self._refresh_gesture_binds_warnings()
+
+    def _refresh_gesture_binds_warnings(self) -> None:
+        """Scan the effective binding map (saved + pending changes) and
+        surface a warning pill when 2+ actions share the same pose.
+        Hidden when no conflicts exist. Updated whenever the table is
+        rebuilt or a pose click changes a pending binding."""
+        warning = getattr(self, "_gesture_binds_pill_warning", None)
+        if warning is None:
+            return
+        # Build the effective map: action_id -> pose_id, where a
+        # pending unsaved change wins over saved value, which wins
+        # over the action's default.
+        rows = self._collect_gesture_bind_actions()
+        pending = getattr(self, "_gesture_binds_pending_changes", {}) or {}
+        effective: dict[str, str] = {}
+        for action_id, _label, default_pose in rows:
+            pose_id = pending.get(action_id) \
+                or resolve_gesture_binding(self.config, action_id) \
+                or default_pose
+            if pose_id:
+                effective[action_id] = pose_id
+        # Group action_ids by pose_id; any group with >= 2 actions is
+        # a conflict.
+        action_label_lookup = {a[0]: a[1] for a in rows}
+        groups: dict[str, list[str]] = {}
+        for action_id, pose_id in effective.items():
+            groups.setdefault(pose_id, []).append(action_id)
+        conflicts = [
+            (pose_id, sorted(action_ids, key=lambda a: action_label_lookup.get(a, a)))
+            for pose_id, action_ids in groups.items()
+            if len(action_ids) >= 2
+        ]
+        if not conflicts:
+            warning.setVisible(False)
+            warning.clear()
+            self._position_gesture_binds_pill()
+            return
+        # Compose the message. Single-conflict case reads naturally;
+        # multi-conflict case bullets each pose so users can scan.
+        if len(conflicts) == 1:
+            pose_id, action_ids = conflicts[0]
+            pose_label = self._pose_label_for_id(pose_id)
+            action_names = [action_label_lookup.get(a, a) for a in action_ids]
+            text = (
+                "Warning: Two or more actions are using the same gesture. "
+                f"Actions {', '.join(action_names)} are using gesture {pose_label}."
+            )
+        else:
+            lines = ["Warning: Two or more actions share the same gesture:"]
+            for pose_id, action_ids in conflicts:
+                pose_label = self._pose_label_for_id(pose_id)
+                action_names = [action_label_lookup.get(a, a) for a in action_ids]
+                lines.append(f"  • {pose_label}: {', '.join(action_names)}")
+            text = "\n".join(lines)
+        warning.setText(text)
+        warning.setVisible(True)
+        warning.raise_()
+        self._position_gesture_binds_pill()
+
     def _refresh_gesture_binds_poses_list(self) -> None:
         lw = getattr(self, "_gesture_binds_poses_list", None)
         if lw is None:
@@ -4639,9 +4804,57 @@ class MainWindow(QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
         if self._gesture_binds_pill is not None:
+            self._position_gesture_binds_pill()
             self._gesture_binds_pill.setVisible(True)
+            self._gesture_binds_pill.raise_()
         # Make sure the panel can receive Esc key presses.
         self.setFocus()
+
+    def _position_gesture_binds_pill(self) -> None:
+        """Anchor the floating Gesture Binds pills (rebind hint +
+        conflict warning) to the bottom-center of their parent panel.
+        Called on show + on panel resize so they stay put as the user
+        resizes the window or scrolls the panel content. Layout:
+
+            [warning pill (when visible)]
+            [rebind pill (when visible)]
+            ~16 px from panel bottom
+        """
+        rebind = getattr(self, "_gesture_binds_pill", None)
+        warning = getattr(self, "_gesture_binds_pill_warning", None)
+        parent = None
+        for candidate in (rebind, warning):
+            if candidate is not None and candidate.parentWidget() is not None:
+                parent = candidate.parentWidget()
+                break
+        if parent is None:
+            return
+        target_w = min(560, max(320, int(parent.width() * 0.7)))
+
+        # Re-flow the rebind pill (height depends on wrap at target_w).
+        rebind_h = 0
+        if rebind is not None:
+            rebind.setFixedWidth(target_w)
+            rebind.adjustSize()
+            rebind_h = rebind.sizeHint().height() if rebind.isVisible() else 0
+        warning_h = 0
+        if warning is not None:
+            warning.setFixedWidth(target_w)
+            warning.adjustSize()
+            warning_h = warning.sizeHint().height() if warning.isVisible() else 0
+
+        x = max(0, (parent.width() - target_w) // 2)
+        bottom = parent.height() - 16
+        # Stack from the bottom upward: rebind pill closest to bottom,
+        # warning pill above it.
+        if rebind is not None:
+            y_rebind = max(0, bottom - rebind.sizeHint().height())
+            rebind.setGeometry(x, y_rebind, target_w, rebind.sizeHint().height())
+        if warning is not None:
+            # Lift above the rebind pill if both are visible.
+            offset = (rebind.sizeHint().height() + 8) if (rebind is not None and rebind.isVisible()) else 0
+            y_warn = max(0, bottom - warning.sizeHint().height() - offset)
+            warning.setGeometry(x, y_warn, target_w, warning.sizeHint().height())
 
     def _clear_gesture_bind_pending(self) -> None:
         action_id = self._gesture_binds_pending_action
@@ -4667,6 +4880,9 @@ class MainWindow(QMainWindow):
         if btn is not None:
             btn.setText(self._pose_label_for_id(pose_id))
         self._clear_gesture_bind_pending()
+        # The new pending binding may have created (or resolved) a
+        # collision — re-scan and refresh the yellow warning pill.
+        self._refresh_gesture_binds_warnings()
 
     def _save_gesture_bindings(self) -> None:
         if not self._gesture_binds_pending_changes:
@@ -4684,6 +4900,9 @@ class MainWindow(QMainWindow):
             TouchlessNotice.show_warn(self, "Save failed", f"Could not write settings: {exc}")
             return
         self._gesture_binds_pending_changes.clear()
+        # Pending changes flushed — re-scan in case the user just saved
+        # a configuration that still has overlapping bindings.
+        self._refresh_gesture_binds_warnings()
         TouchlessNotice.show_info(
             self,
             "Gesture Binds",
@@ -4935,6 +5154,8 @@ class MainWindow(QMainWindow):
             initial_value = str(payload.get("url", ""))
         elif action_kind == "run_command":
             initial_value = str(payload.get("command", ""))
+        elif action_kind == "show_overlay_drawing":
+            initial_value = str(payload.get("filename", ""))
         else:
             initial_value = ""
         initial_hold = float(payload.get("hold_s", 1.0)) if payload else 1.0
@@ -4956,9 +5177,35 @@ class MainWindow(QMainWindow):
             return
         result = wizard.result_payload
 
-        # Save back in place — keep the existing recorded samples, swap
-        # only the metadata + action. If the user changed the name,
-        # remove the old entry first.
+        # Save back in place — keep the existing recorded samples,
+        # handedness, AND the user-picked thumbnail image. Editing
+        # only changes metadata + action. If the user changed the
+        # name, remove the old entry AND rename the thumbnail file
+        # so the new entry's image_filename still resolves on disk.
+        previous_image_filename = str(getattr(existing, "image_filename", "") or "")
+        new_image_filename = previous_image_filename
+        if result.name != existing.name and previous_image_filename:
+            try:
+                old_path = registry.thumbnails_dir() / previous_image_filename
+                if old_path.exists():
+                    safe = "".join(
+                        ch if ch.isalnum() or ch in ("-", "_") else "_"
+                        for ch in result.name
+                    ).strip("_") or "gesture"
+                    new_image_filename = f"{safe}.png"
+                    new_path = registry.thumbnails_dir() / new_image_filename
+                    if new_path != old_path:
+                        try:
+                            if new_path.exists():
+                                new_path.unlink()
+                        except Exception:
+                            pass
+                        old_path.rename(new_path)
+            except Exception:
+                # Fall back to the original filename if rename fails;
+                # the image still resolves under the prior name even
+                # if the new entry's display name differs.
+                new_image_filename = previous_image_filename
         if result.name != existing.name:
             registry.remove(existing.name)
         try:
@@ -4969,6 +5216,7 @@ class MainWindow(QMainWindow):
                 description=result.description,
                 overwrite=True,
                 handedness=existing.handedness,  # preserve recorded hand
+                image_filename=new_image_filename,  # preserve the picked image
             )
         except ValueError as exc:
             QMessageBox.critical(self, "Edit failed", str(exc))
@@ -4995,6 +5243,13 @@ class MainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
+        # Light / Dark Mode toggle. Click to flip the whole color
+        # scheme; the button label reflects the *next* state so the
+        # user knows what the click will do.
+        in_light_mode = self._is_light_mode_active()
+        self.light_mode_button = QPushButton("Dark Mode" if in_light_mode else "Light Mode")
+        self.light_mode_button.clicked.connect(self._on_light_mode_clicked)
+        button_row.addWidget(self.light_mode_button)
         revert_button = QPushButton("Revert to Original")
         revert_button.clicked.connect(self.revert_to_original_colors)
         apply_button = QPushButton("Apply Changes")
@@ -5006,6 +5261,147 @@ class MainWindow(QMainWindow):
         layout.addWidget(colors_box)
         layout.addStretch(1)
         return panel
+
+    # ---- Light / Dark mode --------------------------------------------
+    # A "light mode" preset palette flipped via the button below the
+    # color rows. Tuned for readability without being eye-searingly
+    # bright:
+    #   primary_color  — used for buttons; deep teal so it pops
+    #                    against the soft surface (was #FFFFFF, which
+    #                    blended into the surface and made buttons
+    #                    indistinguishable)
+    #   surface_color  — soft warm-grey paper (was #F2F4F7 with
+    #                    primary white — too similar + too bright)
+    #   accent_color   — slightly muted teal-green to cut glare while
+    #                    keeping the Touchless identity
+    #   text_color     — near-black so text reads clearly on the
+    #                    soft surface
+    _LIGHT_MODE_COLORS = {
+        "primary_color": "#7BA7D9",
+        "accent_color": "#0E8A6B",
+        "surface_color": "#D5DCE5",
+        "text_color": "#1A1F2C",
+    }
+
+    def _is_light_mode_active(self) -> bool:
+        """True iff the current config matches every value in the
+        light-mode preset. Used to decide which label the toggle
+        button shows next to the user."""
+        for attr, value in self._LIGHT_MODE_COLORS.items():
+            if str(getattr(self.config, attr, "") or "").upper() != value.upper():
+                return False
+        return True
+
+    def _on_light_mode_clicked(self) -> None:
+        """Toggle between the light-mode preset and the Touchless
+        original (dark) palette. The button label flips to show the
+        next state so the click target reads "Dark Mode" while the
+        app is in light mode and vice versa.
+
+        Rebuilds the settings page after the palette change so every
+        panel-builder f-string (which inlines setStyleSheet calls
+        with the active text/surface colors) re-reads the new theme.
+        Without the rebuild, inline styles created during the
+        previous theme stay baked in and a switch back to the other
+        mode leaves stale text colors all over the place."""
+        if self._is_light_mode_active():
+            # Switch back to the original dark palette.
+            self.config.primary_color = ORIGINAL_PRIMARY_COLOR
+            self.config.accent_color = ORIGINAL_ACCENT_COLOR
+            self.config.surface_color = ORIGINAL_SURFACE_COLOR
+            self.config.text_color = ORIGINAL_TEXT_COLOR
+        else:
+            for attr, value in self._LIGHT_MODE_COLORS.items():
+                setattr(self.config, attr, value)
+        save_config(self.config)
+        self._rebuild_settings_page_for_theme_change()
+        self.apply_theme()
+        # Re-render any custom action-history rows so their inline
+        # styles pick up the new text color too.
+        try:
+            worker = getattr(self, "_worker", None)
+            history = list(getattr(worker, "action_history", []) or []) if worker is not None else []
+            self._on_action_history_changed(history)
+        except Exception:
+            pass
+        # Update the button label to reflect the NEW state. The
+        # rebuild above replaced the old button reference.
+        if hasattr(self, "light_mode_button"):
+            self.light_mode_button.setText(
+                "Dark Mode" if self._is_light_mode_active() else "Light Mode"
+            )
+
+    def _rebuild_settings_page_for_theme_change(self) -> None:
+        """Tear down the current settings page and build a fresh one
+        with the new palette baked in. Preserves the section the user
+        was viewing AND repopulates the combos / state-dependent
+        widgets that the build methods leave empty (camera /
+        microphone dropdowns, save-location inputs, etc.)."""
+        try:
+            current_index = self.settings_content_stack.currentIndex() if hasattr(self, "settings_content_stack") else 0
+        except Exception:
+            current_index = 0
+        was_on_settings = (
+            hasattr(self, "page_stack")
+            and self.page_stack.currentWidget() is getattr(self, "settings_page", None)
+        )
+        old_page = getattr(self, "settings_page", None)
+        # Build the new page first so any signal connections inside
+        # settings get fresh widgets to bind to.
+        try:
+            new_page = self._build_settings_page()
+        except Exception:
+            new_page = None
+        if new_page is None:
+            return
+        try:
+            if old_page is not None:
+                self.page_stack.removeWidget(old_page)
+                old_page.deleteLater()
+        except Exception:
+            pass
+        self.settings_page = new_page
+        self.page_stack.addWidget(new_page)
+        # Repopulate combos that the build methods create as empty
+        # widgets. The original population pipeline runs once at app
+        # init via QTimer.singleShot — without re-triggering it here
+        # the new (empty) combos look broken (microphone shows a
+        # blank dropdown that can't be opened). Re-run the full
+        # inventory refresh paths so the combos get items AND any
+        # state-dependent UI (mic-disabled-while-phone-mic-active)
+        # gets re-evaluated.
+        try:
+            self._rebuild_camera_combo()
+        except Exception:
+            pass
+        try:
+            self.refresh_microphone_inventory(update_status=False, notify=False)
+        except Exception:
+            try:
+                self._rebuild_microphone_combo()
+            except Exception:
+                pass
+        try:
+            self._refresh_phone_mic_dependent_ui()
+        except Exception:
+            pass
+        # Refresh the camera + microphone home-card labels so they
+        # reflect current state (some labels are touched by the
+        # build methods).
+        try:
+            self._refresh_camera_labels()
+        except Exception:
+            pass
+        # Restore navigation state.
+        try:
+            self.show_settings_section(current_index)
+        except Exception:
+            pass
+        if was_on_settings:
+            try:
+                self.page_stack.setCurrentWidget(new_page)
+            except Exception:
+                pass
 
     def _build_camera_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
@@ -5071,14 +5467,14 @@ class MainWindow(QMainWindow):
             "  font-size: 13px;"
             "}}"
             "QCheckBox#{name}:disabled {{"
-            "  color: rgba(255,255,255,0.35);"
+            "  color: rgba(127,127,127,0.55);"
             "}}"
             "QCheckBox#{name}::indicator {{"
             "  width: 16px;"
             "  height: 16px;"
             "  border-radius: 4px;"
-            "  border: 1px solid rgba(255,255,255,0.35);"
-            "  background: rgba(255,255,255,0.05);"
+            "  border: 1px solid rgba(127,127,127,0.55);"
+            "  background: rgba(127,127,127,0.10);"
             "}}"
             "QCheckBox#{name}::indicator:checked {{"
             "  background: {accent};"
@@ -5310,9 +5706,18 @@ class MainWindow(QMainWindow):
             if probe.has_any_gpu_path:
                 self.gpu_mode_button.setToolTip(probe.path_summary())
             else:
+                # path_summary() now returns an actionable, specific
+                # failure reason ("DirectML.dll could not be loaded
+                # ([WinError 5] Access is denied). Add the Touchless
+                # install folder to your antivirus exclusions...")
+                # rather than the generic "no GPU detected" line that
+                # left users with nothing to act on. Keep the
+                # safe-to-toggle reassurance on its own line so a user
+                # who can't fix the underlying cause still understands
+                # clicking won't break anything.
                 self.gpu_mode_button.setToolTip(
                     probe.path_summary()
-                    + " — toggling on is safe; runtime falls back to CPU MediaPipe automatically."
+                    + "\n\nToggling on is safe — runtime falls back to CPU MediaPipe automatically."
                 )
         except Exception:
             pass
@@ -5824,13 +6229,27 @@ class MainWindow(QMainWindow):
         self.config.low_fps_mode = bool(checked)
         save_config(self.config)
         self._refresh_low_fps_button_label()
-        worker = getattr(self, "_worker", None)
-        if worker is not None and hasattr(worker, "set_low_fps_mode"):
-            worker.set_low_fps_mode(self.config.low_fps_mode)
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
                 "Last action: Low FPS Mode on" if self.config.low_fps_mode else "Last action: Low FPS Mode off"
             )
+        # Defer the engine swap to the next event-loop tick so the
+        # button's :checked / text repaint actually lands BEFORE the
+        # rebuild starts. set_low_fps_mode rebuilds HandDetector and
+        # may also reopen the camera with ffmpeg-MJPG, which together
+        # block the UI thread for hundreds of ms; doing it inline
+        # would hold off the visual feedback for that whole duration
+        # and the click would feel unresponsive.
+        QTimer.singleShot(0, self._apply_low_fps_mode_to_worker)
+
+    def _apply_low_fps_mode_to_worker(self) -> None:
+        worker = getattr(self, "_worker", None)
+        if worker is None or not hasattr(worker, "set_low_fps_mode"):
+            return
+        try:
+            worker.set_low_fps_mode(self.config.low_fps_mode)
+        except Exception:
+            pass
 
     def _refresh_lite_mode_button_label(self) -> None:
         if not hasattr(self, "lite_mode_button"):
@@ -5843,9 +6262,6 @@ class MainWindow(QMainWindow):
         self.config.lite_mode = bool(checked)
         save_config(self.config)
         self._refresh_lite_mode_button_label()
-        worker = getattr(self, "_worker", None)
-        if worker is not None and hasattr(worker, "set_lite_mode"):
-            worker.set_lite_mode(self.config.lite_mode)
         # Push the new state into the live + mini viewers so the
         # blue "Lite" badge flips immediately, even before the next
         # frame from the worker arrives.
@@ -5860,6 +6276,18 @@ class MainWindow(QMainWindow):
             self.last_action_label.setText(
                 "Last action: Lite Mode on" if self.config.lite_mode else "Last action: Lite Mode off"
             )
+        # Defer the engine swap to the next event-loop tick — see
+        # _on_low_fps_button_toggled for the rationale.
+        QTimer.singleShot(0, self._apply_lite_mode_to_worker)
+
+    def _apply_lite_mode_to_worker(self) -> None:
+        worker = getattr(self, "_worker", None)
+        if worker is None or not hasattr(worker, "set_lite_mode"):
+            return
+        try:
+            worker.set_lite_mode(self.config.lite_mode)
+        except Exception:
+            pass
 
     def _refresh_gpu_mode_button_label(self) -> None:
         if not hasattr(self, "gpu_mode_button"):
@@ -5872,16 +6300,27 @@ class MainWindow(QMainWindow):
         self.config.gpu_mode = bool(checked)
         save_config(self.config)
         self._refresh_gpu_mode_button_label()
-        worker = getattr(self, "_worker", None)
-        if worker is not None and hasattr(worker, "set_gpu_mode"):
-            try:
-                worker.set_gpu_mode(self.config.gpu_mode)
-            except Exception:
-                pass
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
                 "Last action: GPU Mode on" if self.config.gpu_mode else "Last action: GPU Mode off"
             )
+        # Defer the engine swap to the next event-loop tick. The
+        # rebuild can take 1-3 s on a cold path (probe + new
+        # HandDetector + ffmpeg-MJPG camera reopen), and Qt holds
+        # back this button's :checked / text repaint until the slot
+        # returns. Without the defer the click felt like nothing
+        # happened on slower machines — the user reported exactly
+        # that and a packaged-app tester confirmed the symptom.
+        QTimer.singleShot(0, self._apply_gpu_mode_to_worker)
+
+    def _apply_gpu_mode_to_worker(self) -> None:
+        worker = getattr(self, "_worker", None)
+        if worker is None or not hasattr(worker, "set_gpu_mode"):
+            return
+        try:
+            worker.set_gpu_mode(self.config.gpu_mode)
+        except Exception:
+            pass
 
 
     def _build_microphone_panel(self) -> QWidget:
@@ -6589,7 +7028,9 @@ class MainWindow(QMainWindow):
 
         self._updates_status_label = QLabel("Click 'Check for Updates' to look for a newer version.")
         self._updates_status_label.setWordWrap(True)
-        self._updates_status_label.setStyleSheet("color: rgba(255,255,255,0.7); font-size: 12px;")
+        self._updates_status_label.setStyleSheet(
+            f"color: {self.config.text_color}; opacity: 0.85; font-size: 12px;"
+        )
         current_layout.addWidget(self._updates_status_label)
 
         layout.addWidget(current_box)
@@ -6628,6 +7069,11 @@ class MainWindow(QMainWindow):
             self._updates_check_button.setEnabled(False)
             self._updates_check_button.setText("Checking...")
         self._updates_status_label.setText("Checking GitHub for the latest release...")
+        # Mark this as a manual check so _on_update_available bypasses
+        # the dismissed-version short-circuit. Without this flag, a
+        # previous "Later" click silently suppressed the dialog even
+        # when the user explicitly asked for a re-check.
+        self._in_manual_update_check = True
         # Reuse the dialog flow from the auto-check path, so a found
         # update presents the same Download/Later UI the user already
         # knows from the startup notification.
@@ -6636,6 +7082,11 @@ class MainWindow(QMainWindow):
         checker.update_available.connect(self._on_manual_update_found)
         checker.no_update.connect(self._on_manual_no_update)
         checker.check_failed.connect(self._on_manual_check_failed)
+        # Clear the manual-check flag once the result fires (any of
+        # these terminal signals means the check is done).
+        checker.update_available.connect(lambda *_: setattr(self, "_in_manual_update_check", False))
+        checker.no_update.connect(lambda *_: setattr(self, "_in_manual_update_check", False))
+        checker.check_failed.connect(lambda *_: setattr(self, "_in_manual_update_check", False))
         checker.start()
         self._update_checker = checker  # keep alive
 
@@ -6667,7 +7118,9 @@ class MainWindow(QMainWindow):
         self._updates_history_fetcher.history_failed.connect(self._on_updates_history_failed)
         # Show a placeholder while loading.
         loading = QLabel("Loading release history from GitHub...")
-        loading.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; padding: 8px;")
+        loading.setStyleSheet(
+            f"color: {self.config.text_color}; opacity: 0.7; font-size: 12px; padding: 8px;"
+        )
         loading.setObjectName("updatesHistoryPlaceholder")
         self._updates_history_layout.insertWidget(0, loading)
         self._updates_history_fetcher.start()
@@ -6881,9 +7334,24 @@ Admin elevation
                     is_current=(entry.version == RUNNING_VERSION),
                 )
             results.append(entry)
-        # Sort newest-first by published_at; entries without dates
-        # fall to the bottom.
-        results.sort(key=lambda e: (e.published_at or ""), reverse=True)
+        # Sort newest-first. Use the parsed version tuple as a tie-
+        # breaker so two releases stamped with the same date (e.g.,
+        # b1 and b2 both published on 05-04-2026 in the built-in
+        # history) order by version number rather than insertion
+        # order. Without this, the Updates tab marked b1 as "latest"
+        # because both shared the same date string and stable sort
+        # kept insertion order — b1 first.
+        try:
+            from ..updater.release_checker import _parse_version_tuple
+        except Exception:
+            _parse_version_tuple = lambda v: (0,)  # noqa: E731
+        results.sort(
+            key=lambda e: (
+                (e.published_at or ""),
+                _parse_version_tuple(e.version or ""),
+            ),
+            reverse=True,
+        )
         return results
 
     def _on_updates_history_loaded(self, entries: list) -> None:
@@ -6892,13 +7360,15 @@ Admin elevation
         merged = self._merge_with_builtin_release_history(entries or [])
         if not merged:
             empty = QLabel("No releases published yet.")
-            empty.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 12px; padding: 8px;")
+            empty.setStyleSheet(
+                f"color: {self.config.text_color}; opacity: 0.7; font-size: 12px; padding: 8px;"
+            )
             self._updates_history_layout.insertWidget(0, empty)
             return
-        for entry in merged:
+        for idx, entry in enumerate(merged):
             self._updates_history_layout.insertWidget(
                 self._updates_history_layout.count() - 1,
-                self._build_release_entry_widget(entry),
+                self._build_release_entry_widget(entry, is_latest=(idx == 0)),
             )
 
     def _on_updates_history_failed(self, reason: str) -> None:
@@ -6916,10 +7386,10 @@ Admin elevation
             note.setWordWrap(True)
             note.setStyleSheet("color: rgba(255,200,140,0.80); font-size: 11px; padding: 6px 8px;")
             self._updates_history_layout.insertWidget(0, note)
-            for entry in builtin:
+            for idx, entry in enumerate(builtin):
                 self._updates_history_layout.insertWidget(
                     self._updates_history_layout.count() - 1,
-                    self._build_release_entry_widget(entry),
+                    self._build_release_entry_widget(entry, is_latest=(idx == 0)),
                 )
         else:
             err = QLabel(
@@ -6944,7 +7414,77 @@ Admin elevation
             if widget is not None:
                 widget.deleteLater()
 
-    def _build_release_entry_widget(self, entry) -> QWidget:
+    @staticmethod
+    def _format_release_date_us(date_str: str) -> str:
+        """Convert an ISO-8601 date (YYYY-MM-DD or full ISO timestamp)
+        to MM-DD-YYYY for American-format display in the Updates tab.
+        Falls back to the original string when the input doesn't
+        parse as expected so we never lose information."""
+        if not date_str:
+            return ""
+        # Strip any time portion the caller may have left in.
+        head = date_str.split("T", 1)[0].strip()
+        parts = head.split("-")
+        if len(parts) >= 3 and len(parts[0]) == 4:
+            year, month, day = parts[0], parts[1].zfill(2), parts[2].zfill(2)
+            return f"{month}-{day}-{year}"
+        return date_str
+
+    def _download_release_entry(self, entry) -> None:
+        """Click handler for the Download Update button. Routes through
+        the existing ReleaseInfo / Updater pipeline so the rest of the
+        flow (download progress, apply-update bat, restart) is shared
+        with the auto-prompt path."""
+        try:
+            from ..updater.release_checker import ReleaseInfo, _parse_version_tuple
+            from ..updater.update_dialog import UpdateDialog
+            from ..updater import Updater
+        except Exception as exc:
+            TouchlessNotice.show_warn(
+                self, "Download failed",
+                f"Could not start the download: {type(exc).__name__}: {exc}",
+            )
+            return
+        # Build a minimal ReleaseInfo from the changelog entry. The
+        # update kind / asset selection is handled inside Updater
+        # using the same logic the auto-check path uses.
+        try:
+            info = ReleaseInfo(
+                version=entry.version,
+                body=entry.body or "",
+                html_url=entry.html_url or "",
+                published_at=entry.published_at or "",
+                kind="auto",
+                asset_url="",
+            )
+        except Exception:
+            # Older ReleaseInfo signatures don't accept all fields;
+            # fall back to a positional construction.
+            try:
+                info = ReleaseInfo(entry.version, entry.body or "", entry.html_url or "")
+            except Exception as exc:
+                TouchlessNotice.show_warn(
+                    self, "Download failed",
+                    f"Could not build release info: {exc}",
+                )
+                return
+        self._update_dialog = UpdateDialog(info, parent=self)
+        self._updater = Updater(parent=self)
+        self._update_dialog.download_requested.connect(self._updater.start_download)
+        self._updater.progress.connect(
+            lambda pct, msg: self._update_dialog.set_progress(pct, msg)
+            if self._update_dialog is not None else None
+        )
+        self._updater.failed.connect(
+            lambda reason: self._update_dialog.set_failure(reason)
+            if self._update_dialog is not None else None
+        )
+        self._updater.ready_to_launch.connect(self._on_installer_ready)
+        self._update_dialog.show()
+        self._update_dialog.raise_()
+        self._update_dialog.activateWindow()
+
+    def _build_release_entry_widget(self, entry, is_latest: bool = False) -> QWidget:
         # Inline import to avoid pushing more names into the
         # module's already-large import block.
         from PySide6.QtWidgets import QToolButton, QTextBrowser
@@ -6967,13 +7507,43 @@ Admin elevation
         title.setStyleSheet("font-size: 13px;")
         head_row.addWidget(title)
 
-        # Date — strip the time portion for readability.
+        # Date — strip the time portion and convert YYYY-MM-DD →
+        # MM-DD-YYYY (American) for display.
         date_str = (entry.published_at or "").split("T", 1)[0]
         if date_str:
-            date_label = QLabel(date_str)
-            date_label.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
+            display_date = self._format_release_date_us(date_str)
+            date_label = QLabel(display_date)
+            date_label.setStyleSheet(
+                f"color: {self.config.text_color}; opacity: 0.6; font-size: 11px;"
+            )
             head_row.addWidget(date_label)
         head_row.addStretch(1)
+        # Download button on the latest release row when the user
+        # isn't already on it. Convenient: the user can grab the
+        # newest version straight from the changelog without waiting
+        # for the auto-prompt to reappear.
+        if is_latest and not entry.is_current:
+            download_btn = QPushButton("Download Update")
+            download_btn.setObjectName("releaseDownloadButton")
+            download_btn.setCursor(Qt.PointingHandCursor)
+            download_btn.setStyleSheet(
+                f"QPushButton#releaseDownloadButton {{"
+                f"  background-color: rgba(29, 233, 182, 0.18);"
+                f"  color: {self.config.accent_color};"
+                f"  border: 1px solid {self.config.accent_color};"
+                f"  border-radius: 8px;"
+                f"  padding: 6px 14px;"
+                f"  font-weight: 700;"
+                f"  font-size: 12px;"
+                f"}}"
+                "QPushButton#releaseDownloadButton:hover {"
+                "  background-color: rgba(29, 233, 182, 0.28);"
+                "}"
+            )
+            download_btn.clicked.connect(
+                lambda _checked=False, e=entry: self._download_release_entry(e)
+            )
+            head_row.addWidget(download_btn)
         v.addLayout(head_row)
 
         body_text = entry.body.strip() or "_No release notes provided._"
@@ -6981,7 +7551,7 @@ Admin elevation
         notes.setOpenExternalLinks(True)
         notes.setStyleSheet(
             "QTextBrowser { background: transparent; border: none; "
-            "color: rgba(255,255,255,0.85); font-size: 12px; }"
+            f"color: {self.config.text_color}; font-size: 12px; }}"
         )
         try:
             notes.setMarkdown(body_text)
@@ -7168,12 +7738,20 @@ Admin elevation
         self.config.surface_color = ORIGINAL_SURFACE_COLOR
         self.config.text_color = ORIGINAL_TEXT_COLOR
         self.config.hello_font_size = ORIGINAL_HELLO_FONT_SIZE
-        self.primary_picker.set_color(self.config.primary_color)
-        self.accent_picker.set_color(self.config.accent_color)
-        self.surface_picker.set_color(self.config.surface_color)
-        self.text_picker.set_color(self.config.text_color)
+        save_config(self.config)
+        # Rebuild settings so panel-builder f-strings re-read the
+        # palette — the same fix the light/dark toggle uses for
+        # baked-in inline styles.
+        self._rebuild_settings_page_for_theme_change()
         self.apply_theme()
-        self.last_action_label.setText("Last action: reverted to original colors")
+        try:
+            worker = getattr(self, "_worker", None)
+            history = list(getattr(worker, "action_history", []) or []) if worker is not None else []
+            self._on_action_history_changed(history)
+        except Exception:
+            pass
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText("Last action: reverted to original colors")
 
     def apply_current_settings(self) -> None:
         self.config.preferred_camera_index = self.camera_combo.currentData()
@@ -7190,10 +7768,36 @@ Admin elevation
         target_width = min(1040, available_width)
         self.home_status_card.setFixedWidth(target_width)
 
+    def _palette_is_light(self) -> bool:
+        """Heuristic: True when the current surface_color is bright
+        (i.e., we're in light mode). Drives apply_theme decisions
+        about card backgrounds, borders, and dim-text shades — the
+        original dark-mode rgba(255,255,255,...) tints are invisible
+        on a light surface and need to flip to rgba(0,0,0,...)."""
+        try:
+            c = QColor(self.config.surface_color)
+            r, g, b, _ = c.getRgb()
+            # Average luma; > 160 reads as "light" surface.
+            return (0.299 * r + 0.587 * g + 0.114 * b) > 160
+        except Exception:
+            return False
+
     def apply_theme(self) -> None:
         self.overlay.set_font_size(self.config.hello_font_size)
         button_hover_color = _with_alpha(QColor(self.config.primary_color).lighter(118), 170).name(QColor.HexArgb)
         nav_hover_color = _with_alpha(QColor(self.config.primary_color).lighter(115), 115).name(QColor.HexArgb)
+        # Light vs dark palette branches used throughout the
+        # stylesheet to keep cards / borders / dim text visible in
+        # either mode. The originals (rgba(255,255,255,X)) only worked
+        # against a dark surface; on a light surface they're a
+        # near-invisible whitewash. Swapping in rgba(0,0,0,X) for
+        # light mode preserves the same "subtle tint" effect.
+        is_light = self._palette_is_light()
+        card_bg = "rgba(0,0,0,0.05)" if is_light else "rgba(255,255,255,0.04)"
+        card_border = "rgba(11,61,145,0.18)" if is_light else "rgba(29,233,182,0.22)"
+        dim_text = "rgba(15,23,42,0.65)" if is_light else "rgba(229,246,255,0.65)"
+        dim_text_strong = "rgba(15,23,42,0.85)" if is_light else "rgba(229,246,255,0.92)"
+        soft_text = "rgba(15,23,42,0.55)" if is_light else "rgba(255,255,255,0.55)"
         # Re-render the settings-search clear-X icon in the latest
         # accent color (in case the user changed the theme).
         try:
@@ -7232,9 +7836,17 @@ Admin elevation
             color: {self.config.text_color};
         }}
         #card, #settingsSidebar, #settingsContentPanel, #innerCard {{
-            background-color: rgba(255,255,255,0.04);
-            border: 1px solid rgba(29, 233, 182, 0.22);
+            background-color: {card_bg};
+            border: 1px solid {card_border};
             border-radius: 18px;
+            color: {self.config.text_color};
+        }}
+        /* Fallback so labels that don't already have an inline color
+           string inherit the active theme color. Inline setStyleSheet
+           on individual widgets still wins by Qt's specificity rules
+           — this just covers the unspecified ones. */
+        QFrame#innerCard QLabel, QFrame#card QLabel {{
+            color: {self.config.text_color};
         }}
         #cardTitle {{
             font-size: 18px;
@@ -7252,19 +7864,19 @@ Admin elevation
             background-color: rgba(130, 187, 255, 0.12);
             border: 1px solid rgba(130, 187, 255, 0.40);
             border-radius: 10px;
-            color: #DEEBFF;
+            color: {self.config.text_color};
             padding: 6px;
         }}
         QListWidget#actionHistoryList::item {{
             padding: 3px 6px;
-            color: #DEEBFF;
+            color: {self.config.text_color};
             background: transparent;
         }}
         QPushButton#undoActionButton {{
             background-color: rgba(130, 187, 255, 0.18);
             border: 1px solid rgba(130, 187, 255, 0.55);
             border-radius: 8px;
-            color: #DEEBFF;
+            color: {self.config.text_color};
             padding: 4px 10px;
             font-weight: 700;
         }}
@@ -7278,9 +7890,9 @@ Admin elevation
         }}
         QPushButton#actionHistoryExpand {{
             background: transparent;
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(127, 127, 127, 0.30);
             border-radius: 8px;
-            color: rgba(229, 246, 255, 0.65);
+            color: {dim_text};
             padding: 0px 4px;
             font-size: 16px;
             min-width: 28px;
@@ -7315,7 +7927,7 @@ Admin elevation
             color: {self.config.accent_color};
         }}
         #gestureCardSubtitle {{
-            color: rgba(229,246,255,0.92);
+            color: {dim_text_strong};
             font-weight: 700;
         }}
         #gestureCardBody {{
@@ -7435,9 +8047,26 @@ Admin elevation
                Same rule applies anywhere else setEnabled(False) is
                used (Save Camera while no selection, Update While
                applying, etc.). */
-            background-color: rgba(255, 255, 255, 0.04);
-            color: rgba(229, 246, 255, 0.30);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background-color: rgba(127, 127, 127, 0.10);
+            color: {soft_text};
+            border: 1px solid rgba(127, 127, 127, 0.18);
+        }}
+        QPushButton:checked {{
+            /* Visibly engaged state for any checkable QPushButton
+               (Settings -> GPU Mode, Lite Mode, Low FPS Mode, etc.).
+               Without this rule the global stylesheet only changed
+               appearance on :hover / :pressed / :disabled, so flipping
+               a checkable toggle relied entirely on setText("...: ON")
+               to communicate the new state. Any slowness in the slot
+               (engine rebuild on a GPU/Lite/Low-FPS swap) made the
+               click look like nothing happened — Qt defers paints
+               until the slot returns, and on a slow machine that's
+               several seconds where the user sees zero feedback.
+               Per-objectName :checked rules below (eg
+               settingsNavButton) are more specific and still win. */
+            background-color: {self.config.accent_color};
+            color: #001B24;
+            border: 2px solid {self.config.accent_color};
         }}
         QPushButton#settingsNavButton {{
             min-width: 0px;
@@ -7475,7 +8104,7 @@ Admin elevation
             background: transparent;
         }}
         QLabel#cameraNote {{
-            color: rgba(229,246,255,0.84);
+            color: {dim_text_strong};
         }}
         /* Native QMessageBox has a light-gray background and relies on a
            dark label color for its message text. Our window-wide
@@ -7839,7 +8468,7 @@ Admin elevation
         legend.setAttribute(Qt.WA_StyledBackground, True)
         legend.setStyleSheet(
             "QWidget#actionHistoryLegend { background: transparent; }"
-            f" QLabel {{ color: rgba(229, 246, 255, 0.65); background: transparent;"
+            f" QLabel {{ color: {self.config.text_color}; background: transparent;"
             "  font-size: 11px; }}"
         )
         row = QHBoxLayout(legend)
@@ -8201,6 +8830,13 @@ Admin elevation
             self._worker.debug_frame_ready.connect(self._on_worker_debug_frame)
             self._worker.save_prompt_completed.connect(self._on_save_prompt_completed)
             self._worker.action_history_changed.connect(self._on_action_history_changed)
+            if hasattr(self._worker, "drawing_overlay_toggle_requested"):
+                try:
+                    self._worker.drawing_overlay_toggle_requested.connect(
+                        self._on_drawing_overlay_toggle
+                    )
+                except Exception:
+                    pass
             if self.live_view_window is not None:
                 self.live_view_window.attach_to_worker(self._worker)
             if self.mini_live_viewer is not None:
@@ -8403,6 +9039,55 @@ Admin elevation
         # subscribed — publish_event is a no-op in any of those.
         self._publish_phone_event_for_action(action_text)
 
+    def _on_drawing_overlay_toggle(self, filename: str) -> None:
+        """Handle the worker's drawing_overlay_toggle_requested signal.
+        Toggles the always-on-top transparent overlay window:
+          - currently hidden, OR showing a different drawing
+              → load `filename` and show it.
+          - already showing this drawing
+              → hide.
+        Resolution rule: bare filenames join with the configured
+        drawings save dir; absolute paths use as-is. Non-existent
+        files surface a 'Last action' message but don't pop dialogs
+        (the gesture firing on a missing file shouldn't disrupt
+        whatever the user is doing in their foreground app)."""
+        from .drawing_overlay_window import DrawingOverlayWindow, resolve_drawing_path
+
+        if not hasattr(self, "_drawing_overlay_window") or self._drawing_overlay_window is None:
+            self._drawing_overlay_window = DrawingOverlayWindow(parent=self)
+
+        overlay = self._drawing_overlay_window
+        # Resolve once so we can detect "user asked for the same file
+        # again" and treat that as a hide.
+        resolved = resolve_drawing_path(
+            filename,
+            getattr(self.config, "drawings_save_dir", "") or "",
+        )
+        if resolved is None:
+            self.last_action_label.setText(
+                f"Last action: drawing not found: {filename or '(empty)'}"
+            )
+            return
+
+        already_showing_same = (
+            overlay.isVisible()
+            and overlay.current_path is not None
+            and Path(overlay.current_path) == resolved
+        )
+        if already_showing_same:
+            overlay.hide()
+            self.last_action_label.setText(f"Last action: hid drawing overlay")
+            return
+
+        if overlay.show_image(str(resolved)):
+            self.last_action_label.setText(
+                f"Last action: showed drawing overlay ({resolved.name})"
+            )
+        else:
+            self.last_action_label.setText(
+                f"Last action: failed to load drawing: {resolved.name}"
+            )
+
     def _publish_phone_event_for_action(self, action_text: str) -> None:
         if not action_text or action_text == "none":
             return
@@ -8555,7 +9240,7 @@ Admin elevation
         ts_label = _QLabel(self._relative_timestamp(time.time(), timestamp))
         ts_label.setObjectName("actionHistoryTimestamp")
         ts_label.setStyleSheet(
-            "color: rgba(229, 246, 255, 0.55); background: transparent; font-size: 11px;"
+            f"color: {self.config.text_color}; background: transparent; font-size: 11px;"
         )
         ts_label.setProperty("eventTimestamp", float(timestamp or 0.0))
         layout.addWidget(ts_label, 0, Qt.AlignVCenter)
@@ -11455,6 +12140,19 @@ Admin elevation
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):  # noqa: N802
+        # Gesture Binds rebind pill: re-anchor to bottom-center on
+        # every panel resize so the pill stays floating at the bottom
+        # regardless of window size or scroll position.
+        pill = getattr(self, "_gesture_binds_pill", None)
+        if (
+            pill is not None
+            and obj is pill.parentWidget()
+            and event.type() == QEvent.Resize
+        ):
+            try:
+                self._position_gesture_binds_pill()
+            except Exception:
+                pass
         # Gesture Binds list viewport: hide hover preview when the cursor
         # leaves the list entirely. itemEntered fires on item-to-item moves
         # but never fires when the cursor exits the viewport.
@@ -12802,6 +13500,19 @@ def _stop_screen_recording(self) -> bool:
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):  # noqa: N802
+        # Gesture Binds rebind pill: re-anchor to bottom-center on
+        # every panel resize so the pill stays floating at the bottom
+        # regardless of window size or scroll position.
+        pill = getattr(self, "_gesture_binds_pill", None)
+        if (
+            pill is not None
+            and obj is pill.parentWidget()
+            and event.type() == QEvent.Resize
+        ):
+            try:
+                self._position_gesture_binds_pill()
+            except Exception:
+                pass
         # Gesture Binds list viewport: hide hover preview when the cursor
         # leaves the list entirely. itemEntered fires on item-to-item moves
         # but never fires when the cursor exits the viewport.
@@ -13325,3 +14036,5 @@ def _capture_monitor_dialog_process_hand_clicks_v22(self, *, left_down: bool, ri
 CaptureMonitorDialog.showEvent = _capture_monitor_dialog_show_event_v22
 CaptureMonitorDialog.update_hand_control = _capture_monitor_dialog_update_hand_control_v22
 CaptureMonitorDialog._process_hand_clicks = _capture_monitor_dialog_process_hand_clicks_v22
+
+# Author: Konstantin Markov

@@ -2566,3 +2566,5 @@ try {
         except Exception:
             return []
         return results
+
+# Author: Konstantin Markov

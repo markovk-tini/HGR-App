@@ -48,3 +48,5 @@ def main() -> int:
 
     TouchlessSplash.run_with(_build_window, config.accent_color, app)
     return app.exec()
+
+# Author: Konstantin Markov

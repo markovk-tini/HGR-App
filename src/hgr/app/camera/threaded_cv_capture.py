@@ -142,3 +142,5 @@ class ThreadedCvCapture:
             self._inner.release()
         except Exception:
             pass
+
+# Author: Konstantin Markov

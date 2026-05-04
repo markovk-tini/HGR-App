@@ -25,3 +25,5 @@ Before editing a file, identify what shared surfaces it touches:
 - runtime paths or packaged assets
 
 If a file touches any of those, the blast radius is larger than it looks.
+
+<!-- Author: Konstantin Markov -->

@@ -410,3 +410,5 @@ def extract_static_features(landmarks: np.ndarray) -> StaticFeatures:
         thumb_index_loop_core=float(thumb_index_loop_core),
         thumb_index_loop_score=float(thumb_index_loop_score),
     )
+
+# Author: Konstantin Markov

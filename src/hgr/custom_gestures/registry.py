@@ -377,3 +377,5 @@ class GestureRegistry:
             self.load()
         with self._lock:
             return list(self._gestures.values())
+
+# Author: Konstantin Markov

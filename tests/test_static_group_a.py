@@ -65,3 +65,5 @@ class StaticGroupATest(unittest.TestCase):
         features = extract_static_features(make_pose('claw'))
         prediction = classify_static(features)
         self.assertNotEqual(prediction.raw_gesture, 'fist')
+
+# Author: Konstantin Markov

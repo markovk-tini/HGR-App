@@ -249,3 +249,5 @@ Contributing? See [CONTRIBUTING.md](CONTRIBUTING.md) for the CLA terms.
 ## Status
 
 Touchless is in active development. The stable parts include the app shell, gesture routing, volume / media / browser controllers, tutorial, and the phone-camera pipeline. Active work: code signing rollout, custom gesture creation, phone microphone support, and continuing tuning of whisper.cpp dictation under varied hardware.
+
+<!-- Author: Konstantin Markov -->

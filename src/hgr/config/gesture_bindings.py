@@ -211,3 +211,5 @@ def static_label_for_pose_id(pose_id: str) -> Optional[tuple[str, str]]:
     """Inverse: pose_id -> (handedness, recognizer label) if it's a
     static pose, otherwise None (custom poses have no static label)."""
     return STATIC_POSE_LABEL_MAP.get(pose_id)
+
+# Author: Konstantin Markov

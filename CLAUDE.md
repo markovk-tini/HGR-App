@@ -133,3 +133,5 @@ Per-session AI memory lives in
 when using Claude Code. That auto-memory complements (does not
 replace) this file. Treat THIS file as the **always-true repo
 contract**; auto-memory is for evolving session-specific context.
+
+<!-- Author: Konstantin Markov -->

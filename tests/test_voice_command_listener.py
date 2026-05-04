@@ -113,3 +113,5 @@ class VoiceCommandListenerTest(unittest.TestCase):
             resolved = listener._resolve_whisper_cpp_vad_model_path()
 
         self.assertEqual(resolved, vad_path)
+
+# Author: Konstantin Markov

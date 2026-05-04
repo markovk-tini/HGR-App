@@ -189,3 +189,5 @@ class ChromeGestureRouter:
             except Exception:
                 return False
         return False
+
+# Author: Konstantin Markov

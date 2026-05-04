@@ -8,3 +8,5 @@ Add/Remove Programs entry.
 """
 
 __version__ = "1.1.0b2"
+
+# Author: Konstantin Markov

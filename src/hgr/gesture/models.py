@@ -111,3 +111,5 @@ class GestureFrameResult:
     secondary_tracked_hand: TrackedHand | None = None
     secondary_hand_reading: HandReading | None = None
     secondary_prediction: GesturePrediction | None = None
+
+# Author: Konstantin Markov

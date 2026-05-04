@@ -38,3 +38,5 @@ def load_mediapipe_hand_runtime() -> HandRuntime:
         'Unable to load MediaPipe Hands. This project expects a mediapipe build exposing the Solutions Hands API. '
         f'Installed mediapipe version: {version}. Last import error: {detail}'
     )
+
+# Author: Konstantin Markov

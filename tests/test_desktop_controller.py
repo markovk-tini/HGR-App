@@ -129,3 +129,5 @@ class DesktopControllerTest(unittest.TestCase):
         self.assertIsNotNone(resolved)
         assert resolved is not None
         self.assertEqual(resolved.name.lower(), "documents")
+
+# Author: Konstantin Markov

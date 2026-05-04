@@ -10,3 +10,5 @@ __all__ = [
     "build_bounds",
     "load_hand_runtime",
 ]
+
+# Author: Konstantin Markov

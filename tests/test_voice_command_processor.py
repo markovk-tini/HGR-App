@@ -359,3 +359,5 @@ class VoiceCommandProcessorTest(unittest.TestCase):
         self.assertEqual(intent.app_name, "chrome")
         self.assertEqual(intent.action, "open")
         self.assertEqual(intent.query, "youtube")
+
+# Author: Konstantin Markov

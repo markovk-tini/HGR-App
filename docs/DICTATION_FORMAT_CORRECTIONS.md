@@ -92,3 +92,5 @@ widening.
 - Whisper's occasional trailing-silence hallucinations ("Thank you.", "you")
   are still filtered separately by `_strip_whisper_hallucinations` in
   `noop_engine.py` — unrelated to this change.
+
+<!-- Author: Konstantin Markov -->

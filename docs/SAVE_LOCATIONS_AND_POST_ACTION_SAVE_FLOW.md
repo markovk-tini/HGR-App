@@ -72,3 +72,5 @@ After a drawing, screenshot, screen recording, or clip is completed, show a foll
 - specific path works
 - timeout falls back correctly
 - cancel/delete/nevermind leaves clean state
+
+<!-- Author: Konstantin Markov -->

@@ -79,3 +79,5 @@ class ChromeControllerTest(unittest.TestCase):
         query = controller.parse_voice_search_request("Can you open youtube on google chrome")
 
         self.assertEqual(query, "youtube")
+
+# Author: Konstantin Markov

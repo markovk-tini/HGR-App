@@ -13,3 +13,5 @@ from .capture import PhoneCameraCapture
 from .server import PhoneCameraServer
 
 __all__ = ["PhoneAudioSource", "PhoneCameraCapture", "PhoneCameraServer"]
+
+# Author: Konstantin Markov

@@ -351,3 +351,5 @@ def fire_once(gesture_name: str, action: Action) -> bool:
 
 def reset_cooldowns() -> None:
     _LAST_FIRED_AT.clear()
+
+# Author: Konstantin Markov

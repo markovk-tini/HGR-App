@@ -595,3 +595,5 @@ class LiveApiManager(QObject):
             self._logger.error("session_error", message=message)
         self._set_state(LiveApiState.ERROR, f"Error: {message}")
         self.error_occurred.emit(message)
+
+# Author: Konstantin Markov

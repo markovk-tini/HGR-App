@@ -629,3 +629,5 @@ class SandboxWindow(QDialog):
         except Exception:
             pass
         super().accept()
+
+# Author: Konstantin Markov

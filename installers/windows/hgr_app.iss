@@ -51,6 +51,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
+; Defender exclusion task. Default ON because the most common reason
+; GPU Mode silently falls back to CPU on a fresh install is Microsoft
+; Defender's ML heuristic flagging bundled DirectML.dll (Microsoft-
+; signed, but inside a recently-downloaded third-party folder). The
+; exclusion lets DirectML.dll load via LoadLibrary, which lets ONNX
+; Runtime bring up its DirectX 12 execution provider. Reversible
+; (uninstall removes it; user can also remove via Defender Settings
+; -> Exclusions). Triggers one UAC prompt during install — the only
+; UAC prompt in the whole flow, since the rest of the install is
+; per-user under %LOCALAPPDATA%.
+Name: "defender_exclusion"; Description: "Allow Touchless to use your GPU (adds the install folder to Microsoft Defender exclusions — one UAC prompt)"; GroupDescription: "GPU acceleration:"
 
 [Files]
 Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -60,13 +71,52 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingD
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 
 [Run]
+; Microsoft Defender exclusion for the install folder. Wrapped in a
+; PowerShell try/catch that always exits 0 so a failure (Group Policy
+; blocking Add-MpPreference, third-party AV taking over Defender's
+; role, user denying the UAC prompt) doesn't abort the install or
+; surface a confusing error dialog. Verb: runas triggers UAC for this
+; single command — the rest of the install is per-user. Add-MpPreference
+; is idempotent for ExclusionPath, so re-running on top of an existing
+; install is a no-op.
+;
+; skipifsilent is critical: the auto-updater runs the installer with
+; /SILENT, which would otherwise fire this entry (the task is ON by
+; default) and pop a context-free UAC prompt while the user is in the
+; middle of something else — a real regression. Manual installs aren't
+; affected; the user is in the wizard already and expects the prompt.
+; Net effect: first-time manual installers get the exclusion (the
+; population that needs it most); existing users who auto-update later
+; already had it added at their original install time, so nothing's
+; lost on the auto-update path.
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""try {{ Add-MpPreference -ExclusionPath '{app}' -ErrorAction Stop }} catch {{ exit 0 }}"""; Verb: runas; Flags: shellexec waituntilterminated skipifsilent; Tasks: defender_exclusion; StatusMsg: "Adding Touchless to Microsoft Defender exclusions..."
+
 ; Touchless.exe has requireAdministrator in its manifest (uac_admin=True
-; in hgr_app.spec). Inno's default launcher uses CreateProcess which
-; cannot elevate, so the post-install "Launch Touchless" checkbox would
-; fail with error 740 "the requested operation requires elevation". The
-; shellexec flag routes through ShellExecuteEx which honors the manifest
-; and triggers a normal UAC prompt — same as double-clicking the desktop
-; shortcut. runasoriginaluser ensures we elevate from the actual user
-; account that ran the installer (relevant only if the installer ever
-; gets escalated; harmless otherwise).
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent shellexec runasoriginaluser
+; in hgr_app.spec). Inno's default [Run] launcher uses CreateProcess
+; which can't elevate, producing error 740 "requires elevation" on the
+; post-install Launch checkbox. The 1.1.0b2 attempt at fixing this used
+; "shellexec runasoriginaluser" hoping ShellExecuteEx would auto-elevate
+; via the manifest — but in practice Inno still went through CreateProcess
+; for this particular entry (a real install repro from a beta tester
+; reproduced the same error 740 with that flag set).
+;
+; Forcing it: Verb: runas explicitly asks the shell for the "Run as
+; administrator" verb, which always triggers UAC regardless of how the
+; manifest is interpreted. Same pattern we use on the Defender exclusion
+; PowerShell call above. shellexec stays so ShellExecuteEx is the API
+; (Verb is ignored under CreateProcess). runasoriginaluser dropped — it
+; only matters when the installer itself is elevated, which ours never is
+; (PrivilegesRequired=lowest), so it was a no-op decoration.
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Verb: runas; Flags: nowait postinstall skipifsilent shellexec
+
+[UninstallRun]
+; Mirror of the install-time Defender exclusion: remove the entry
+; on uninstall so we don't leave a stale exclusion pointing at a
+; folder that no longer exists. Same try/catch pattern; if it
+; fails (UAC denied, GP-managed Defender, etc.) the uninstall
+; still completes cleanly. Remove-MpPreference is a no-op when
+; the exclusion isn't set, so older installs that pre-date this
+; change uninstall harmlessly.
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""try {{ Remove-MpPreference -ExclusionPath '{app}' -ErrorAction Stop }} catch {{ exit 0 }}"""; Verb: runas; Flags: shellexec waituntilterminated; RunOnceId: "RemoveDefenderExclusion"
+
+; Author: Konstantin Markov

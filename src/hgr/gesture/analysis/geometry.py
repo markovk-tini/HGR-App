@@ -39,3 +39,5 @@ def unit(vector: np.ndarray) -> np.ndarray:
 
 def signed_angle_deg_2d(vector: np.ndarray) -> float:
     return math.degrees(math.atan2(float(vector[1]), float(vector[0])))
+
+# Author: Konstantin Markov

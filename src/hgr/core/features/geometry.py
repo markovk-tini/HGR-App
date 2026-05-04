@@ -27,3 +27,5 @@ def normalize_range(value: float, low: float, high: float) -> float:
     if high <= low:
         return 0.0
     return clip01((value - low) / (high - low))
+
+# Author: Konstantin Markov

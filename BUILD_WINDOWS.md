@@ -109,3 +109,5 @@ Download from Hugging Face (e.g. `Qwen/Qwen2.5-3B-Instruct-GGUF`). Q4_K_M is the
 ### Runtime
 
 `LlamaServer` launches `llama-server.exe` on a free localhost port with `--no-webui`, `-c 4096`, `-ngl 999` on GPU backends. `GrammarCorrector` picks the longest sentence-bounded chunk from the buffer every 20 s, POSTs to `/v1/chat/completions`, and replaces the typed text via backspace+insert if the corrected output differs. The dictation overlay shows `Using {whisper}/{grammar}` under the mic icon so the active backend combo is always visible.
+
+<!-- Author: Konstantin Markov -->

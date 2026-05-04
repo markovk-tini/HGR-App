@@ -93,3 +93,5 @@ def hidden_subprocess_kwargs() -> dict:
         return {"creationflags": creationflags, "startupinfo": startupinfo}
     except Exception:
         return {}
+
+# Author: Konstantin Markov

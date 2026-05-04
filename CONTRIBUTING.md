@@ -78,3 +78,5 @@ PRs without a signed-off CLA cannot be merged.
 ## Questions
 
 Open a GitHub Discussion or email the maintainer.
+
+<!-- Author: Konstantin Markov -->

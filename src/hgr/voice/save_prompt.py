@@ -123,3 +123,5 @@ class SavePromptProcessor:
         if re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"):
             return Path(value).expanduser()
         return None
+
+# Author: Konstantin Markov

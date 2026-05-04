@@ -5,3 +5,5 @@ cd /d "C:\HGR App v1.0.0\llama.cpp"
 set "PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin;%PATH%"
 cmake --build build_cuda --config Release
 exit /b %errorlevel%
+
+REM Author: Konstantin Markov

@@ -21,3 +21,5 @@ __all__ = [
     "SpreadReading",
     "TrackedHand",
 ]
+
+# Author: Konstantin Markov

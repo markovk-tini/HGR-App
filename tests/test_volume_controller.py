@@ -85,3 +85,5 @@ class VolumeControllerCacheTest(unittest.TestCase):
 
         self.assertTrue(controller.set_level(0.80))
         self.assertAlmostEqual(healthy.level, 0.80, places=3)
+
+# Author: Konstantin Markov

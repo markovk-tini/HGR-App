@@ -248,3 +248,5 @@ def _find_last_space(text: str, *, start: int = 0) -> int:
         return 0
     idx = text.rfind(" ", start)
     return idx + 1 if idx >= 0 else 0
+
+# Author: Konstantin Markov

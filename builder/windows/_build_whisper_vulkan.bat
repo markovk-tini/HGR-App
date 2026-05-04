@@ -29,3 +29,5 @@ if errorlevel 1 (
 
 echo [OK] built whisper-stream.exe at %BUILD%\bin\whisper-stream.exe
 exit /b 0
+
+REM Author: Konstantin Markov

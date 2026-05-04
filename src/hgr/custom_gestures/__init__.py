@@ -7,3 +7,5 @@ via a single future hook in the gesture pipeline; until that hook lands,
 the feature lives entirely behind the standalone trainer/tester scripts
 under tools/custom_gestures/.
 """
+
+# Author: Konstantin Markov

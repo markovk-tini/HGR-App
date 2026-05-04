@@ -183,3 +183,5 @@ class SpotifyGestureRouterTest(unittest.TestCase):
         self.assertEqual(controller.next_calls, 1)
         self.assertEqual(fist_snapshot.last_action, "spotify_toggle")
         self.assertEqual(swipe_snapshot.last_action, "spotify_next")
+
+# Author: Konstantin Markov

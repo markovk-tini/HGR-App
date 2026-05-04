@@ -94,3 +94,5 @@ The auto-updater looks for an asset whose name **starts with**
 `Touchless_App_Update_1.0.6.zip`,
 `Touchless_App_Update_v1.0.6_x64.zip`, etc. all work. Keep the
 prefix as-is — case-insensitive but otherwise exact.
+
+<!-- Author: Konstantin Markov -->

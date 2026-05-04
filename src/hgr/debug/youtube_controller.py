@@ -916,3 +916,5 @@ if ($null -ne $result -and $null -ne $result.Text) {
         if self._volume_controller is None:
             return False
         return self._volume_controller.set_app_audio_level(["chrome"], scalar)
+
+# Author: Konstantin Markov

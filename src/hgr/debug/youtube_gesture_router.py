@@ -230,3 +230,5 @@ class YouTubeGestureRouter:
                 ok = controller.next_track()
                 self._set_action("youtube_next" if ok else "youtube_next_failed")
         self._control_text = controller.message
+
+# Author: Konstantin Markov

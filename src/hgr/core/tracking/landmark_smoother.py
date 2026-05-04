@@ -29,3 +29,5 @@ class LandmarkSmoother:
 
         self._state = adaptive_alpha * current + (1.0 - adaptive_alpha) * self._state
         return self._state.copy()
+
+# Author: Konstantin Markov

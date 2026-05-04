@@ -550,3 +550,5 @@ class ChromeController:
             ratio * 0.66 + overlap * 0.34 + edge_bonus + dot_bonus,
             compact_ratio * 0.82 + dot_bonus,
         )
+
+# Author: Konstantin Markov

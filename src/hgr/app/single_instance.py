@@ -86,3 +86,5 @@ def _focus_existing_window() -> None:
         user32.SetForegroundWindow(hwnd)
     except Exception:
         pass
+
+# Author: Konstantin Markov

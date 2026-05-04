@@ -188,7 +188,9 @@ class CustomGesturesPanel(QWidget):
         body = QLabel(_HOW_IT_WORKS_HTML)
         body.setTextFormat(Qt.RichText)
         body.setWordWrap(True)
-        body.setStyleSheet("color: #DCE9F2; font-size: 13px; line-height: 1.4;")
+        body.setStyleSheet(
+            f"color: {self._config.text_color}; font-size: 13px; line-height: 1.4;"
+        )
         body.setOpenExternalLinks(False)
         layout.addWidget(body)
         return box
@@ -219,10 +221,10 @@ class CustomGesturesPanel(QWidget):
         self.sandbox_button.setMinimumHeight(38)
         self.sandbox_button.setStyleSheet(
             "QPushButton {"
-            "  background: rgba(255,255,255,0.06);"
-            "  color: #E5F6FF;"
+            "  background: rgba(127,127,127,0.10);"
+            f"  color: {self._config.text_color};"
             "  font-weight: 600;"
-            "  border: 1px solid rgba(255,255,255,0.12);"
+            "  border: 1px solid rgba(127,127,127,0.22);"
             "  border-radius: 8px;"
             "  padding: 8px 18px;"
             "}"
@@ -312,6 +314,7 @@ class CustomGesturesPanel(QWidget):
                 on_delete=self._on_delete_gesture,
                 on_edit=self._on_edit_gesture,
                 parent=self._cards_container,
+                text_color=str(getattr(self._config, "text_color", "") or "#E5F6FF"),
             )
             self._cards.append(card)
             self._cards_container_layout.insertWidget(insert_index, card)
@@ -347,18 +350,28 @@ class GestureCard(QFrame):
         on_delete: Callable[[str], None],
         on_edit: Optional[Callable[[str], None]] = None,
         parent: Optional[QWidget] = None,
+        text_color: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
         self._gesture = gesture
         self._on_delete = on_delete
         self._on_edit = on_edit
         self._expanded = False
+        # Cache the active text colour so this card (which is built
+        # outside the main MainWindow.apply_theme path) reads in both
+        # light and dark mode. Falls back to the dark-mode default
+        # when no colour is provided.
+        self._text_color = text_color or "#E5F6FF"
 
         self.setObjectName("gestureCard")
+        # Neutral-grey backgrounds + borders so the card stays
+        # visible on both light and dark surfaces. The previous
+        # rgba(255,255,255,0.04) was a near-invisible whitewash on
+        # light mode.
         self.setStyleSheet(
             "QFrame#gestureCard {"
-            "  background: rgba(255,255,255,0.04);"
-            "  border: 1px solid rgba(255,255,255,0.08);"
+            "  background: rgba(127,127,127,0.10);"
+            "  border: 1px solid rgba(127,127,127,0.22);"
             "  border-radius: 8px;"
             "}"
         )
@@ -378,14 +391,13 @@ class GestureCard(QFrame):
         self._toggle_button.setStyleSheet(
             "QPushButton {"
             "  background: transparent;"
-            "  color: #E5F6FF;"
+            f"  color: {self._text_color};"
             "  font-weight: 700;"
             "  font-size: 14px;"
             "  text-align: left;"
             "  padding: 4px 0;"
             "  border: none;"
             "}"
-            "QPushButton:hover { color: #FFFFFF; }"
         )
         self._toggle_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._toggle_button.clicked.connect(self._toggle)
@@ -396,15 +408,14 @@ class GestureCard(QFrame):
         edit_button.setStyleSheet(
             "QPushButton {"
             "  background: transparent;"
-            "  color: #DCE9F2;"
-            "  border: 1px solid rgba(220,233,242,0.35);"
+            f"  color: {self._text_color};"
+            "  border: 1px solid rgba(127,127,127,0.45);"
             "  border-radius: 6px;"
             "  padding: 4px 10px;"
             "  font-size: 12px;"
             "}"
             "QPushButton:hover {"
-            "  background: rgba(255,255,255,0.10);"
-            "  color: #FFFFFF;"
+            "  background: rgba(127,127,127,0.18);"
             "}"
         )
         if self._on_edit is not None:
@@ -449,10 +460,10 @@ class GestureCard(QFrame):
         self._details = QLabel()
         self._details.setWordWrap(True)
         self._details.setStyleSheet(
-            "color: #DCE9F2;"
+            f"color: {self._text_color};"
             " font-family: Consolas, 'Courier New', monospace;"
             " font-size: 12px;"
-            " background: rgba(0,0,0,0.20);"
+            " background: rgba(127,127,127,0.18);"
             " padding: 10px;"
             " border-radius: 6px;"
         )
@@ -518,3 +529,4 @@ class GestureCard(QFrame):
                 return
         self._expanded_thumb_label.setText("No image picked for this gesture.")
 
+# Author: Konstantin Markov

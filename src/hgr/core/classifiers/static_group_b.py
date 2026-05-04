@@ -67,3 +67,5 @@ def score_group_b(features: StaticFeatures) -> StaticGestureScores:
             + 0.10 * clamp01((spread['index_middle'] + spread['middle_ring'] + spread['ring_pinky'] - 0.44) / 0.40)
         ),
     }
+
+# Author: Konstantin Markov

@@ -129,3 +129,5 @@ API. It's probably a state update bug. Can you check the reducer?"):
   Not blocking dictation.
 - Whisper sometimes hallucinates "Thank you." / "you" on trailing silence;
   `_strip_whisper_hallucinations` in noop_engine catches these.
+
+<!-- Author: Konstantin Markov -->

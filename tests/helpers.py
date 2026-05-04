@@ -156,3 +156,5 @@ def make_pose(name: str, *, rotation_degrees: float = 0.0, spread: str = 'normal
     if spread != 'normal' and name not in {'fist', 'two', 'finger_together', 'finger_apart'}:
         params['spread'] = spread
     return make_landmarks(**params)
+
+# Author: Konstantin Markov

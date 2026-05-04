@@ -136,3 +136,5 @@ echo   - Touchless_App_Update_*.zip (small auto-update for existing users)
 
 popd
 exit /b 0
+
+REM Author: Konstantin Markov

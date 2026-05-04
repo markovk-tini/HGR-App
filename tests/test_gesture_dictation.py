@@ -83,3 +83,5 @@ class GestureDictationToggleTest(unittest.TestCase):
 
         self.window._voice_stop_event.set.assert_called_once_with()
         self.assertFalse(self.window._dictation_active)
+
+# Author: Konstantin Markov

@@ -141,3 +141,5 @@ for inp, expected, desc in cases:
 
 print()
 print(f"{passes} passed, {fails} failed, {passes + fails} total")
+
+# Author: Konstantin Markov

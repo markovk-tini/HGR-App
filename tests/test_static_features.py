@@ -31,3 +31,5 @@ class StaticFeaturesTest(unittest.TestCase):
         features = extract_static_features(make_pose('claw'))
         closed_count = sum(1 for name in ('index', 'middle', 'ring', 'pinky') if features.states[name] == 'closed')
         self.assertLess(closed_count, 4)
+
+# Author: Konstantin Markov
