@@ -223,21 +223,26 @@ Touchless builds into a standalone Windows executable via PyInstaller (see [buil
 - Gesture guide assets (PNGs, MP4s).
 - Application icons and styling.
 
-**Code signing** is in progress via [SignPath Foundation](https://signpath.org), which signs open-source Windows releases for free. Once approved, installers will be signed with an Authenticode cert that chains to a publicly-trusted CA, so Windows Defender and mainstream antivirus engines accept the installer without flagging it. First-install SmartScreen reputation takes a few hundred downloads to build up; testers may see a one-click "More info → Run anyway" warning on the first release.
+**Code signing** is in production via [Azure Trusted Signing / Artifact Signing](https://azure.microsoft.com/en-us/products/trusted-signing). Every released installer + bundled `Touchless.exe` is signed under "Konstantin Markov" with a cert that chains to Microsoft's publicly-trusted root, so Windows Defender and mainstream antivirus engines accept the installer without flagging it. First-install SmartScreen reputation builds over the first 1–4 weeks of typical download volume; new users may see a one-click "More info → Run anyway" warning until then.
 
 ---
 
 ## License
 
-Touchless is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for the full text.
+Touchless is licensed under the **Functional Source License v1.1, Apache 2.0 future** (FSL-1.1-Apache-2.0) — see [LICENSE](LICENSE) for the full text.
 
 In short:
 
-- You may use, study, modify, and redistribute Touchless freely, for personal or commercial purposes.
-- If you distribute a modified version, you **must release your source code** under GPL v3 as well. This "copyleft" rule prevents anyone from taking Touchless, making proprietary changes, and redistributing it as closed-source software.
-- Any work that links against or is based on Touchless's source is also subject to GPL v3 when distributed.
+- You may **read, audit, modify, and redistribute** Touchless freely for any non-competing use (personal, internal, educational, research).
+- You may **not** make Touchless available to others as a commercial product or service that substitutes for or competes with it. That includes selling a forked version under a different name.
+- Any redistribution must **preserve the copyright notices** and the [NOTICE](NOTICE) file (this is the "stamp my name on it" requirement).
+- **Two years** after the date a given version is released, that version automatically converts to the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — fully open-source.
 
-© 2026 Konstantin Markov. Distributed without warranty per the GPL. If your use case needs a more permissive license for integration into a closed-source product, open an issue — dual-licensing inquiries are welcome.
+This license keeps the source visible (audit, fix, learn, tinker) while protecting the project from drop-in commercial competitors during its growth window.
+
+© 2026 Konstantin Markov. If your use case needs different terms (commercial integration into a closed-source product, etc.), open an issue — dual-licensing inquiries are welcome.
+
+Contributing? See [CONTRIBUTING.md](CONTRIBUTING.md) for the CLA terms.
 
 ---
 

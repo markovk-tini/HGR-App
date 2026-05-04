@@ -22,6 +22,10 @@ AppPublisher={#MyAppPublisher}
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DefaultDirName={localappdata}\Programs\{#MyAppName}
+; FSL-1.1-Apache-2.0 license shown on the License Agreement page so
+; users see the terms before installing. Path is relative to the
+; .iss file location (installers/windows/).
+LicenseFile=..\..\LICENSE
 DefaultGroupName={#MyAppName}
 OutputDir=..\..\release
 OutputBaseFilename=Touchless_Installer
