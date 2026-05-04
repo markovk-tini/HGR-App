@@ -5469,7 +5469,16 @@ class GestureWorker(QObject):
             "low_fps_forced": bool(getattr(self.config, "low_fps_mode", False)),
             "low_fps_auto_engaged": bool(self._low_fps_auto_engaged),
             "force_ten_fps_test_mode": bool(getattr(self.config, "force_ten_fps_test_mode", False)),
-            "spotify_window_open": bool(self.spotify_controller.is_window_active() or self.spotify_controller.is_running()),
+            # Was: is_window_active() or is_running(). is_running()
+            # walks psutil.process_iter() with NO cache — per camera
+            # frame that's a full Windows process-list scan, and the
+            # walk gets heavier when Spotify is open (Spotify spawns
+            # 5-10 helper processes), which matched the user-reported
+            # 'camera lags while Spotify is open' regression. Switch
+            # to is_window_open(), which already uses the 1-second
+            # _spotify_window_handles cache and answers the same
+            # question (is there a visible Spotify top-level window).
+            "spotify_window_open": bool(self.spotify_controller.is_window_open()),
             "spotify_control_text": self._spotify_control_text,
             "spotify_last_action": self._last_spotify_action,
             "chrome_mode_enabled": bool(self._chrome_mode_enabled),
