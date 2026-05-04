@@ -272,21 +272,29 @@ class MousePracticeWidget(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255, 28), 1.0))
         painter.drawRoundedRect(arena, 16, 16)
 
+        # Color tiers per user request: targets the user still has to
+        # click are RED (active = bright, future = dimmer red), and
+        # turn GREEN once clicked. The current target also gets a
+        # thicker pen so it's clearly the next one to hit.
+        red = QColor("#FF5252")
         for index, (tx, ty) in enumerate(self._targets):
             point = QPointF(arena.left() + tx * arena.width(), arena.top() + ty * arena.height())
             if index < self._active_index:
-                fill = QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 85)
-                pen = QPen(self._accent, 2.2)
+                # Already clicked — green (accent).
+                fill = QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 110)
+                pen = QPen(self._accent, 2.4)
             elif index == self._active_index:
-                fill = QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 50)
-                pen = QPen(self._accent, 3.2)
+                # Current — bright red, thick outline.
+                fill = QColor(red.red(), red.green(), red.blue(), 95)
+                pen = QPen(red, 3.4)
             else:
-                fill = QColor(255, 255, 255, 12)
-                pen = QPen(QColor(255, 255, 255, 70), 1.6)
+                # Future — muted red.
+                fill = QColor(red.red(), red.green(), red.blue(), 45)
+                pen = QPen(QColor(red.red(), red.green(), red.blue(), 170), 1.8)
             painter.setBrush(fill)
             painter.setPen(pen)
             painter.drawEllipse(point, 22, 22)
-            painter.setPen(QPen(QColor(self._text.red(), self._text.green(), self._text.blue(), 180), 1.0))
+            painter.setPen(QPen(QColor(self._text.red(), self._text.green(), self._text.blue(), 200), 1.0))
             painter.drawText(QRectF(point.x() - 18, point.y() - 12, 36, 24), Qt.AlignCenter, str(index + 1))
 
         if self._cursor_position is not None:
@@ -354,6 +362,11 @@ class TutorialWindow(QDialog):
         self._timer.timeout.connect(self._tick)
         self._last_dynamic_label = "neutral"
         self._swipe_counts = {"swipe_left": 0, "swipe_right": 0}
+        # Timestamp of the most-recent swipe-count increment. Used by
+        # _refresh_swipe_camera_labels to show 'Completed right
+        # swipes!' / 'Completed left swipes!' for a brief moment
+        # before the next prompt.
+        self._swipe_last_advance_at: float = 0.0
         self._hold_started: dict[str, float] = {}
         self._hold_last_fired: dict[str, float] = {}
         self._close_emitted = False
@@ -568,6 +581,33 @@ class TutorialWindow(QDialog):
         self.swipe_widget = SwipeInstructionWidget()
         self.wheel_widget = WheelInstructionWidget()
         self.mouse_widget = MousePracticeWidget()
+        # Big check overlay used by every step EXCEPT mouse_mode
+        # (mouse paints its own ✓ inside the practice arena). Lives
+        # inside practice_stack so it occupies the stretch=1 region
+        # of info_layout without compressing the instruction text
+        # above. Switching to this page replaces whatever was being
+        # shown (or empty space) when the user completes the step.
+        self.completion_overlay = QFrame()
+        self.completion_overlay.setObjectName("tutorialCompletionOverlay")
+        completion_layout = QVBoxLayout(self.completion_overlay)
+        completion_layout.setContentsMargins(20, 12, 20, 12)
+        completion_layout.setSpacing(4)
+        completion_layout.addStretch(1)
+        self.completion_overlay_check = QLabel("✓")
+        self.completion_overlay_check.setObjectName("tutorialCompletionOverlayCheck")
+        self.completion_overlay_check.setAlignment(Qt.AlignCenter)
+        self.completion_overlay_check.setStyleSheet(
+            "color: rgb(29, 233, 182); font-size: 200px; font-weight: 900;"
+        )
+        completion_layout.addWidget(self.completion_overlay_check)
+        self.completion_overlay_text = QLabel("Completed!")
+        self.completion_overlay_text.setObjectName("tutorialCompletionOverlayText")
+        self.completion_overlay_text.setAlignment(Qt.AlignCenter)
+        self.completion_overlay_text.setStyleSheet(
+            "color: rgb(29, 233, 182); font-size: 28px; font-weight: 800;"
+        )
+        completion_layout.addWidget(self.completion_overlay_text)
+        completion_layout.addStretch(1)
         self.generic_practice = QLabel("")
         self.generic_practice.setObjectName("tutorialPracticeLabel")
         self.generic_practice.setWordWrap(True)
@@ -576,6 +616,7 @@ class TutorialWindow(QDialog):
         self.practice_stack.addWidget(self.generic_practice)
         self.practice_stack.addWidget(self.wheel_widget)
         self.practice_stack.addWidget(self.mouse_widget)
+        self.practice_stack.addWidget(self.completion_overlay)
         info_layout.addWidget(self.practice_stack, 1)
 
         self.progress_label = QLabel("")
@@ -800,6 +841,7 @@ class TutorialWindow(QDialog):
         self._completed_steps.clear()
         self._show_completion_page = False
         self._swipe_counts = {"swipe_left": 0, "swipe_right": 0}
+        self._swipe_last_advance_at = 0.0
         self._swipe_goal_index = 0
         self._spotify_toggle_count = 0
         self._mouse_stage = "enable"
@@ -1310,26 +1352,57 @@ class TutorialWindow(QDialog):
             return "Waiting for left-hand one and the voice command."
         return step.progress_template or ""
 
+    @staticmethod
+    def _swipe_count_color(n: int) -> str:
+        """Color tiers for the 'Completed N/3 ... swipes' footer.
+        0/3 = red (haven't started), 1-2/3 = orange (in progress),
+        3/3 = green (done)."""
+        if n <= 0:
+            return "#FF5252"
+        if n < 3:
+            return "#FFA726"
+        return "#1DE9B6"
+
     def _refresh_swipe_camera_labels(self) -> None:
         """Drive the big-bold accent-green header above the camera and
         the matching counter below it for the swipes step. Phase
         switches at 3 right swipes: header changes from 'right' to
-        'left', and the counter swaps to track left swipes."""
+        'left', and the counter swaps to track left swipes.
+
+        Also handles the 1-second transition celebration after each
+        sub-phase finishes: 'Completed right swipes!' between the
+        right and left phases, and 'Completed left swipes!' before
+        the overall step completes."""
         right_count = int(self._swipe_counts.get("swipe_right", 0))
         left_count = int(self._swipe_counts.get("swipe_left", 0))
         in_left_phase = right_count >= 3
+        now = time.monotonic()
+        # 1-second window after the most recent count advance: we use
+        # this to show "Completed right swipes!" / "Completed left
+        # swipes!" before transitioning to the next prompt.
+        in_transition = now - self._swipe_last_advance_at < 1.0
+
         if not in_left_phase:
-            self.tutorial_camera_header.setText(
-                "Let's start with swiping right! Use skeleton hands for help."
-            )
-            self.tutorial_camera_footer.setText(
-                f"Completed {right_count}/3 right swipes"
-            )
+            header = "Let's start with swiping right! Use skeleton hands for help."
+            count, label = right_count, "right swipes"
+        elif left_count == 0 and in_transition:
+            header = "Completed right swipes!"
+            count, label = right_count, "right swipes"
+        elif left_count >= 3 and in_transition:
+            header = "Completed left swipes!"
+            count, label = left_count, "left swipes"
         else:
-            self.tutorial_camera_header.setText("Now let's try swiping to the left!")
-            self.tutorial_camera_footer.setText(
-                f"Completed {left_count}/3 left swipes"
-            )
+            header = "Now let's try swiping to the left!"
+            count, label = left_count, "left swipes"
+
+        color = self._swipe_count_color(count)
+        footer_html = (
+            f'<span style="color:{color};">'
+            f"Completed {count}/3 {label}"
+            f"</span>"
+        )
+        self.tutorial_camera_header.setText(header)
+        self.tutorial_camera_footer.setText(footer_html)
         self.tutorial_camera_header.show()
         self.tutorial_camera_footer.show()
 
@@ -1344,39 +1417,37 @@ class TutorialWindow(QDialog):
 
     def _update_completion_feedback(self, now: float) -> None:
         visible = self._step_completed and not self._show_completion_page
+        # Always-hidden — replaced by completion_overlay (in
+        # practice_stack) which doesn't squeeze the instruction box.
+        self.completion_check_label.hide()
+        self.completion_text_label.hide()
         if not visible:
-            self.completion_check_label.hide()
-            self.completion_text_label.hide()
             return
         try:
             step_key = self._practice_steps[self._step_index].key
         except Exception:
             step_key = ""
         # Mouse mode paints its OWN big checkmark inside the practice
-        # widget (over the target dots), so we suppress the info-area
-        # labels there to avoid duplication. Every other step has
-        # empty info-area space we can fill with a giant check + label.
+        # widget (over the target dots) — keep practice_stack on the
+        # mouse widget so that paint stays visible.
         if step_key == "mouse_mode":
-            self.completion_check_label.hide()
-            self.completion_text_label.hide()
-            # Force a repaint of the practice widget so its overlay
-            # checkmark draws as soon as the step transitions to
-            # completed (otherwise it waits for the next frame tick).
             try:
                 self.mouse_widget.update()
             except Exception:
                 pass
             return
-        check_px = 200
-        text_px = 28
-        self.completion_check_label.setStyleSheet(
-            f"color: rgb(29, 233, 182); font-size: {check_px}px; font-weight: 900;"
-        )
-        self.completion_text_label.setStyleSheet(
-            f"color: rgb(29, 233, 182); font-size: {text_px}px; font-weight: 800;"
-        )
-        self.completion_check_label.show()
-        self.completion_text_label.show()
+        # Every other step: switch the practice_stack to the
+        # completion overlay page. Stack absorbs the available
+        # vertical space (stretch=1), so the giant ✓ fills the
+        # empty area below the instruction text WITHOUT shrinking
+        # it. Make sure the stack is visible — for swipes step
+        # _apply_step_content explicitly hides it; we override that
+        # here so the overlay can show.
+        try:
+            self.practice_stack.setCurrentWidget(self.completion_overlay)
+            self.practice_stack.show()
+        except Exception:
+            pass
 
     def _go_previous(self) -> None:
         if self._show_completion_page:
@@ -1829,13 +1900,17 @@ class TutorialWindow(QDialog):
             if dynamic_label != self._last_dynamic_label and handedness == "right" and dynamic_label == expected:
                 self._swipe_goal_index = min(6, self._swipe_goal_index + 1)
                 self._swipe_counts[dynamic_label] = min(3, self._swipe_counts[dynamic_label] + 1)
+                self._swipe_last_advance_at = now
                 self.swipe_widget.set_counts(self._swipe_counts["swipe_left"], self._swipe_counts["swipe_right"])
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + self._gesture_flash_seconds)
                 accepted_swipe = True
             self._last_dynamic_label = dynamic_label
             self._refresh_swipe_camera_labels()
             visual_ready = accepted_swipe or now < self._visual_green_until.get("swipes", 0.0)
-            if self._swipe_goal_index >= 6:
+            # Hold off on overall completion for 1s after the 6th
+            # swipe so the 'Completed left swipes!' transition
+            # message is visible before the overlay swap.
+            if self._swipe_goal_index >= 6 and (now - self._swipe_last_advance_at) >= 1.0:
                 self._complete_step("Both swipes detected! Swipe right to move on!")
             return visual_ready
 
@@ -1856,7 +1931,10 @@ class TutorialWindow(QDialog):
                 visual_ready = True
                 self._complete_step("Completed! Swipe right to move on!")
             if self._step_completed:
-                self._set_step_progress("Detected right-hand two! Swipe right to move on.")
+                # Once Spotify opens, the user just needs to swipe to
+                # advance — no value in repeating "Detected right-hand
+                # two!" since they're already past that gate.
+                self._set_step_progress("Swipe right to move on!")
             else:
                 self._set_step_progress("Detected right-hand two!" if active else "Waiting for right-hand two.")
             return visual_ready
@@ -2013,13 +2091,19 @@ class TutorialWindow(QDialog):
             if dynamic_label != self._last_dynamic_label and handedness.lower() == "right" and dynamic_label == expected:
                 self._swipe_goal_index += 1
                 self._swipe_counts[dynamic_label] += 1
+                self._swipe_last_advance_at = now
                 self.swipe_widget.set_counts(self._swipe_counts["swipe_left"], self._swipe_counts["swipe_right"])
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + 1.0)
                 accepted_swipe = True
             self._last_dynamic_label = dynamic_label
             self._refresh_swipe_camera_labels()
             visual_ready = accepted_swipe or now < self._visual_green_until.get("swipes", 0.0)
-            if self._swipe_goal_index >= 6:
+            # Defer the overall step completion until the 'Completed
+            # left swipes!' celebration message has had its 1-second
+            # window. Without this delay, _complete_step fires
+            # immediately and the overlay swaps in before the user
+            # sees the transition message.
+            if self._swipe_goal_index >= 6 and (now - self._swipe_last_advance_at) >= 1.0:
                 self._complete_step("Completed! Swipe right to move on!")
             return visual_ready
 
@@ -2030,7 +2114,7 @@ class TutorialWindow(QDialog):
                 self._complete_step("Completed! Swipe right to move on!")
                 visual_ready = True
             if self._step_completed:
-                self._set_step_progress("Detected right-hand two! Swipe right to move on.")
+                self._set_step_progress("Swipe right to move on!")
             else:
                 self._set_step_progress("Detected right-hand two!" if active else "Waiting for right-hand two.")
             return visual_ready

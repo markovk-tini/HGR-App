@@ -5344,6 +5344,16 @@ class GestureWorker(QObject):
                 gesture_chip = "Drawing: hover"
             else:
                 gesture_chip = "Drawing mode on"
+        elif self._volume_mode_active:
+            # While volume control is held, force the chip to stay
+            # on a stable "Volume" label. The static recognizer
+            # itself flickers between 'volume_pose', 'two', and
+            # 'neutral' frame-to-frame even when the tracker is
+            # solidly active (the tracker has its own structural
+            # gate independent of the recognizer's label), so the
+            # chip used to flip on/off once a second instead of
+            # showing the user that volume control is engaged.
+            gesture_chip = "Volume"
         elif dynamic_display != "neutral":
             gesture_chip = f"Dynamic: {dynamic_display.replace('_', ' ')}"
         else:
