@@ -458,7 +458,33 @@ class SandboxWindow(QDialog):
                         and not self._fired_for_hold
                         and held >= _DEFAULT_HOLD
                     ):
-                        if fire_once(match.gesture.name, match.gesture.action):
+                        # Special-case the Qt-coupled `show_overlay_drawing`
+                        # action. fire_once / execute() are no-ops for that
+                        # kind because the actual overlay is a QWidget that
+                        # has to be mutated on the GUI thread — the live
+                        # engine handles it via a Qt signal on the worker.
+                        # Mirror that here so 'fire on' in the sandbox
+                        # actually shows the overlay too; sandbox-firing
+                        # any other gesture lights up its bound action
+                        # exactly like the live runner does, so the user
+                        # would expect the overlay action to behave the
+                        # same.
+                        action_kind = (match.gesture.action.kind or "").lower()
+                        fired = False
+                        if action_kind == "show_overlay_drawing":
+                            filename = str(
+                                (match.gesture.action.payload or {}).get("filename", "")
+                            )
+                            worker = self._worker
+                            if worker is not None and hasattr(worker, "drawing_overlay_toggle_requested"):
+                                try:
+                                    worker.drawing_overlay_toggle_requested.emit(filename)
+                                    fired = True
+                                except Exception:
+                                    fired = False
+                        else:
+                            fired = bool(fire_once(match.gesture.name, match.gesture.action))
+                        if fired:
                             self._fired_for_hold = True
                             self._last_fire_name = match.gesture.name
                             self._last_fire_at = now
