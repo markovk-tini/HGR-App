@@ -208,13 +208,16 @@ class ScreenDrawOverlay(QWidget):
         self._active_stroke_points: list[tuple[float, float]] = []
         self._raster_dirty = False
         self.shape_mode = False
-        # Pinch-grab live transform. Translation only on the live
-        # canvas (scale stays 1:1 because the user is actively
-        # drawing on it; we don't want re-scaling artefacts in
-        # mid-stroke). Phase 1 only translates the rasterised
-        # canvas — per-stroke movement comes in Phase 2.
+        # Pinch-grab live transform. Translation + scale: the user
+        # can move strokes around with a one-hand pinch and stretch
+        # / squish them with a two-hand pinch (distance change
+        # between the palms drives scale). Per-stroke movement is
+        # still Phase 2 — for now the whole canvas transforms as a
+        # unit. The rasteriser is set _raster_dirty after a bake so
+        # it knows the stroke list no longer matches the pixels.
         self._grab_dx_norm: float = 0.0
         self._grab_dy_norm: float = 0.0
+        self._grab_scale: float = 1.0
         self._resize_to_screen()
 
     def set_shape_mode(self, enabled: bool) -> None:
@@ -592,52 +595,86 @@ class ScreenDrawOverlay(QWidget):
         self._ensure_canvas_size()
 
     def set_grab_transform(self, dx_norm: float, dy_norm: float, scale: float) -> None:
-        """Apply a live translate transform to the displayed canvas
-        during a pinch-grab. Translation is in normalised screen
-        units (1.0 = full width / height). Scale is accepted for
-        signal compatibility with DrawingOverlayWindow but ignored
-        on the live canvas — re-scaling a stroke being drawn would
-        produce ugly interpolation artefacts and the user can't
-        easily reason about where their next stroke will land.
-        Call apply_grab_to_canvas() at grab-end to bake the offset
-        into the canvas pixels."""
-        del scale
+        """Apply a live translate + scale transform to the displayed
+        canvas during a pinch-grab. Translation is in normalised
+        screen units (1.0 = full width / height). Scale is a
+        multiplier on the canvas's natural size — driven by the
+        distance between the two pinching palms when the user is
+        bimanual-pinching. Clamped to [0.1, 10.0] so a fast
+        accidental two-hand pinch can't shrink the canvas to
+        nothing or blow it off the screen. apply_grab_to_canvas()
+        bakes both translate AND scale into the canvas pixels at
+        grab-end so subsequent strokes / saves reflect the new
+        position + size."""
         self._grab_dx_norm = float(dx_norm)
         self._grab_dy_norm = float(dy_norm)
+        self._grab_scale = max(0.1, min(10.0, float(scale)))
         self.update()
 
     def reset_grab_transform(self) -> None:
         self._grab_dx_norm = 0.0
         self._grab_dy_norm = 0.0
+        self._grab_scale = 1.0
         self.update()
 
     def apply_grab_to_canvas(self) -> None:
-        """Bake the current live grab translation into the canvas
-        pixels so the strokes physically move (subsequent draws +
-        the saved PNG reflect the new position). No-op when no
-        translation is active. Pushes a history entry first so the
-        move can be undone."""
-        if self._grab_dx_norm == 0.0 and self._grab_dy_norm == 0.0:
+        """Bake the current live grab transform (translate + scale)
+        into the canvas pixels so subsequent strokes draw on top of
+        the moved/stretched content and saving captures it. No-op
+        when nothing has changed. Pushes a history entry first so
+        a left-swipe undo restores the pre-grab canvas (revert any
+        movement AND any stretching in one step)."""
+        if (
+            self._grab_dx_norm == 0.0
+            and self._grab_dy_norm == 0.0
+            and self._grab_scale == 1.0
+        ):
             return
         self._ensure_canvas_size()
         if self._canvas.isNull():
             self._grab_dx_norm = 0.0
             self._grab_dy_norm = 0.0
+            self._grab_scale = 1.0
             return
         # History entry: snapshot of the canvas BEFORE the move so
-        # an undo restores the pre-grab position.
+        # an undo restores the pre-grab position + size in one
+        # step. Goes through push_undo_state so the snapshot uses
+        # the same _clone_canvas / _clone_strokes helpers the rest
+        # of the undo machinery does — keeps the entry shape
+        # identical to a stroke commit, which means the existing
+        # undo_last_action path restores it without any changes.
         try:
-            self._history.append((self._canvas.copy(), list(self._strokes), False))
-            if len(self._history) > self._history_limit:
-                self._history.pop(0)
+            self.push_undo_state()
         except Exception:
             pass
         dx_px = int(self._grab_dx_norm * self.width())
         dy_px = int(self._grab_dy_norm * self.height())
         new_canvas = QImage(self._canvas.size(), QImage.Format_ARGB32_Premultiplied)
         new_canvas.fill(Qt.transparent)
+        # Rasterise the source canvas at the new scale, then blit
+        # it onto the same-size new_canvas at the translated
+        # position. Centering the scaled blit on the canvas
+        # midpoint (rather than the top-left) means a pure scale
+        # change keeps the strokes anchored where they already
+        # were instead of pushing everything down-and-right as it
+        # grew — that matched the user's mental model in testing.
         painter = QPainter(new_canvas)
-        painter.drawImage(dx_px, dy_px, self._canvas)
+        if self._grab_scale != 1.0:
+            scaled_w = max(1, int(self._canvas.width() * self._grab_scale))
+            scaled_h = max(1, int(self._canvas.height() * self._grab_scale))
+            scaled = self._canvas.scaled(
+                scaled_w,
+                scaled_h,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            cx = self._canvas.width() // 2
+            cy = self._canvas.height() // 2
+            blit_x = cx - scaled.width() // 2 + dx_px
+            blit_y = cy - scaled.height() // 2 + dy_px
+            painter.drawImage(blit_x, blit_y, scaled)
+        else:
+            painter.drawImage(dx_px, dy_px, self._canvas)
         painter.end()
         self._canvas = new_canvas
         # Mark stored strokes as out of sync — they still have the
@@ -650,20 +687,39 @@ class ScreenDrawOverlay(QWidget):
         self._raster_dirty = True
         self._grab_dx_norm = 0.0
         self._grab_dy_norm = 0.0
+        self._grab_scale = 1.0
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         if not self._canvas.isNull():
-            # Live grab translates the canvas blit on every paint
-            # while the user is pinching. The offset clears to
-            # zero on apply_grab_to_canvas() (which bakes the
-            # translation into the canvas pixels at grab end) or
-            # on reset_grab_transform() (cancel without baking).
+            # Live grab applies translate + scale on every paint
+            # while the user is pinching. Both clear back to
+            # identity on apply_grab_to_canvas() (bakes into the
+            # canvas pixels) or reset_grab_transform() (cancels
+            # without baking). Scale is centred on the canvas
+            # midpoint so a pure stretch grows outward in all
+            # directions instead of pushing everything down-right.
             tx_px = int(self._grab_dx_norm * self.width())
             ty_px = int(self._grab_dy_norm * self.height())
-            painter.drawImage(tx_px, ty_px, self._canvas)
+            if self._grab_scale != 1.0:
+                painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                scaled_w = max(1, int(self._canvas.width() * self._grab_scale))
+                scaled_h = max(1, int(self._canvas.height() * self._grab_scale))
+                scaled = self._canvas.scaled(
+                    scaled_w,
+                    scaled_h,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                cx = self.width() // 2
+                cy = self.height() // 2
+                bx = cx - scaled.width() // 2 + tx_px
+                by = cy - scaled.height() // 2 + ty_px
+                painter.drawImage(bx, by, scaled)
+            else:
+                painter.drawImage(tx_px, ty_px, self._canvas)
 
         if self._cursor_pos is None or self._cursor_mode == "hidden":
             return
