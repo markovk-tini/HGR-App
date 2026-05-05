@@ -543,6 +543,31 @@ class GestureWorker(QObject):
         self._pinch_accum_dx: float = 0.0
         self._pinch_accum_dy: float = 0.0
         self._pinch_accum_scale: float = 1.0
+        # Sticky-active grace. MediaPipe landmark output for a
+        # foreshortened pinch can flicker stable_label between
+        # 'pinch' and a competing label for one or two frames at
+        # a time, which dropped the grab mode to 'none' and forced
+        # an anchor reset every flicker — the user-visible result
+        # was the drawing snapping back to its baked offset on
+        # every dropped frame. We now record the last time we saw
+        # the pinch label and treat the user as still pinching for
+        # `_pinch_grace_seconds` of label silence so brief
+        # recogniser misses don't cancel the grab.
+        self._pinch_grace_seconds: float = 0.4
+        self._pinch_last_seen_primary: float = 0.0
+        self._pinch_last_seen_secondary: float = 0.0
+        # EMA-smoothed palm positions used for grab math. Raw
+        # palm.center coords jitter several pixels per frame on
+        # foreshortened poses; passing the raw values straight to
+        # the transform makes the displayed drawing visibly
+        # shake. The smoother only runs while a pinch is active
+        # so neutral motion isn't artificially laggy.
+        self._pinch_smoothed_primary: Optional[tuple[float, float]] = None
+        self._pinch_smoothed_secondary: Optional[tuple[float, float]] = None
+        # 0.0 → output never changes (full damping); 1.0 → no
+        # damping. 0.35 keeps the response feel-snappy while
+        # killing single-frame jitter.
+        self._pinch_smooth_alpha: float = 0.35
         self._cap = None
         self._camera_info = None
         self.engine: GestureRecognitionEngine | None = None
@@ -4862,6 +4887,33 @@ class GestureWorker(QObject):
         self._pinch_accum_dx = 0.0
         self._pinch_accum_dy = 0.0
         self._pinch_accum_scale = 1.0
+        self._pinch_last_seen_primary = 0.0
+        self._pinch_last_seen_secondary = 0.0
+        self._pinch_smoothed_primary = None
+        self._pinch_smoothed_secondary = None
+
+    def _smooth_palm(self, slot: str, raw: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
+        """Return an EMA-smoothed version of `raw` for the given
+        palm slot ('primary' or 'secondary'). The first non-None
+        value seeds the smoother; subsequent calls blend with
+        _pinch_smooth_alpha. Slot stays None until a real reading
+        arrives, so a brief no-hand frame doesn't snap the
+        smoother to (0, 0). Reset by reset_pinch_grab_state and
+        on grace expiry so a fresh grab session doesn't carry
+        stale damping."""
+        if raw is None:
+            return getattr(self, f"_pinch_smoothed_{slot}", None)
+        prev = getattr(self, f"_pinch_smoothed_{slot}", None)
+        if prev is None:
+            new = raw
+        else:
+            a = self._pinch_smooth_alpha
+            new = (
+                a * raw[0] + (1.0 - a) * prev[0],
+                a * raw[1] + (1.0 - a) * prev[1],
+            )
+        setattr(self, f"_pinch_smoothed_{slot}", new)
+        return new
 
     def _palm_xy(self, hand_reading) -> Optional[tuple[float, float]]:
         """Pull (x, y) out of a HandReading's palm.center. Returns
@@ -4884,7 +4936,14 @@ class GestureWorker(QObject):
         absolute (cumulative-since-overlay-shown) transform when a
         pinch is held. Stays silent when no overlay is visible
         anyway — main_window only forwards the signal when
-        DrawingOverlayWindow is showing."""
+        DrawingOverlayWindow is showing.
+
+        Includes a sticky-active grace window so brief recogniser
+        flicker (foreshortened pinch landmarks bouncing between
+        labels for a frame or two) doesn't drop the grab and force
+        an anchor reset; and EMA-smooths the palm positions used
+        for the actual transform math so jittery landmarks don't
+        translate into a jittery on-screen drawing."""
         primary_pred = getattr(result, "prediction", None)
         secondary_pred = getattr(result, "secondary_prediction", None)
         primary_pinch = (
@@ -4898,46 +4957,88 @@ class GestureWorker(QObject):
         primary_palm = self._palm_xy(getattr(result, "hand_reading", None))
         secondary_palm = self._palm_xy(getattr(result, "secondary_hand_reading", None))
 
-        if primary_pinch and secondary_pinch and primary_palm and secondary_palm:
+        # Sticky-active grace: a recent pinch frame keeps the slot
+        # "active" for the next _pinch_grace_seconds even if the
+        # current frame's stable_label dropped away. The user
+        # rarely intends to release pinch in <0.4s, and the
+        # recogniser bumpiness on foreshortened poses makes
+        # honest single-frame drops cost a full anchor reset.
+        if primary_pinch:
+            self._pinch_last_seen_primary = now
+        if secondary_pinch:
+            self._pinch_last_seen_secondary = now
+        primary_active = primary_pinch or (
+            now - self._pinch_last_seen_primary < self._pinch_grace_seconds
+        )
+        secondary_active = secondary_pinch or (
+            now - self._pinch_last_seen_secondary < self._pinch_grace_seconds
+        )
+
+        if primary_active and secondary_active and primary_palm and secondary_palm:
             new_mode = "two"
-        elif primary_pinch and primary_palm:
+        elif primary_active and primary_palm:
             new_mode = "one"
         else:
             new_mode = "none"
 
+        # Apply EMA smoothing on the palm coords used for grab
+        # math. The raw values still drive the active/inactive
+        # decision above (so we react to genuine pose changes
+        # promptly); only the math used to compute the transform
+        # is damped. Smoother resets to None when grab is
+        # inactive so the next grab session starts from the
+        # current raw position, not a stale damped one.
+        if new_mode == "none":
+            self._pinch_smoothed_primary = None
+            self._pinch_smoothed_secondary = None
+            primary_palm_s = None
+            secondary_palm_s = None
+        else:
+            primary_palm_s = self._smooth_palm("primary", primary_palm)
+            secondary_palm_s = self._smooth_palm("secondary", secondary_palm)
+
         # --- mode transitions: lock the live delta of the OUTGOING
         # mode into the cumulative state, then capture anchors for
-        # the INCOMING mode.
+        # the INCOMING mode. Uses smoothed palm coords throughout so
+        # the lock-in matches what the user actually saw drawn.
         if new_mode != self._pinch_mode:
-            if self._pinch_mode == "one" and self._pinch_anchor_palm is not None and primary_palm is not None:
-                self._pinch_accum_dx += primary_palm[0] - self._pinch_anchor_palm[0]
-                self._pinch_accum_dy += primary_palm[1] - self._pinch_anchor_palm[1]
-            elif self._pinch_mode == "two" and primary_palm is not None and secondary_palm is not None:
+            if (
+                self._pinch_mode == "one"
+                and self._pinch_anchor_palm is not None
+                and primary_palm_s is not None
+            ):
+                self._pinch_accum_dx += primary_palm_s[0] - self._pinch_anchor_palm[0]
+                self._pinch_accum_dy += primary_palm_s[1] - self._pinch_anchor_palm[1]
+            elif (
+                self._pinch_mode == "two"
+                and primary_palm_s is not None
+                and secondary_palm_s is not None
+            ):
                 cur_mid = (
-                    (primary_palm[0] + secondary_palm[0]) * 0.5,
-                    (primary_palm[1] + secondary_palm[1]) * 0.5,
+                    (primary_palm_s[0] + secondary_palm_s[0]) * 0.5,
+                    (primary_palm_s[1] + secondary_palm_s[1]) * 0.5,
                 )
                 cur_dist = max(
                     1e-4,
-                    ((primary_palm[0] - secondary_palm[0]) ** 2
-                     + (primary_palm[1] - secondary_palm[1]) ** 2) ** 0.5,
+                    ((primary_palm_s[0] - secondary_palm_s[0]) ** 2
+                     + (primary_palm_s[1] - secondary_palm_s[1]) ** 2) ** 0.5,
                 )
                 self._pinch_accum_dx += cur_mid[0] - self._pinch_two_anchor_mid[0]
                 self._pinch_accum_dy += cur_mid[1] - self._pinch_two_anchor_mid[1]
                 if self._pinch_two_anchor_dist > 1e-4:
                     self._pinch_accum_scale *= cur_dist / self._pinch_two_anchor_dist
             # Capture incoming-mode anchors.
-            if new_mode == "one" and primary_palm is not None:
-                self._pinch_anchor_palm = primary_palm
-            elif new_mode == "two" and primary_palm is not None and secondary_palm is not None:
+            if new_mode == "one" and primary_palm_s is not None:
+                self._pinch_anchor_palm = primary_palm_s
+            elif new_mode == "two" and primary_palm_s is not None and secondary_palm_s is not None:
                 self._pinch_two_anchor_mid = (
-                    (primary_palm[0] + secondary_palm[0]) * 0.5,
-                    (primary_palm[1] + secondary_palm[1]) * 0.5,
+                    (primary_palm_s[0] + secondary_palm_s[0]) * 0.5,
+                    (primary_palm_s[1] + secondary_palm_s[1]) * 0.5,
                 )
                 self._pinch_two_anchor_dist = max(
                     1e-4,
-                    ((primary_palm[0] - secondary_palm[0]) ** 2
-                     + (primary_palm[1] - secondary_palm[1]) ** 2) ** 0.5,
+                    ((primary_palm_s[0] - secondary_palm_s[0]) ** 2
+                     + (primary_palm_s[1] - secondary_palm_s[1]) ** 2) ** 0.5,
                 )
             else:
                 self._pinch_anchor_palm = None
@@ -4951,24 +5052,34 @@ class GestureWorker(QObject):
                 except Exception:
                     pass
 
-        # --- live transform every frame the mode is active.
-        if self._pinch_mode == "one" and self._pinch_anchor_palm is not None and primary_palm is not None:
-            live_dx = primary_palm[0] - self._pinch_anchor_palm[0]
-            live_dy = primary_palm[1] - self._pinch_anchor_palm[1]
+        # --- live transform every frame the mode is active. Same
+        # smoothed-coord story: the displayed transform is computed
+        # from the damped palm to keep the drawing visually steady.
+        if (
+            self._pinch_mode == "one"
+            and self._pinch_anchor_palm is not None
+            and primary_palm_s is not None
+        ):
+            live_dx = primary_palm_s[0] - self._pinch_anchor_palm[0]
+            live_dy = primary_palm_s[1] - self._pinch_anchor_palm[1]
             self._emit_pinch_transform(
                 self._pinch_accum_dx + live_dx,
                 self._pinch_accum_dy + live_dy,
                 self._pinch_accum_scale,
             )
-        elif self._pinch_mode == "two" and primary_palm is not None and secondary_palm is not None:
+        elif (
+            self._pinch_mode == "two"
+            and primary_palm_s is not None
+            and secondary_palm_s is not None
+        ):
             cur_mid = (
-                (primary_palm[0] + secondary_palm[0]) * 0.5,
-                (primary_palm[1] + secondary_palm[1]) * 0.5,
+                (primary_palm_s[0] + secondary_palm_s[0]) * 0.5,
+                (primary_palm_s[1] + secondary_palm_s[1]) * 0.5,
             )
             cur_dist = max(
                 1e-4,
-                ((primary_palm[0] - secondary_palm[0]) ** 2
-                 + (primary_palm[1] - secondary_palm[1]) ** 2) ** 0.5,
+                ((primary_palm_s[0] - secondary_palm_s[0]) ** 2
+                 + (primary_palm_s[1] - secondary_palm_s[1]) ** 2) ** 0.5,
             )
             live_dx = cur_mid[0] - self._pinch_two_anchor_mid[0]
             live_dy = cur_mid[1] - self._pinch_two_anchor_mid[1]
