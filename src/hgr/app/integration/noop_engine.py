@@ -1485,42 +1485,70 @@ class GestureWorker(QObject):
     def _drawing_draw_pose_active(self, prediction, hand_reading) -> bool:
         if hand_reading is None or prediction is None:
             return False
-        # Require the recogniser to actually report 'one' (or a
-        # high-confidence raw 'one' the stabiliser hasn't latched
-        # onto yet). The earlier landmark-only check accepted any
-        # 'index extendedish + others folded' shape, which let a
-        # foreshortened pinch — where index is partially_curled
-        # (still counted as extendedish by the helper) and thumb +
-        # middle/ring/pinky look folded — trip the draw tool. Now
-        # the user has to clearly hold a 'one' to ink, and the
-        # geometry checks below stay as a sanity gate so draw can't
-        # fire on, say, a generic three-finger label that briefly
-        # stabilised to 'one' on a transition.
+        fingers = hand_reading.fingers
+        index = fingers.get("index")
+        middle = fingers.get("middle")
+        ring = fingers.get("ring")
+        pinky = fingers.get("pinky")
+        if index is None or middle is None or ring is None or pinky is None:
+            return False
+
+        # Base geometry — required by EITHER path below. Index has
+        # to be extended-ish, the other three folded-ish, middle
+        # not visibly spread away from the palm. These are loose
+        # enough that any honest 'one' shape passes them, but
+        # exclude clearly different poses (open hand, fist, two,
+        # three) without depending on the thumb (which drifts
+        # under wrist rotation and was the source of the previous
+        # round's regressions).
+        outer_folded = sum(
+            1 for name in ("middle", "ring", "pinky")
+            if self._drawing_finger_foldedish(fingers.get(name))
+        )
+        base_geometry = (
+            self._drawing_finger_extendedish(index, primary=True)
+            and outer_folded >= 2
+            and float(getattr(middle, "openness", 0.0) or 0.0) <= 0.60
+        )
+        if not base_geometry:
+            return False
+
+        # Path 1 — recogniser confirms 'one'. Either via the
+        # stabilised label or via a moderate-confidence raw
+        # match (lowered the threshold to 0.40 because the user
+        # reported pinch-shaped tightening that left 'one'
+        # confidence borderline on real strokes). Fast-path; skips
+        # the stricter geometry below.
         stable = str(getattr(prediction, "stable_label", "neutral") or "neutral")
         raw = str(getattr(prediction, "raw_label", "neutral") or "neutral")
         confidence = float(getattr(prediction, "confidence", 0.0) or 0.0)
-        if stable != "one" and not (raw == "one" and confidence >= 0.55):
-            return False
-        # Geometry sanity gate: keep the index-extended + outer-
-        # folded + middle-not-spread checks as a backstop against
-        # a transient mislabel ('three' briefly stabilising to
-        # 'one' on a state change), but DROP the thumb-foldedish
-        # requirement entirely. MediaPipe's thumb extension /
-        # openness signals drift heavily as the wrist rotates —
-        # a tucked thumb on a sideways palm reads as 'fully_open'
-        # — and any thumb-shape gate built on those was breaking
-        # strokes mid-line on natural hand movement. The
-        # recogniser's stable_label gate above is doing the heavy
-        # lifting; trust it to distinguish 'one' from thumbs-out
-        # poses (mute / ok / two etc.) by virtue of the score
-        # that produced the label.
-        fingers = hand_reading.fingers
-        outer_folded = sum(1 for name in ("middle", "ring", "pinky") if self._drawing_finger_foldedish(fingers.get(name)))
-        return (
-            self._drawing_finger_extendedish(fingers.get("index"), primary=True)
-            and outer_folded >= 2
-            and float(getattr(fingers.get("middle"), "openness", 0.0) or 0.0) <= 0.60
+        if stable == "one" or (raw == "one" and confidence >= 0.40):
+            return True
+
+        # Path 2 — recogniser hasn't labelled this as 'one' (could
+        # be wrist rotation / occlusion / borderline confidence)
+        # but the geometry is unambiguous. Tighter than Path 1's
+        # base check so 'two' / 'three' / 'pinch' / 'mute' don't
+        # leak through:
+        #   - index must be `fully_open` (not partially_curled),
+        #     which excludes pinch and mid-transition shapes;
+        #   - openness on the index ≥ 0.65 — a real one;
+        #   - middle / ring / pinky must each be in
+        #     {closed, mostly_curled} — excludes any 'two' or
+        #     'three' frame where one of them is still
+        #     partially_curled;
+        #   - middle openness ≤ 0.30 — even tighter than the
+        #     base 0.60, so a recogniser glitch that briefly
+        #     reads middle as half-open can't slip through.
+        strict_one = (
+            index.state == "fully_open"
+            and float(getattr(index, "openness", 0.0) or 0.0) >= 0.65
+            and middle.state in ("closed", "mostly_curled")
+            and ring.state in ("closed", "mostly_curled")
+            and pinky.state in ("closed", "mostly_curled")
+            and float(getattr(middle, "openness", 0.0) or 0.0) <= 0.30
         )
+        return strict_one
 
     def _drawing_erase_pose_active(self, prediction, hand_reading) -> bool:
         if hand_reading is None:
@@ -5859,9 +5887,21 @@ class GestureWorker(QObject):
 
     def _build_debug_payload(self, result, now: float) -> dict:
         prediction = result.prediction
-        dynamic_display = prediction.dynamic_label
-        if prediction.dynamic_label != "neutral":
-            self._dynamic_hold_label = prediction.dynamic_label
+        # Suppress repeat_circle while drawing mode is on. The user
+        # is actively drawing strokes with their index finger, and
+        # the dynamic recogniser can label that motion as
+        # repeat_circle as the index sweeps. No action fires on
+        # repeat_circle in drawing mode (the drawing branch returns
+        # before reaching the routers), but the label was still
+        # surfacing in the debug display and on _dynamic_hold_label,
+        # which the user found distracting. Swipes are kept because
+        # drawing mode actively uses left/right swipes for nav.
+        incoming_dynamic = prediction.dynamic_label
+        if self._drawing_mode_enabled and incoming_dynamic == "repeat_circle":
+            incoming_dynamic = "neutral"
+        dynamic_display = incoming_dynamic
+        if incoming_dynamic != "neutral":
+            self._dynamic_hold_label = incoming_dynamic
             self._dynamic_hold_until = now + 0.85
         elif now < self._dynamic_hold_until:
             dynamic_display = self._dynamic_hold_label

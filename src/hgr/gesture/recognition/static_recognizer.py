@@ -291,22 +291,20 @@ class StaticGestureRecognizer:
         pinch_bend_gate = clamp01(
             (min(thumb_bend_avg, index_bend_avg) - 110.0) / 50.0
         )
-        # Pinch separation gate. The thumb and index tips have to
-        # be at least somewhat APART for this pose — when they
-        # touch (or nearly touch) it's an 'ok' sign, not a pinch.
-        # Ramps from 0 at thumb_index_ratio 0.18 (clearly an ok
-        # touch) to 1.0 at 0.28 (clearly a pinch C-shape). Lower
-        # bound was 0.25 in the previous version, but real
-        # pinches hover around 0.25-0.30 and the old gate was
-        # eating too much of pinch's score. The MULTIPLIER below
-        # is also softened to (0.50 + 0.50 * gate) so OK case
-        # gives 0.5× pinch (still decisively loses to OK's full
-        # score) while a moderate-pinch case gives ~0.85× —
-        # plenty to beat fist while still letting OK win when
-        # the tips actually touch.
-        pinch_separation_gate = clamp01(
-            (thumb_index_ratio - 0.18) / 0.10
-        )
+        # NOTE: there used to be a pinch_separation_gate here that
+        # required the thumb and index tips to be apart, on the
+        # theory that tips-touching is an 'ok' sign and shouldn't
+        # also score as pinch. In practice the user's real pinch
+        # poses cycle through tips touching, near-touching, and
+        # somewhat-apart depending on hand orientation and grab
+        # strength — and the gate was eating pinch's score on
+        # frames where tips closed naturally during a stretch,
+        # which dropped the grab. Removed entirely. Geometry
+        # already separates the two poses cleanly: 'ok' requires
+        # middle / ring / pinky to be OPEN (the classic 'tail'
+        # of the ok sign), pinch requires them CLOSED. So a
+        # tips-touching pose with curled outer fingers scores
+        # high on pinch and low on ok regardless of the spread.
 
         scores = {
             "open_hand": clamp01(
@@ -419,7 +417,6 @@ class StaticGestureRecognizer:
                     + 0.18 * self._partial_curl(hand, "index")
                 )
                 * (0.30 + 0.70 * pinch_bend_gate)
-                * (0.50 + 0.50 * pinch_separation_gate)
             ),
             "finger_together": clamp01(
                 0.56 * non_thumb_extended
