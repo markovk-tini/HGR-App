@@ -84,7 +84,14 @@ class SandboxWindow(QDialog):
 
         self._registry = GestureRegistry()
         self._registry.load()
-        self._classifier = GestureClassifier(self._registry)
+        # Match the live runner's threshold (0.78) instead of the
+        # classifier's default 0.88. Sandbox testing was rejecting
+        # legit gestures whose live-runner scores hovered around
+        # 0.80–0.85 — the user reported a gesture in their list
+        # that 'isn't even being detected' here, while it fires
+        # fine in the actual app. Aligning the threshold so the
+        # sandbox is a faithful preview of live behaviour.
+        self._classifier = GestureClassifier(self._registry, threshold=0.78)
         self._classifier.reload()
 
         # Hold-to-activate state.
@@ -107,6 +114,15 @@ class SandboxWindow(QDialog):
         self._poll_timer: Optional[QTimer] = None
         self._using_worker = False
         self._camera_connect_attempted = False
+
+        # Sandbox-owned drawing overlay window for the
+        # show_overlay_drawing action, lazily constructed on
+        # first use. Self-contained so 'fire on' tests work even
+        # when the sandbox is opened standalone or when the
+        # main-window signal glue isn't wired up yet — the user
+        # gets the same toggle-show / toggle-hide behaviour the
+        # live engine produces, without any cross-window plumbing.
+        self._sandbox_drawing_overlay = None
 
         self._build()
 
@@ -463,25 +479,24 @@ class SandboxWindow(QDialog):
                         # kind because the actual overlay is a QWidget that
                         # has to be mutated on the GUI thread — the live
                         # engine handles it via a Qt signal on the worker.
-                        # Mirror that here so 'fire on' in the sandbox
-                        # actually shows the overlay too; sandbox-firing
-                        # any other gesture lights up its bound action
-                        # exactly like the live runner does, so the user
-                        # would expect the overlay action to behave the
-                        # same.
+                        # Sandbox handles it directly: own a
+                        # DrawingOverlayWindow and toggle it here. Self-
+                        # contained on purpose — the previous attempt
+                        # routed through worker.drawing_overlay_toggle_
+                        # requested.emit, but that only worked when
+                        # main_window's signal glue was already wired up
+                        # (and the user reported overlays still not
+                        # appearing). Doing it locally guarantees the
+                        # sandbox's 'fire on' visibly works regardless
+                        # of how / whether the host main_window is
+                        # listening.
                         action_kind = (match.gesture.action.kind or "").lower()
                         fired = False
                         if action_kind == "show_overlay_drawing":
                             filename = str(
                                 (match.gesture.action.payload or {}).get("filename", "")
                             )
-                            worker = self._worker
-                            if worker is not None and hasattr(worker, "drawing_overlay_toggle_requested"):
-                                try:
-                                    worker.drawing_overlay_toggle_requested.emit(filename)
-                                    fired = True
-                                except Exception:
-                                    fired = False
+                            fired = bool(self._sandbox_toggle_drawing_overlay(filename))
                         else:
                             fired = bool(fire_once(match.gesture.name, match.gesture.action))
                         if fired:
@@ -640,7 +655,58 @@ class SandboxWindow(QDialog):
 
     # --- close handlers -------------------------------------------------
 
+    def _sandbox_toggle_drawing_overlay(self, filename: str) -> bool:
+        """Toggle the sandbox's own DrawingOverlayWindow for a fired
+        show_overlay_drawing action. Returns True on a successful
+        show OR successful hide; False if the file doesn't resolve
+        (so the caller knows the fire effectively failed).
+
+        Same toggle semantics as the live engine: fire once → show;
+        fire again with the same filename → hide; fire with a
+        different filename while one is showing → swap to the new
+        drawing.
+        """
+        from .drawing_overlay_window import (
+            DrawingOverlayWindow,
+            resolve_drawing_path,
+        )
+
+        # Lazy-construct the overlay so the sandbox doesn't pay the
+        # widget construction cost up-front for users who never test
+        # an overlay-drawing gesture.
+        if self._sandbox_drawing_overlay is None:
+            try:
+                self._sandbox_drawing_overlay = DrawingOverlayWindow(parent=self)
+            except Exception:
+                return False
+        overlay = self._sandbox_drawing_overlay
+
+        drawings_dir = ""
+        if self._config is not None:
+            drawings_dir = str(getattr(self._config, "drawings_save_dir", "") or "")
+        resolved = resolve_drawing_path(filename, drawings_dir)
+        if resolved is None:
+            return False
+
+        currently_showing_same = (
+            overlay.isVisible()
+            and overlay.current_path is not None
+            and Path(overlay.current_path) == resolved
+        )
+        if currently_showing_same:
+            overlay.hide()
+            return True
+        return bool(overlay.show_image(str(resolved)))
+
     def closeEvent(self, event) -> None:
+        # Hide the sandbox's drawing overlay if it's still up so it
+        # doesn't outlive the dialog — leaving an always-on-top
+        # transparent window after the sandbox closes is confusing.
+        if self._sandbox_drawing_overlay is not None:
+            try:
+                self._sandbox_drawing_overlay.hide()
+            except Exception:
+                pass
         self._disconnect_worker()
         try:
             self._mp_hands.close()
