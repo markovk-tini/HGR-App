@@ -3720,11 +3720,17 @@ class GestureWorker(QObject):
         recovered = open_camera_by_index(index_int, max_index=self.config.camera_scan_limit)
         if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
             return recovered
-        # Last-ditch: open with default backend so we have *some*
+        # Last-ditch: open with Media Foundation so we have *some*
         # camera object — even default-format YUY2 is better than
-        # leaving the engine with self._cap = None.
+        # leaving the engine with self._cap = None. Explicit MSMF
+        # (rather than CAP_ANY whose Windows resolution varies by
+        # OpenCV build) keeps this path consistent with the
+        # MSMF-first policy in camera_utils._backend_candidates(),
+        # so a buggy DirectShow filter can't sneak back in via the
+        # default-backend resolution.
         try:
-            recovered_cap = cv2.VideoCapture(index_int)
+            backend = getattr(cv2, "CAP_MSMF", getattr(cv2, "CAP_ANY", 0))
+            recovered_cap = cv2.VideoCapture(index_int, backend)
             if recovered_cap.isOpened():
                 return (info, recovered_cap)
         except Exception:
@@ -3826,25 +3832,10 @@ class GestureWorker(QObject):
     def _tick(self) -> None:
         if not self._running or self._cap is None or self.engine is None:
             return
-        # Back-pressure: if the engine runner is still chewing on the
-        # previous frame, OR a runner result is queued waiting for the
-        # main thread to handle it, drop this tick. The next tick
-        # (15 ms away) will pick up a fresh camera frame. Skipping
-        # here keeps the request queue at depth=1, avoids the
-        # perceived-display-lag that an unbounded backlog would cause,
-        # and guarantees `_last_result_had_hand` is current before the
-        # skip-frame decision below reads it.
-        if self._engine_runner.busy or self._async_result_pending:
-            return
-        tick_now = time.time()
-        if self._should_skip_forced_fps_tick(tick_now):
-            return
-        # Per-frame timing diagnostic: when Lite Mode is on, log the
-        # breakdown every ~2 seconds to stderr so the user / dev can
-        # see whether the 26 fps ceiling is camera (cap.read takes the
-        # whole frame budget), MediaPipe inference, or downstream
-        # work. Sample lazily so we don't pay any clock-syscall cost
-        # for users who aren't troubleshooting.
+        # Per-frame timing diagnostic — sampled when Lite Mode is on
+        # so we can attribute fps drops to camera vs MediaPipe vs
+        # downstream work. Lazy so non-debug callers pay no
+        # clock-syscall cost.
         debug_timing = self._perf_optimisations_enabled()
         t0 = time.perf_counter() if debug_timing else 0.0
         ok, frame = self._cap.read()
@@ -3873,11 +3864,15 @@ class GestureWorker(QObject):
         frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
         t_prep = time.perf_counter() if debug_timing else 0.0
-        # Decoupled display path: emit the raw frame for receivers
-        # to paint NOW, before the engine dispatch below. The
-        # display refreshes at camera fps independently of engine
-        # completion. Carry the capture timestamp so receivers can
-        # measure end-to-end pipeline latency at paint time.
+        # Decoupled display path. CRUCIAL ordering: emit the raw
+        # frame BEFORE the back-pressure check below. This is what
+        # makes the live view update at camera fps even when GPU
+        # inference is slow (Valorant or screen capture loading the
+        # GPU pushes ONNX inference latency from ~30 ms to ~500 ms).
+        # If we ran the back-pressure check first and returned early,
+        # the display would only refresh when inference finishes —
+        # collapsing visible fps to 2-5 and producing the multi-
+        # second perceived lag users reported during gaming.
         try:
             capture_ts = float(getattr(self._cap, "_last_consumed_ts", 0.0) or 0.0)
             if capture_ts <= 0.0:
@@ -3885,6 +3880,19 @@ class GestureWorker(QObject):
             self.raw_frame_ready.emit(frame, capture_ts)
         except Exception:
             pass
+        # Back-pressure: if the engine runner is still chewing on the
+        # previous frame, OR a runner result is queued waiting for the
+        # main thread to handle it, drop the rest of this tick (no
+        # inference, no debug payload). Display already went out
+        # above so the live view stays smooth. The next tick will
+        # pick up a fresh camera frame for inference once the runner
+        # is free. Skipping here keeps the request queue at depth=1
+        # so we never build an inference backlog.
+        if self._engine_runner.busy or self._async_result_pending:
+            return
+        tick_now = time.time()
+        if self._should_skip_forced_fps_tick(tick_now):
+            return
         # Pipeline freeze: the recorder dialog is open. Stop here —
         # the recorder runs its OWN MediaPipe pass on the raw frame
         # we just emitted, so a second pass in this worker would be
@@ -4893,24 +4901,58 @@ class GestureWorker(QObject):
         self._pinch_smoothed_secondary = None
 
     def _smooth_palm(self, slot: str, raw: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
-        """Return an EMA-smoothed version of `raw` for the given
-        palm slot ('primary' or 'secondary'). The first non-None
-        value seeds the smoother; subsequent calls blend with
-        _pinch_smooth_alpha. Slot stays None until a real reading
-        arrives, so a brief no-hand frame doesn't snap the
-        smoother to (0, 0). Reset by reset_pinch_grab_state and
-        on grace expiry so a fresh grab session doesn't carry
-        stale damping."""
+        """Velocity-adaptive smoother for palm coords used by the
+        pinch-grab math. The fixed-alpha EMA we shipped first felt
+        bouncy on foreshortened pinches because MediaPipe's
+        per-frame landmark jitter is 3-10 px even when the user is
+        holding still — a fixed alpha had to choose between 'too
+        laggy on real motion' and 'too jittery when held' and both
+        were bad. Adaptive alpha solves it: tiny per-frame deltas
+        (= jitter while holding) get heavy damping; medium deltas
+        pass through with moderate damping; large deltas (= the
+        user actually moving) react fast.
+
+        Also clamps single-frame jumps > 10% of normalised screen
+        width to that 10% maximum — that catches the case where
+        MediaPipe completely loses the hand and re-detects it at
+        a far-away position, which would otherwise teleport the
+        grabbed drawing on the next emit.
+        """
         if raw is None:
             return getattr(self, f"_pinch_smoothed_{slot}", None)
         prev = getattr(self, f"_pinch_smoothed_{slot}", None)
         if prev is None:
             new = raw
         else:
-            a = self._pinch_smooth_alpha
+            dx = raw[0] - prev[0]
+            dy = raw[1] - prev[1]
+            dist = (dx * dx + dy * dy) ** 0.5
+            # Velocity-clamp: cap the maximum delta we'll consider
+            # before applying alpha. A genuine fast hand move is
+            # ~5-10% screen / frame; >10% almost always means a
+            # tracker re-detection jump.
+            if dist > 0.10 and dist > 1e-6:
+                clamp_scale = 0.10 / dist
+                target_x = prev[0] + dx * clamp_scale
+                target_y = prev[1] + dy * clamp_scale
+            else:
+                target_x = raw[0]
+                target_y = raw[1]
+            # Adaptive alpha. Tiers calibrated against typical
+            # MediaPipe foreshortened-pinch jitter (~0.005-0.015
+            # normalised units) vs. genuine slow / fast hand
+            # motion. Holding still → alpha 0.10 (smoother barely
+            # moves, killing jitter). Real motion → alpha 0.55
+            # (snaps to current position).
+            if dist < 0.015:
+                alpha = 0.10
+            elif dist < 0.05:
+                alpha = 0.25
+            else:
+                alpha = 0.55
             new = (
-                a * raw[0] + (1.0 - a) * prev[0],
-                a * raw[1] + (1.0 - a) * prev[1],
+                alpha * target_x + (1.0 - alpha) * prev[0],
+                alpha * target_y + (1.0 - alpha) * prev[1],
             )
         setattr(self, f"_pinch_smoothed_{slot}", new)
         return new
