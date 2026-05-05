@@ -56,7 +56,11 @@ class StaticGestureRecognizer:
         pinch pose where the thumb and index finger are bent toward
         each other in a C-shape but not touching. Peaks when the
         finger.state is 'partially_curled' AND finger.curl is
-        mid-range; drops to zero at either extreme."""
+        mid-range. Crucially also scores high when the finger's
+        bend angles say 'mostly straight' but extension says
+        'closed' — that's the FORESHORTENING case (finger pointing
+        toward the camera) which would otherwise mis-classify as
+        closed and let pinch lose to fist."""
         finger = hand.fingers[name]
         state_score = {
             "fully_open": 0.05,
@@ -65,10 +69,17 @@ class StaticGestureRecognizer:
             "closed": 0.0,
         }[finger.state]
         # mid_curl peaks at finger.curl == 0.5 and falls to 0 at
-        # either end of the [0, 1] range, so a fully-extended or
-        # fully-closed finger never scores as partial.
+        # either end of the [0, 1] range.
         mid_curl = clamp01(1.0 - 2.0 * abs(finger.curl - 0.5))
-        return clamp01(0.5 * state_score + 0.5 * mid_curl)
+        # Foreshortening rescue: a finger pointing AT the camera has
+        # high finger.curl (small wrist→tip distance) but its joint
+        # bend angles stay near 180° (joints are straight). When
+        # bend_avg ≥ ~150° the finger is mostly-straight regardless
+        # of what extension thinks, so re-score it as partially-
+        # curled. 180° = fully straight, 0° = fully folded back.
+        bend_avg = (float(finger.bend_proximal) + float(finger.bend_distal)) * 0.5
+        not_folded = clamp01((bend_avg - 120.0) / 50.0)  # ramps 120→170°
+        return clamp01(0.30 * state_score + 0.30 * mid_curl + 0.40 * not_folded)
 
     def _volume_primary_gate(self, hand: HandReading, name: str) -> float:
         finger = hand.fingers[name]
@@ -240,6 +251,30 @@ class StaticGestureRecognizer:
             ),
         )
 
+        # Anti-fist gate for the pinch pose. Pinch needs the THUMB
+        # and INDEX bend angles to be high (joints mostly straight,
+        # near 180°). True fist has low bend on every finger (folded
+        # into the palm); the foreshortening case (user pointing
+        # thumb + index at the camera so their extension reads as
+        # "closed") still has HIGH bend angles on those two fingers
+        # because the joints themselves never folded — the fingers
+        # are just pointing toward the lens. This gate is ≈1.0 when
+        # both fingers' bend averages are ≥160°, ≈0 when they're
+        # folded to ≤110°, so multiplying it onto pinch's score
+        # collapses pinch in true fists while keeping it strong
+        # during foreshortened pinches.
+        thumb_bend_avg = (
+            float(hand.fingers["thumb"].bend_proximal)
+            + float(hand.fingers["thumb"].bend_distal)
+        ) * 0.5
+        index_bend_avg = (
+            float(hand.fingers["index"].bend_proximal)
+            + float(hand.fingers["index"].bend_distal)
+        ) * 0.5
+        pinch_bend_gate = clamp01(
+            (min(thumb_bend_avg, index_bend_avg) - 110.0) / 50.0
+        )
+
         scores = {
             "open_hand": clamp01(
                 0.72 * all_open
@@ -338,13 +373,19 @@ class StaticGestureRecognizer:
             # and move drawing overlays. Distinct from `ok` because
             # ok requires the thumb-tip + index-tip to form a closed
             # loop; pinch tolerates any thumb-index distance as long
-            # as both are in the partially-curled range.
+            # as both are in the partially-curled range. The
+            # multiplier `pinch_bend_gate` (computed above the dict)
+            # is what beats fist when the user's thumb + index are
+            # foreshortened — see its definition for why.
             "pinch": clamp01(
-                0.30 * closedish["middle"]
-                + 0.20 * closedish["ring"]
-                + 0.20 * closedish["pinky"]
-                + 0.15 * self._partial_curl(hand, "thumb")
-                + 0.15 * self._partial_curl(hand, "index")
+                (
+                    0.28 * closedish["middle"]
+                    + 0.18 * closedish["ring"]
+                    + 0.18 * closedish["pinky"]
+                    + 0.18 * self._partial_curl(hand, "thumb")
+                    + 0.18 * self._partial_curl(hand, "index")
+                )
+                * (0.30 + 0.70 * pinch_bend_gate)
             ),
             "finger_together": clamp01(
                 0.56 * non_thumb_extended

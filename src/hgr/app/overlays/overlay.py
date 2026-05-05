@@ -208,6 +208,13 @@ class ScreenDrawOverlay(QWidget):
         self._active_stroke_points: list[tuple[float, float]] = []
         self._raster_dirty = False
         self.shape_mode = False
+        # Pinch-grab live transform. Translation only on the live
+        # canvas (scale stays 1:1 because the user is actively
+        # drawing on it; we don't want re-scaling artefacts in
+        # mid-stroke). Phase 1 only translates the rasterised
+        # canvas — per-stroke movement comes in Phase 2.
+        self._grab_dx_norm: float = 0.0
+        self._grab_dy_norm: float = 0.0
         self._resize_to_screen()
 
     def set_shape_mode(self, enabled: bool) -> None:
@@ -584,11 +591,79 @@ class ScreenDrawOverlay(QWidget):
         super().resizeEvent(event)
         self._ensure_canvas_size()
 
+    def set_grab_transform(self, dx_norm: float, dy_norm: float, scale: float) -> None:
+        """Apply a live translate transform to the displayed canvas
+        during a pinch-grab. Translation is in normalised screen
+        units (1.0 = full width / height). Scale is accepted for
+        signal compatibility with DrawingOverlayWindow but ignored
+        on the live canvas — re-scaling a stroke being drawn would
+        produce ugly interpolation artefacts and the user can't
+        easily reason about where their next stroke will land.
+        Call apply_grab_to_canvas() at grab-end to bake the offset
+        into the canvas pixels."""
+        del scale
+        self._grab_dx_norm = float(dx_norm)
+        self._grab_dy_norm = float(dy_norm)
+        self.update()
+
+    def reset_grab_transform(self) -> None:
+        self._grab_dx_norm = 0.0
+        self._grab_dy_norm = 0.0
+        self.update()
+
+    def apply_grab_to_canvas(self) -> None:
+        """Bake the current live grab translation into the canvas
+        pixels so the strokes physically move (subsequent draws +
+        the saved PNG reflect the new position). No-op when no
+        translation is active. Pushes a history entry first so the
+        move can be undone."""
+        if self._grab_dx_norm == 0.0 and self._grab_dy_norm == 0.0:
+            return
+        self._ensure_canvas_size()
+        if self._canvas.isNull():
+            self._grab_dx_norm = 0.0
+            self._grab_dy_norm = 0.0
+            return
+        # History entry: snapshot of the canvas BEFORE the move so
+        # an undo restores the pre-grab position.
+        try:
+            self._history.append((self._canvas.copy(), list(self._strokes), False))
+            if len(self._history) > self._history_limit:
+                self._history.pop(0)
+        except Exception:
+            pass
+        dx_px = int(self._grab_dx_norm * self.width())
+        dy_px = int(self._grab_dy_norm * self.height())
+        new_canvas = QImage(self._canvas.size(), QImage.Format_ARGB32_Premultiplied)
+        new_canvas.fill(Qt.transparent)
+        painter = QPainter(new_canvas)
+        painter.drawImage(dx_px, dy_px, self._canvas)
+        painter.end()
+        self._canvas = new_canvas
+        # Mark stored strokes as out of sync — they still have the
+        # pre-translation coordinates because Phase 1 only moves
+        # the rasterised pixels. Per-stroke point updates land in
+        # Phase 2 along with the sidecar stroke storage. Setting
+        # _raster_dirty here means the rasteriser knows it can't
+        # rebuild from strokes alone without also re-applying the
+        # baked offset.
+        self._raster_dirty = True
+        self._grab_dx_norm = 0.0
+        self._grab_dy_norm = 0.0
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         if not self._canvas.isNull():
-            painter.drawImage(0, 0, self._canvas)
+            # Live grab translates the canvas blit on every paint
+            # while the user is pinching. The offset clears to
+            # zero on apply_grab_to_canvas() (which bakes the
+            # translation into the canvas pixels at grab end) or
+            # on reset_grab_transform() (cancel without baking).
+            tx_px = int(self._grab_dx_norm * self.width())
+            ty_px = int(self._grab_dy_norm * self.height())
+            painter.drawImage(tx_px, ty_px, self._canvas)
 
         if self._cursor_pos is None or self._cursor_mode == "hidden":
             return
