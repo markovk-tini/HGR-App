@@ -225,7 +225,8 @@ class CustomGesturesPanel(QWidget):
         self.create_button.clicked.connect(self.open_create_requested)
         row.addWidget(self.create_button)
 
-        self.sandbox_button = QPushButton("Sandbox  (test gestures live)")
+        self.sandbox_button = QPushButton("Sandbox")
+        self.sandbox_button.setToolTip("Test custom gestures live without firing their bound actions.")
         self.sandbox_button.setMinimumHeight(38)
         self.sandbox_button.setStyleSheet(
             "QPushButton {"
