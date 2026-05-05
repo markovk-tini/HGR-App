@@ -88,10 +88,14 @@ class StaticGestureRecognizer:
         # curled. 180° = fully straight, 0° = fully folded back.
         bend_avg = (float(finger.bend_proximal) + float(finger.bend_distal)) * 0.5
         not_folded = clamp01((bend_avg - 120.0) / 50.0)  # ramps 120→170°
-        # Hook evidence: at least SOME curl is required to award the
-        # not_folded bonus. Fully extended → 0.2× damping (can't
-        # pretend to be a partial); curl ≥ 0.20 → full bonus.
-        hook_evidence = 0.2 + 0.8 * clamp01(float(finger.curl) / 0.20)
+        # Hook evidence: any non-trivial curl gets full not_folded
+        # credit. Fully extended (curl ≈ 0) gets damped to 0.5× so
+        # a straight finger can't fully impersonate a partial, but
+        # the floor stays generous because the previous tighter
+        # gate (0.2 floor, ramp to curl 0.20) was killing pinch on
+        # poses where the user's thumb / index were lightly hooked
+        # (curl ≈ 0.05-0.10).
+        hook_evidence = 0.5 + 0.5 * clamp01(float(finger.curl) / 0.10)
         return clamp01(0.30 * state_score + 0.30 * mid_curl + 0.40 * not_folded * hook_evidence)
 
     def _volume_primary_gate(self, hand: HandReading, name: str) -> float:
@@ -290,16 +294,18 @@ class StaticGestureRecognizer:
         # Pinch separation gate. The thumb and index tips have to
         # be at least somewhat APART for this pose — when they
         # touch (or nearly touch) it's an 'ok' sign, not a pinch.
-        # thumb_index_ratio is the raw 4→8 landmark distance
-        # divided by palm scale; 'ok' fires below 0.27, so we
-        # require ≥ ~0.30 here. Ramps gradually so a pose with
-        # tips at 0.28 still gets some pinch credit (the user can
-        # bring tips closer mid-grab without instantly dropping
-        # the gesture), but ramps in fully by 0.40 — matched the
-        # 'C-shape, definitely not touching' reference image the
-        # user provided when the pose was originally designed.
+        # Ramps from 0 at thumb_index_ratio 0.18 (clearly an ok
+        # touch) to 1.0 at 0.28 (clearly a pinch C-shape). Lower
+        # bound was 0.25 in the previous version, but real
+        # pinches hover around 0.25-0.30 and the old gate was
+        # eating too much of pinch's score. The MULTIPLIER below
+        # is also softened to (0.50 + 0.50 * gate) so OK case
+        # gives 0.5× pinch (still decisively loses to OK's full
+        # score) while a moderate-pinch case gives ~0.85× —
+        # plenty to beat fist while still letting OK win when
+        # the tips actually touch.
         pinch_separation_gate = clamp01(
-            (thumb_index_ratio - 0.25) / 0.15
+            (thumb_index_ratio - 0.18) / 0.10
         )
 
         scores = {
@@ -413,7 +419,7 @@ class StaticGestureRecognizer:
                     + 0.18 * self._partial_curl(hand, "index")
                 )
                 * (0.30 + 0.70 * pinch_bend_gate)
-                * (0.20 + 0.80 * pinch_separation_gate)
+                * (0.50 + 0.50 * pinch_separation_gate)
             ),
             "finger_together": clamp01(
                 0.56 * non_thumb_extended

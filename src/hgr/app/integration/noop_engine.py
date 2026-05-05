@@ -1501,11 +1501,23 @@ class GestureWorker(QObject):
         confidence = float(getattr(prediction, "confidence", 0.0) or 0.0)
         if stable != "one" and not (raw == "one" and confidence >= 0.55):
             return False
+        # Geometry sanity gate: keep the index-extended + outer-
+        # folded + middle-not-spread checks as a backstop against
+        # a transient mislabel ('three' briefly stabilising to
+        # 'one' on a state change), but DROP the thumb-foldedish
+        # requirement entirely. MediaPipe's thumb extension /
+        # openness signals drift heavily as the wrist rotates —
+        # a tucked thumb on a sideways palm reads as 'fully_open'
+        # — and any thumb-shape gate built on those was breaking
+        # strokes mid-line on natural hand movement. The
+        # recogniser's stable_label gate above is doing the heavy
+        # lifting; trust it to distinguish 'one' from thumbs-out
+        # poses (mute / ok / two etc.) by virtue of the score
+        # that produced the label.
         fingers = hand_reading.fingers
         outer_folded = sum(1 for name in ("middle", "ring", "pinky") if self._drawing_finger_foldedish(fingers.get(name)))
         return (
             self._drawing_finger_extendedish(fingers.get("index"), primary=True)
-            and self._drawing_thumb_foldedish(fingers.get("thumb"))
             and outer_folded >= 2
             and float(getattr(fingers.get("middle"), "openness", 0.0) or 0.0) <= 0.60
         )
