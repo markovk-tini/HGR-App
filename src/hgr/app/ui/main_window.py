@@ -14,7 +14,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, Qt, QThread, QTimer, QEvent, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPointF, QPropertyAnimation, QRect, Qt, QThread, QTimer, QEvent, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPainterPath, QPen, QCursor, QPixmap, QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -53,7 +54,7 @@ except Exception:
 from ctypes import wintypes
 
 from ..actions.system_actions import SystemActions
-from ..camera.camera_utils import CameraInfo, list_available_cameras, request_camera_access_main_thread
+from ..camera.camera_utils import CameraInfo, list_available_cameras, list_cameras_qt_only, request_camera_access_main_thread
 from ...config.app_config import (
     ORIGINAL_ACCENT_COLOR,
     ORIGINAL_HELLO_FONT_SIZE,
@@ -764,6 +765,14 @@ class GestureSketchWidget(QWidget):
             finger_lengths = [46, 44, 40, 14]
         elif self.gesture_key in {"wheel_pose", "chrome_wheel_pose", "mute"}:
             finger_lengths = [44, 14, 14, 40]
+        elif self.gesture_key in {"pinch", "right_pinch", "left_pinch"}:
+            # Index hooked (partially extended ~22), middle / ring /
+            # pinky curled (14). The thumb hook is drawn separately
+            # below — see the elif on `gesture_key in {"pinch", ...}`
+            # in the thumb section. 22 is the painter's open / curled
+            # cutoff so the index renders as a short straight line
+            # instead of a curl, which reads as 'extended but bent'.
+            finger_lengths = [22, 14, 14, 14]
         else:
             finger_lengths = [44, 44, 44, 44]
 
@@ -801,6 +810,13 @@ class GestureSketchWidget(QWidget):
             thumb_open = True
         elif self.gesture_key in {"chrome_wheel_pose"}:
             thumb_end = (thumb_start_x - 14, thumb_start_y + 8)
+            thumb_open = False
+        elif self.gesture_key in {"pinch", "right_pinch", "left_pinch"}:
+            # Hook the thumb up toward the index — pinch's signature
+            # C-shape. Drawn slightly higher and shorter than the
+            # default folded thumb so the hook reads as 'curled but
+            # reaching out', not 'tucked into the palm'.
+            thumb_end = (thumb_start_x - 10, thumb_start_y - 8)
             thumb_open = False
         else:
             thumb_end = (thumb_start_x - 12, thumb_start_y + 10)
@@ -1472,6 +1488,24 @@ def _build_gesture_guide_dynamic_cards() -> list[GestureGuideCard]:
             ),
             gesture_key="wheel_pose",
             video_name="DrawingSettingsWheel.mp4",
+        ),
+        GestureGuideCard(
+            title="Pinch (one or two hands)",
+            action="Grab and move drawings; with both hands, stretch / squish them",
+            how_to=(
+                "How To: Curl your middle, ring, and pinky into your palm, and curve your thumb and index toward each "
+                "other in a C-shape — they don't have to touch. Hold the pose for about 0.7 seconds before moving so "
+                "the grab activates cleanly. Move your hand to translate the drawing; release the pose to drop it where "
+                "it is.\n\n"
+                "Two-hand stretch: hold pinch with BOTH hands at the same time. Move them apart to stretch the drawing "
+                "outward, together to squish it; move both in parallel to translate. Either hand alone works as a "
+                "single-hand grab if the other is out of frame.\n\n"
+                "Where it works: while drawing mode is on, pinch grabs the live drawing canvas. When a saved drawing "
+                "is being shown as a transparent overlay (via a custom-gesture 'Show a saved drawing as overlay' "
+                "binding), pinch grabs that overlay instead. A left-swipe undoes the whole grab session — move and "
+                "stretch revert together as one history entry."
+            ),
+            gesture_key="pinch",
         ),
     ]
 
@@ -2671,6 +2705,64 @@ class _CameraInventoryThread(QThread):
         self._scan_limit = int(scan_limit)
 
     def run(self) -> None:
+        # Qt-only enumeration. The cv2 probe path (which validates
+        # each device by opening a capture and reading a frame) is
+        # what crashes Touchless on systems where a third-party
+        # DirectShow filter — notably Canon EOS Webcam Utility on
+        # cold launch — segfaults during filter-graph instantiation.
+        # A worker thread doesn't protect against a native segfault;
+        # the only safe fix is not to instantiate the bad filter at
+        # all. Validation happens at engine-start time, where a
+        # failure is easy to recover from (the user just gets a
+        # "couldn't open camera" message instead of a process kill).
+        try:
+            from ..camera.camera_utils import list_cameras_qt_only
+        except Exception:
+            self.finished_with_inventory.emit([])
+            return
+        try:
+            cams = list_cameras_qt_only()
+        except Exception:
+            cams = []
+        self.finished_with_inventory.emit(list(cams))
+
+
+class _CameraWarmupThread(QThread):
+    """One-shot startup camera warmup. Same shape as
+    _CameraInventoryThread but uses the full cv2 probe path
+    (list_available_cameras) instead of the Qt-only safe path.
+
+    Why a separate class: the warmup runs ONCE per app launch, in the
+    background, after _initial_camera_setup has already populated the
+    dropdown via the safer Qt-only path. The cv2 probe additionally
+    OPENS each camera briefly (cv2.VideoCapture(idx).read()) which
+    has two important side-effects:
+
+      1. It "warms" the device — by the time the user clicks
+         Tutorial / Start / Custom-Gestures, the OS has already
+         negotiated capture format with the camera, so the in-app
+         open completes in 100-300 ms instead of 1-3 s.
+      2. It produces a verified list — the dropdown shows only
+         cameras that actually work, not the Qt-registered list
+         which can include phantom entries (Snap Camera, Iriun,
+         OBS Virtual Cam left over from a previous session).
+
+    Crash risk (Canon EOS Webcam Utility cold-launch segfault) is
+    real but bounded: the warmup happens once, in the background,
+    after the UI is already up. A user who has the bad filter
+    installed will see Touchless crash during warmup — but the same
+    user crashes today via Settings → Search Devices. We're not
+    making the situation worse for them; we're making the common
+    case (no bad filter) much faster.
+    """
+
+    finished_with_inventory = Signal(object)   # list[CameraInfo]
+
+    def __init__(self, scan_limit: int, parent=None) -> None:
+        super().__init__(parent)
+        self._scan_limit = int(scan_limit)
+
+    def run(self) -> None:
         try:
             from ..camera.camera_utils import list_available_cameras
         except Exception:
@@ -3224,6 +3316,7 @@ class MainWindow(QMainWindow):
         self.mini_live_viewer: Optional[MiniLiveViewer] = None
         self.live_view_window: Optional[LiveViewWindow] = None
         self.tutorial_window: Optional[TutorialWindow] = None
+        self.custom_gesture_sandbox_window = None
         self.is_custom_maximized = False
         self._restore_geometry = None
         self._discovered_cameras: list[CameraInfo] = []
@@ -3507,6 +3600,36 @@ class MainWindow(QMainWindow):
         self.action_history_expand_button.toggled.connect(self._on_action_history_expand_toggled)
         history_header_row.addWidget(self.action_history_expand_button)
         info_layout.addLayout(history_header_row)
+
+        # Search/filter input. Filters the displayed list by case-
+        # insensitive substring on the action label or display text.
+        # Empty input shows everything. The cached event list lives
+        # on _last_action_history_events so a filter change re-runs
+        # the rendering without waiting for a fresh worker emit.
+        self._action_history_search = QLineEdit()
+        self._action_history_search.setPlaceholderText("Filter actions…")
+        self._action_history_search.setClearButtonEnabled(True)
+        self._action_history_search.setObjectName("actionHistorySearch")
+        self._action_history_search.setStyleSheet(
+            "QLineEdit#actionHistorySearch {"
+            "  background: rgba(127,127,127,0.10);"
+            f"  color: {self.config.text_color};"
+            "  border: 1px solid rgba(127,127,127,0.22);"
+            "  border-radius: 6px;"
+            "  padding: 4px 8px;"
+            "  font-size: 12px;"
+            "  margin-bottom: 4px;"
+            "}"
+            "QLineEdit#actionHistorySearch:focus {"
+            f"  border: 1px solid {self.config.accent_color};"
+            "}"
+        )
+        self._action_history_search.textChanged.connect(self._on_action_history_filter_changed)
+        info_layout.addWidget(self._action_history_search)
+        # Cached events from the last worker emit, so a filter change
+        # can re-render without waiting for the next event.
+        self._last_action_history_events: list = []
+
         self.action_history_list = QListWidget()
         self.action_history_list.setObjectName("actionHistoryList")
         self.action_history_list.setMaximumHeight(140)
@@ -4277,6 +4400,15 @@ class MainWindow(QMainWindow):
         self._custom_gestures_panel.open_edit_requested.connect(
             self._open_custom_gesture_editor
         )
+        self._custom_gestures_panel.import_requested.connect(
+            self._import_custom_gesture_bundle
+        )
+        self._custom_gestures_panel.export_all_requested.connect(
+            self._export_all_custom_gestures
+        )
+        self._custom_gestures_panel.export_one_requested.connect(
+            self._export_one_custom_gesture
+        )
         layout.addWidget(self._custom_gestures_panel)
         return panel
 
@@ -4805,10 +4937,101 @@ class MainWindow(QMainWindow):
             btn.style().polish(btn)
         if self._gesture_binds_pill is not None:
             self._position_gesture_binds_pill()
+            # Reset opacity to fully visible BEFORE showing — a
+            # previous fade may have left the effect at 0% so just
+            # calling setVisible(True) would show a transparent pill.
+            self._set_gesture_binds_pill_opacity(1.0)
             self._gesture_binds_pill.setVisible(True)
             self._gesture_binds_pill.raise_()
+            # Auto-fade the rebind pill after 3 s so it stops
+            # covering the conflict warning underneath. The pending-
+            # rebind STATE stays active — only the visible hint
+            # fades, so the user can still pick a pose. Re-clicking
+            # an active button restarts the cycle (resets opacity to
+            # 1.0, restarts the timer).
+            timer = getattr(self, "_gesture_binds_pill_hide_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._auto_hide_gesture_binds_rebind_pill)
+                self._gesture_binds_pill_hide_timer = timer
+            timer.start(3000)
         # Make sure the panel can receive Esc key presses.
         self.setFocus()
+
+    def _ensure_gesture_binds_pill_fade(self) -> tuple:
+        """Lazy-create the opacity effect + property animation that
+        fade the rebind pill out. Returns (effect, anim). Both are
+        cached on self after first creation. The opacity effect is
+        installed on the pill so it can fade without affecting any
+        other widget; the animation drives `effect.opacity`."""
+        pill = getattr(self, "_gesture_binds_pill", None)
+        effect = getattr(self, "_gesture_binds_pill_fade_effect", None)
+        anim = getattr(self, "_gesture_binds_pill_fade_anim", None)
+        if pill is None:
+            return None, None
+        if effect is None:
+            effect = QGraphicsOpacityEffect(pill)
+            effect.setOpacity(1.0)
+            pill.setGraphicsEffect(effect)
+            self._gesture_binds_pill_fade_effect = effect
+        if anim is None:
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(900)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(QEasingCurve.InOutQuad)
+            anim.finished.connect(self._on_gesture_binds_pill_fade_done)
+            self._gesture_binds_pill_fade_anim = anim
+        return effect, anim
+
+    def _set_gesture_binds_pill_opacity(self, value: float) -> None:
+        """Force opacity to a fixed value (used to reset to 1.0 on
+        re-show before any fade has run, or to snap to 0 on cancel)."""
+        effect, anim = self._ensure_gesture_binds_pill_fade()
+        if anim is not None and anim.state() == QPropertyAnimation.Running:
+            anim.stop()
+        if effect is not None:
+            effect.setOpacity(float(value))
+
+    def _auto_hide_gesture_binds_rebind_pill(self) -> None:
+        """Fade the rebind hint pill out instead of snapping it to
+        hidden. Pending-rebind state stays alive so the user can
+        still finish the bind by clicking a pose. No-op if the pill
+        isn't currently visible (user pressed Esc, already picked a
+        pose, or a previous fade already finished)."""
+        pill = getattr(self, "_gesture_binds_pill", None)
+        if pill is None or not pill.isVisible():
+            return
+        effect, anim = self._ensure_gesture_binds_pill_fade()
+        if effect is None or anim is None:
+            # Effect couldn't be installed (very old Qt or weird
+            # platform) — fall back to snap-hide so the conflict
+            # warning still becomes readable on schedule.
+            pill.setVisible(False)
+            self._position_gesture_binds_pill()
+            return
+        # Stop any in-flight fade and restart from current opacity
+        # toward 0 — a flicker-free re-fade if the timer somehow
+        # fires twice in quick succession.
+        if anim.state() == QPropertyAnimation.Running:
+            anim.stop()
+        anim.setStartValue(float(effect.opacity()))
+        anim.setEndValue(0.0)
+        anim.start()
+
+    def _on_gesture_binds_pill_fade_done(self) -> None:
+        """Hide the pill widget once the fade animation lands at 0
+        opacity. Hiding (vs leaving it at 0% opacity) lets the
+        layout's `isVisible()` checks treat the pill as gone, which
+        matters for _position_gesture_binds_pill's stacking math."""
+        pill = getattr(self, "_gesture_binds_pill", None)
+        effect = getattr(self, "_gesture_binds_pill_fade_effect", None)
+        if pill is None or effect is None:
+            return
+        if effect.opacity() <= 0.001:
+            pill.setVisible(False)
+            self._position_gesture_binds_pill()
 
     def _position_gesture_binds_pill(self) -> None:
         """Anchor the floating Gesture Binds pills (rebind hint +
@@ -4816,9 +5039,20 @@ class MainWindow(QMainWindow):
         Called on show + on panel resize so they stay put as the user
         resizes the window or scrolls the panel content. Layout:
 
-            [warning pill (when visible)]
-            [rebind pill (when visible)]
+            [rebind pill (when visible) — auto-hides after 3 s]
+            [warning pill (when visible) — sticky while conflict exists]
             ~16 px from panel bottom
+
+        Stacking change (was: warning above, rebind below): the
+        rebind pill is the transient "what to do right now" cue
+        and the warning is the persistent "you have a conflict"
+        cue. The user reported them overlapping during the exact
+        flow that needs both — clicking an active button on a
+        gesture that already has a duplicate. Putting the rebind
+        ON TOP plus letting it auto-hide (see _on_gesture_bind_active_clicked)
+        means the user sees the active instruction immediately,
+        and once it fades the warning underneath is fully readable
+        again.
         """
         rebind = getattr(self, "_gesture_binds_pill", None)
         warning = getattr(self, "_gesture_binds_pill_warning", None)
@@ -4831,30 +5065,32 @@ class MainWindow(QMainWindow):
             return
         target_w = min(560, max(320, int(parent.width() * 0.7)))
 
-        # Re-flow the rebind pill (height depends on wrap at target_w).
-        rebind_h = 0
+        # Re-flow each pill so its height matches its wrapped content.
         if rebind is not None:
             rebind.setFixedWidth(target_w)
             rebind.adjustSize()
-            rebind_h = rebind.sizeHint().height() if rebind.isVisible() else 0
-        warning_h = 0
         if warning is not None:
             warning.setFixedWidth(target_w)
             warning.adjustSize()
-            warning_h = warning.sizeHint().height() if warning.isVisible() else 0
 
         x = max(0, (parent.width() - target_w) // 2)
         bottom = parent.height() - 16
-        # Stack from the bottom upward: rebind pill closest to bottom,
-        # warning pill above it.
-        if rebind is not None:
-            y_rebind = max(0, bottom - rebind.sizeHint().height())
-            rebind.setGeometry(x, y_rebind, target_w, rebind.sizeHint().height())
+        # Bottom-up stack: warning closest to the bottom (sticky),
+        # rebind floats above (transient).
         if warning is not None:
-            # Lift above the rebind pill if both are visible.
-            offset = (rebind.sizeHint().height() + 8) if (rebind is not None and rebind.isVisible()) else 0
-            y_warn = max(0, bottom - warning.sizeHint().height() - offset)
+            y_warn = max(0, bottom - warning.sizeHint().height())
             warning.setGeometry(x, y_warn, target_w, warning.sizeHint().height())
+        if rebind is not None:
+            offset = (warning.sizeHint().height() + 8) if (warning is not None and warning.isVisible()) else 0
+            y_rebind = max(0, bottom - rebind.sizeHint().height() - offset)
+            rebind.setGeometry(x, y_rebind, target_w, rebind.sizeHint().height())
+            # The rebind pill is the user-facing "click here next"
+            # cue and must paint on top of the warning when both
+            # land near the same Y. raise_() reorders the sibling
+            # widget, which guarantees Z-order even after Qt does
+            # any internal restacking on resize.
+            if rebind.isVisible():
+                rebind.raise_()
 
     def _clear_gesture_bind_pending(self) -> None:
         action_id = self._gesture_binds_pending_action
@@ -4867,6 +5103,22 @@ class MainWindow(QMainWindow):
                 btn.style().polish(btn)
         if self._gesture_binds_pill is not None:
             self._gesture_binds_pill.setVisible(False)
+        # Also stop the auto-hide timer so a still-running 3 s
+        # countdown from a previous active-click doesn't fire after
+        # the user has already moved on (re-bound or cancelled).
+        timer = getattr(self, "_gesture_binds_pill_hide_timer", None)
+        if timer is not None:
+            timer.stop()
+        # Stop any in-flight fade and reset opacity so the next
+        # show_pending starts fully visible. Without this, a user
+        # who clicks an active button mid-fade then cancels would
+        # see the next show start partially transparent.
+        anim = getattr(self, "_gesture_binds_pill_fade_anim", None)
+        if anim is not None and anim.state() == QPropertyAnimation.Running:
+            anim.stop()
+        effect = getattr(self, "_gesture_binds_pill_fade_effect", None)
+        if effect is not None:
+            effect.setOpacity(1.0)
 
     def _on_gesture_pose_clicked(self, item) -> None:
         if not self._gesture_binds_pending_action:
@@ -5116,13 +5368,208 @@ class MainWindow(QMainWindow):
         # As with the recorder, pass the worker if alive — sandbox falls
         # back to its own camera otherwise.
         worker = getattr(self, "_worker", None)
+        if (
+            self.custom_gesture_sandbox_window is not None
+            and self.custom_gesture_sandbox_window.isVisible()
+        ):
+            try:
+                self.custom_gesture_sandbox_window.raise_()
+                self.custom_gesture_sandbox_window.activateWindow()
+            except Exception:
+                pass
+            return
         sandbox = SandboxWindow(
             worker=worker,
             accent_color=accent,
             parent=self,
             config=self.config,
         )
+        sandbox.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.custom_gesture_sandbox_window = sandbox
+        if (
+            worker is not None
+            and bool(getattr(worker, "is_running", False))
+            and hasattr(worker, "set_pipeline_frozen")
+        ):
+            try:
+                worker.set_pipeline_frozen(True)
+            except Exception:
+                pass
+
+        def _on_sandbox_finished(*_args) -> None:
+            if self.custom_gesture_sandbox_window is sandbox:
+                self.custom_gesture_sandbox_window = None
+            if worker is not None and hasattr(worker, "set_pipeline_frozen"):
+                try:
+                    worker.set_pipeline_frozen(False)
+                except Exception:
+                    pass
+
+        try:
+            sandbox.finished.connect(_on_sandbox_finished)
+        except Exception:
+            pass
         sandbox.show()
+
+    # ---- Gesture bundle import / export ---------------------------------
+    def _drawings_dir_for_export(self) -> Optional[Path]:
+        """Resolve the user's drawings save directory as a Path for
+        the .tlg export/import code to use when bundling/extracting
+        `show_overlay_drawing` action PNGs. Returns None when the
+        config value is empty or unreadable, in which case the
+        bundle code skips drawing handling (gestures still
+        export/import; the drawing just won't travel with them)."""
+        raw = str(getattr(self.config, "drawings_save_dir", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            return Path(raw).expanduser()
+        except Exception:
+            return None
+
+    def _export_one_custom_gesture(self, name: str) -> None:
+        """Export a single gesture as a .tlg bundle. Default filename
+        follows the gesture's display name so the file is recognisable
+        when shared. Quietly cancels on Save-dialog dismiss."""
+        from PySide6.QtWidgets import QFileDialog
+        from hgr.custom_gestures.registry import GestureRegistry
+        from hgr.custom_gestures.sharing import BundleError, export_bundle
+
+        registry = GestureRegistry()
+        registry.load()
+        if registry.get(name) is None:
+            QMessageBox.warning(self, "Gesture not found", f"No saved gesture named {name!r}.")
+            return
+        safe_name = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in name).strip() or "gesture"
+        default = str(Path.home() / f"{safe_name}.tlg")
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Export gesture", default, "Touchless Gesture Pack (*.tlg);;All files (*)"
+        )
+        if not target:
+            return
+        if not target.lower().endswith(".tlg"):
+            target = target + ".tlg"
+        try:
+            count = export_bundle(
+                registry,
+                [name],
+                Path(target),
+                drawings_dir=self._drawings_dir_for_export(),
+            )
+        except BundleError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.last_action_label.setText(
+            f"Last action: exported {count} gesture to {Path(target).name}"
+        )
+
+    def _export_all_custom_gestures(self) -> None:
+        """Bundle every gesture into one .tlg. Useful as a backup or
+        for sharing a curated set in one go."""
+        from PySide6.QtWidgets import QFileDialog
+        from hgr.custom_gestures.registry import GestureRegistry
+        from hgr.custom_gestures.sharing import BundleError, export_bundle
+
+        registry = GestureRegistry()
+        registry.load()
+        names = [g.name for g in registry.list()]
+        if not names:
+            QMessageBox.information(self, "Nothing to export", "You don't have any custom gestures yet.")
+            return
+        default = str(Path.home() / f"touchless_gestures_{len(names)}.tlg")
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Export all gestures", default, "Touchless Gesture Pack (*.tlg);;All files (*)"
+        )
+        if not target:
+            return
+        if not target.lower().endswith(".tlg"):
+            target = target + ".tlg"
+        try:
+            count = export_bundle(
+                registry,
+                names,
+                Path(target),
+                drawings_dir=self._drawings_dir_for_export(),
+            )
+        except BundleError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.last_action_label.setText(
+            f"Last action: exported {count} gestures to {Path(target).name}"
+        )
+
+    def _import_custom_gesture_bundle(self) -> None:
+        """Load a .tlg, ask the user how to handle conflicts (overwrite
+        all / skip all), merge into the registry, and refresh the UI.
+        On import success the live runner reloads automatically via
+        the panel's existing refresh_cards() worker-ping."""
+        from PySide6.QtWidgets import QFileDialog
+        from hgr.custom_gestures.registry import GestureRegistry
+        from hgr.custom_gestures.sharing import (
+            BundleError,
+            RESOLVE_OVERWRITE,
+            RESOLVE_SKIP,
+            gestures_in_bundle,
+            import_bundle,
+        )
+
+        source, _ = QFileDialog.getOpenFileName(
+            self, "Import gesture pack", str(Path.home()),
+            "Touchless Gesture Pack (*.tlg);;All files (*)"
+        )
+        if not source:
+            return
+
+        peeked = gestures_in_bundle(Path(source))
+        if not peeked:
+            QMessageBox.warning(
+                self, "Import failed",
+                "This file isn't a Touchless gesture pack, or it's empty."
+            )
+            return
+
+        registry = GestureRegistry()
+        registry.load()
+        existing_names = {g.name for g in registry.list()}
+        conflicts = [g.name for g in peeked if g.name in existing_names]
+
+        decision = RESOLVE_SKIP
+        if conflicts:
+            preview = "\n".join(f"  • {n}" for n in conflicts[:6])
+            if len(conflicts) > 6:
+                preview += f"\n  • …and {len(conflicts) - 6} more"
+            answer = QMessageBox.question(
+                self, "Conflicting gestures",
+                f"{len(conflicts)} gesture(s) in this pack already exist:\n\n"
+                f"{preview}\n\n"
+                "Overwrite the existing ones with the imported versions?\n\n"
+                "Yes = overwrite all conflicts\nNo = skip conflicts (keep your existing ones)",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.No,
+            )
+            if answer == QMessageBox.Cancel:
+                return
+            decision = RESOLVE_OVERWRITE if answer == QMessageBox.Yes else RESOLVE_SKIP
+
+        try:
+            imported, skipped = import_bundle(
+                registry,
+                Path(source),
+                on_conflict=lambda _g: decision,
+                drawings_dir=self._drawings_dir_for_export(),
+            )
+        except BundleError as exc:
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
+
+        self.last_action_label.setText(
+            f"Last action: imported {imported} gesture(s)"
+            + (f", skipped {skipped} conflict(s)" if skipped else "")
+        )
+        try:
+            self._custom_gestures_panel.refresh_cards()
+        except Exception:
+            pass
 
     def _open_custom_gesture_editor(self, name: str) -> None:
         """Edit metadata + action of an already-recorded gesture without
@@ -5154,6 +5601,8 @@ class MainWindow(QMainWindow):
             initial_value = str(payload.get("url", ""))
         elif action_kind == "run_command":
             initial_value = str(payload.get("command", ""))
+        elif action_kind == "open_file":
+            initial_value = str(payload.get("path", ""))
         elif action_kind == "show_overlay_drawing":
             initial_value = str(payload.get("filename", ""))
         else:
@@ -5841,21 +6290,55 @@ class MainWindow(QMainWindow):
     def _auto_select_camera_index() -> "int | None":
         """Walk the first 8 indices and return the first one that opens
         cleanly. Used when the user clicks Preview without an explicit
-        camera selection in the dropdown (Auto-Select mode)."""
+        camera selection in the dropdown (Auto-Select mode).
+
+        Prefers Media Foundation over DirectShow — same reasoning as
+        `_backend_candidates()` in camera_utils. Hard-coding DSHOW
+        here would have left this path crashing on systems with a
+        buggy DirectShow filter (Canon EOS Webcam Utility cold-start
+        is the documented case) even after the rest of the codebase
+        was made safe.
+        """
+        # Per-index EOS protection only — non-EOS indices keep the
+        # original DSHOW-first ordering, which is what most webcams
+        # negotiate frames fastest on. Opening cv2.VideoCapture(0,
+        # CAP_DSHOW) only instantiates index 0's filter graph (not
+        # EOS's filter at some other index), so a non-EOS index is
+        # safe even on machines that have EOS Webcam Utility
+        # installed. EOS indices skip DSHOW entirely to avoid the
+        # filter graph segfault.
+        msmf = getattr(cv2, "CAP_MSMF", None)
+        dshow = getattr(cv2, "CAP_DSHOW", None)
+        any_backend = getattr(cv2, "CAP_ANY", 0)
+        try:
+            from ..camera.camera_utils import _is_eos_camera_at_index
+        except Exception:
+            _is_eos_camera_at_index = lambda _idx: False  # noqa: E731
         try:
             for idx in range(8):
-                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if hasattr(cv2, "CAP_DSHOW") else cv2.VideoCapture(idx)
-                try:
-                    if cap is None or not cap.isOpened():
-                        continue
-                    ok, _frame = cap.read()
-                    if ok:
-                        return idx
-                finally:
+                if _is_eos_camera_at_index(idx):
+                    backends: list[int] = [msmf] if msmf is not None else []
+                else:
+                    backends = []
+                    if dshow is not None:
+                        backends.append(dshow)
+                    if msmf is not None:
+                        backends.append(msmf)
+                    if not backends:
+                        backends.append(any_backend)
+                for backend in backends:
+                    cap = cv2.VideoCapture(idx, backend)
                     try:
-                        cap.release()
-                    except Exception:
-                        pass
+                        if cap is None or not cap.isOpened():
+                            continue
+                        ok, _frame = cap.read()
+                        if ok:
+                            return idx
+                    finally:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
         except Exception:
             return None
         return None
@@ -7431,58 +7914,65 @@ Admin elevation
         return date_str
 
     def _download_release_entry(self, entry) -> None:
-        """Click handler for the Download Update button. Routes through
-        the existing ReleaseInfo / Updater pipeline so the rest of the
-        flow (download progress, apply-update bat, restart) is shared
-        with the auto-prompt path."""
+        """Click handler for the Download Update button next to a
+        release entry in the Updates tab.
+
+        Delegates to the same ReleaseChecker → _on_update_available
+        flow the "Check for Updates" button uses. This guarantees
+        the popup the user sees, the asset selection (zip vs exe vs
+        external host), the dismissed-version handling, and every
+        downstream step (download / apply-update bat / restart) are
+        identical to the auto-prompt path. It also fixes the
+        previous bug where this method tried to hand-construct a
+        ReleaseInfo from a ReleaseHistoryEntry — that entry has no
+        asset URLs (the changelog API doesn't return them), so the
+        constructor would either fail with stale-kwargs noise or
+        produce a ReleaseInfo with download_url="" that the Updater
+        couldn't actually fetch.
+
+        The button is only shown for the latest entry that is newer
+        than the running version (see _build_release_entry_widget),
+        so re-fetching /latest from GitHub returns exactly the
+        release the user wanted to download anyway. We keep `entry`
+        as the parameter only so the lambda site can stay readable
+        — its fields aren't used here.
+        """
         try:
-            from ..updater.release_checker import ReleaseInfo, _parse_version_tuple
-            from ..updater.update_dialog import UpdateDialog
-            from ..updater import Updater
+            from ..updater.release_checker import ReleaseChecker
         except Exception as exc:
             TouchlessNotice.show_warn(
                 self, "Download failed",
-                f"Could not start the download: {type(exc).__name__}: {exc}",
+                f"Couldn't start the update check: "
+                f"{type(exc).__name__}: {exc}",
             )
             return
-        # Build a minimal ReleaseInfo from the changelog entry. The
-        # update kind / asset selection is handled inside Updater
-        # using the same logic the auto-check path uses.
+        # Mirror the manual-check flag the "Check for Updates" button
+        # sets, so _on_update_available bypasses the dismissed-
+        # version short-circuit. Without this, a user who clicked
+        # Later on the auto popup would also have their explicit
+        # Download Update click silently ignored.
+        self._in_manual_update_check = True
+        # Show transient feedback on the Updates panel status line so
+        # the user gets confirmation the click registered (network
+        # round-trip can take a second or two on slow links).
         try:
-            info = ReleaseInfo(
-                version=entry.version,
-                body=entry.body or "",
-                html_url=entry.html_url or "",
-                published_at=entry.published_at or "",
-                kind="auto",
-                asset_url="",
+            self._updates_status_label.setText(
+                f"Fetching Touchless {entry.version} from GitHub…"
             )
         except Exception:
-            # Older ReleaseInfo signatures don't accept all fields;
-            # fall back to a positional construction.
-            try:
-                info = ReleaseInfo(entry.version, entry.body or "", entry.html_url or "")
-            except Exception as exc:
-                TouchlessNotice.show_warn(
-                    self, "Download failed",
-                    f"Could not build release info: {exc}",
-                )
-                return
-        self._update_dialog = UpdateDialog(info, parent=self)
-        self._updater = Updater(parent=self)
-        self._update_dialog.download_requested.connect(self._updater.start_download)
-        self._updater.progress.connect(
-            lambda pct, msg: self._update_dialog.set_progress(pct, msg)
-            if self._update_dialog is not None else None
-        )
-        self._updater.failed.connect(
-            lambda reason: self._update_dialog.set_failure(reason)
-            if self._update_dialog is not None else None
-        )
-        self._updater.ready_to_launch.connect(self._on_installer_ready)
-        self._update_dialog.show()
-        self._update_dialog.raise_()
-        self._update_dialog.activateWindow()
+            pass
+        checker = ReleaseChecker(parent=self)
+        checker.update_available.connect(self._on_update_available)
+        checker.update_available.connect(self._on_manual_update_found)
+        checker.no_update.connect(self._on_manual_no_update)
+        checker.check_failed.connect(self._on_manual_check_failed)
+        checker.update_available.connect(lambda *_: setattr(self, "_in_manual_update_check", False))
+        checker.no_update.connect(lambda *_: setattr(self, "_in_manual_update_check", False))
+        checker.check_failed.connect(lambda *_: setattr(self, "_in_manual_update_check", False))
+        checker.start()
+        # Keep a reference so the QObject isn't GC'd mid-fetch. Same
+        # pattern the "Check for Updates" button uses.
+        self._update_checker = checker
 
     def _build_release_entry_widget(self, entry, is_latest: bool = False) -> QWidget:
         # Inline import to avoid pushing more names into the
@@ -8196,14 +8686,72 @@ Admin elevation
         self._show_mini_live_viewer()
 
     def _initial_camera_setup(self) -> None:
-        # Just populate the inventory silently on startup. Previously we
-        # popped a modal chooser when 2+ cameras were detected and no
-        # preference was saved, but that interrupts the launch any time the
-        # user has a virtual webcam installed (Iriun, OBS Virtual Camera,
-        # DroidCam, etc.). Users can pick a specific camera anytime from
-        # Settings -> Camera; the engine falls back to the first available
-        # camera when no preference is saved, which is the expected default.
-        self.refresh_camera_inventory(update_status=True, notify=False)
+        # Populate the camera inventory at startup using Qt's
+        # QMediaDevices ONLY — no cv2.VideoCapture probe. The cv2 probe
+        # path instantiates a full DirectShow filter graph for each
+        # registered camera, and at least one third-party filter
+        # (Canon EOS Webcam Utility on cold launch) is known to
+        # segfault inside that graph instantiation, killing the whole
+        # Touchless process before the UI is even visible. Qt's path
+        # just lists registered devices without touching their capture
+        # pipelines, so a buggy filter doesn't take the app down.
+        #
+        # The full cv2-probing path is still available to the user via
+        # the "Search Devices" button in Settings → Camera (the
+        # explicit deep-refresh action), where a crash there at least
+        # only happens after the user took a deliberate action with a
+        # visible UI — easy to recover from by not clicking it again.
+        try:
+            self._discovered_cameras = list_cameras_qt_only()
+        except Exception:
+            self._discovered_cameras = []
+        self._rebuild_camera_combo()
+        self._refresh_camera_labels()
+        # After the safe Qt-only populate above, kick off a one-shot
+        # background cv2 warmup. This serves both the dropdown
+        # ("user opens Settings → Camera and the dropdown is empty
+        # until they click Preview" — reported in the field) and
+        # the perceived first-open latency in tutorial / Start /
+        # Custom-Gestures. The warmup briefly opens each camera,
+        # which gives the OS enough state to make subsequent opens
+        # complete in ~100-300 ms instead of the 1-3 s of cold-open
+        # negotiation. Done OFF the GUI thread so startup paints
+        # immediately; the dropdown gets repopulated when the
+        # warmup signal lands. See _CameraWarmupThread for the
+        # Canon-EOS crash-risk discussion.
+        self._kick_off_startup_camera_warmup()
+
+    def _kick_off_startup_camera_warmup(self) -> None:
+        """Fire the one-shot background cv2 probe + warmup. Idempotent
+        — re-calls while a previous warmup is still running are
+        no-ops. We never expose this to a user-clickable button: it's
+        purely a side-effect of app launch."""
+        existing = getattr(self, "_camera_warmup_thread", None)
+        if existing is not None and existing.isRunning():
+            return
+        scan_limit = int(getattr(self.config, "camera_scan_limit", 8))
+        thread = _CameraWarmupThread(scan_limit, parent=self)
+        thread.finished_with_inventory.connect(self._on_startup_camera_warmup_done)
+        thread.finished.connect(thread.deleteLater)
+        self._camera_warmup_thread = thread
+        thread.start()
+
+    def _on_startup_camera_warmup_done(self, cameras_obj: object) -> None:
+        try:
+            cameras = list(cameras_obj or [])
+        except TypeError:
+            cameras = []
+        # Only adopt the warmup result if it found MORE cameras than
+        # we already had (or the same set). If for some reason the
+        # cv2 probe found FEWER cameras than the Qt path knew about
+        # (very unlikely — would mean a Qt-registered device that
+        # doesn't actually open), keep the Qt list so the user
+        # doesn't lose options.
+        if cameras and len(cameras) >= len(self._discovered_cameras):
+            self._discovered_cameras = cameras
+            self._rebuild_camera_combo()
+            self._refresh_camera_labels()
+        self._camera_warmup_thread = None
 
     def refresh_camera_inventory(self, update_status: bool = True, notify: bool = False) -> list[CameraInfo]:
         access_ok, access_message = request_camera_access_main_thread(self.config.camera_scan_limit)
@@ -8837,6 +9385,20 @@ Admin elevation
                     )
                 except Exception:
                     pass
+            if hasattr(self._worker, "drawing_overlay_grab_transform"):
+                try:
+                    self._worker.drawing_overlay_grab_transform.connect(
+                        self._on_drawing_overlay_grab_transform
+                    )
+                except Exception:
+                    pass
+            if hasattr(self._worker, "drawing_overlay_grab_active"):
+                try:
+                    self._worker.drawing_overlay_grab_active.connect(
+                        self._on_drawing_overlay_grab_active
+                    )
+                except Exception:
+                    pass
             if self.live_view_window is not None:
                 self.live_view_window.attach_to_worker(self._worker)
             if self.mini_live_viewer is not None:
@@ -9076,9 +9638,26 @@ Admin elevation
         )
         if already_showing_same:
             overlay.hide()
+            # Reset the engine's accumulated pinch transform so the
+            # next drawing shown starts at its natural fit instead
+            # of inheriting the offsets the user dragged this one to.
+            worker = getattr(self, "_worker", None)
+            if worker is not None and hasattr(worker, "reset_pinch_grab_state"):
+                try:
+                    worker.reset_pinch_grab_state()
+                except Exception:
+                    pass
             self.last_action_label.setText(f"Last action: hid drawing overlay")
             return
 
+        # Showing a new (or different) drawing — clear any leftover
+        # pinch-grab transform from a previous overlay session.
+        worker = getattr(self, "_worker", None)
+        if worker is not None and hasattr(worker, "reset_pinch_grab_state"):
+            try:
+                worker.reset_pinch_grab_state()
+            except Exception:
+                pass
         if overlay.show_image(str(resolved)):
             self.last_action_label.setText(
                 f"Last action: showed drawing overlay ({resolved.name})"
@@ -9087,6 +9666,50 @@ Admin elevation
             self.last_action_label.setText(
                 f"Last action: failed to load drawing: {resolved.name}"
             )
+
+    def _on_drawing_overlay_grab_transform(self, dx: float, dy: float, scale: float) -> None:
+        """Forward the worker's pinch-grab transform to whichever
+        target makes sense right now:
+          - the saved-drawing overlay window if it's currently
+            showing a drawing as a click-through overlay,
+          - the live drawing canvas if the user is in drawing mode.
+        Both can in principle be visible simultaneously; in that
+        case both get the same transform so the user can pinch in
+        either context and see consistent feedback."""
+        forwarded = False
+        overlay = getattr(self, "_drawing_overlay_window", None)
+        if overlay is not None and overlay.isVisible():
+            try:
+                overlay.set_grab_transform(dx, dy, scale)
+                forwarded = True
+            except Exception:
+                pass
+        draw_overlay = getattr(self, "draw_overlay", None)
+        if draw_overlay is not None and draw_overlay.isVisible():
+            try:
+                draw_overlay.set_grab_transform(dx, dy, scale)
+                forwarded = True
+            except Exception:
+                pass
+        # No targets visible → silently drop. Pinch outside any
+        # drawing context is a no-op by design.
+        del forwarded
+
+    def _on_drawing_overlay_grab_active(self, active: bool) -> None:
+        """Edge-triggered handler for the worker's active flag. On
+        release (active=False), bake any live translation on the
+        live drawing canvas into its pixel buffer so subsequent
+        strokes / saves reflect the new position. The saved-drawing
+        overlay keeps its live transform (no bake needed — its
+        QPixmap is the source of truth and re-renders cleanly)."""
+        if active:
+            return
+        draw_overlay = getattr(self, "draw_overlay", None)
+        if draw_overlay is not None and draw_overlay.isVisible():
+            try:
+                draw_overlay.apply_grab_to_canvas()
+            except Exception:
+                pass
 
     def _publish_phone_event_for_action(self, action_text: str) -> None:
         if not action_text or action_text == "none":
@@ -9254,6 +9877,36 @@ Admin elevation
             event_list = list(events or [])
         except TypeError:
             event_list = []
+        # Stash so the filter input can re-render without waiting
+        # for the next worker emit.
+        self._last_action_history_events = event_list
+        self._render_action_history(event_list)
+
+    def _on_action_history_filter_changed(self, _text: str) -> None:
+        """Re-render the cached event list with the new filter applied.
+        Cheap — at most 12 events × a few labels each."""
+        if not hasattr(self, "action_history_list"):
+            return
+        self._render_action_history(self._last_action_history_events)
+
+    def _render_action_history(self, event_list: list) -> None:
+        """Filter + collapse + paint the recent-actions list. Filter
+        is a case-insensitive substring match on label OR display
+        text; empty filter shows everything."""
+        query = ""
+        if hasattr(self, "_action_history_search"):
+            query = self._action_history_search.text().strip().lower()
+        if query:
+            filtered = []
+            for ev in event_list:
+                hay = (
+                    str(getattr(ev, "label", "") or "").lower()
+                    + " "
+                    + str(getattr(ev, "display_text", "") or "").lower()
+                )
+                if query in hay:
+                    filtered.append(ev)
+            event_list = filtered
         self.action_history_list.clear()
         # Track timestamp QLabels so the periodic refresh timer can
         # update only the relative-time text without rebuilding the

@@ -574,6 +574,17 @@ class GestureWorker(QObject):
         self._pinch_grace_seconds: float = 0.4
         self._pinch_last_seen_primary: float = 0.0
         self._pinch_last_seen_secondary: float = 0.0
+        # Pre-activation hold: a slot has to be in pinch pose for
+        # this many seconds CONTINUOUSLY (within grace tolerance)
+        # before grab mode actually engages. Stops the drawing
+        # from jumping the moment a transient frame stabilises to
+        # 'pinch' — the user reported feeling like the grab kicked
+        # in 'before I'm actually in pinch'. _pinch_streak_start_*
+        # records when the current pinch streak began (0.0 when no
+        # streak is in progress).
+        self._pinch_activation_delay: float = 0.7
+        self._pinch_streak_start_primary: float = 0.0
+        self._pinch_streak_start_secondary: float = 0.0
         # EMA-smoothed palm positions used for grab math. Raw
         # palm.center coords jitter several pixels per frame on
         # foreshortened poses; passing the raw values straight to
@@ -5020,6 +5031,8 @@ class GestureWorker(QObject):
         self._pinch_accum_scale = 1.0
         self._pinch_last_seen_primary = 0.0
         self._pinch_last_seen_secondary = 0.0
+        self._pinch_streak_start_primary = 0.0
+        self._pinch_streak_start_secondary = 0.0
         self._pinch_smoothed_primary = None
         self._pinch_smoothed_secondary = None
 
@@ -5122,22 +5135,49 @@ class GestureWorker(QObject):
         primary_palm = self._palm_xy(getattr(result, "hand_reading", None))
         secondary_palm = self._palm_xy(getattr(result, "secondary_hand_reading", None))
 
-        # Sticky-active grace: a recent pinch frame keeps the slot
-        # "active" for the next _pinch_grace_seconds even if the
-        # current frame's stable_label dropped away. The user
-        # rarely intends to release pinch in <0.4s, and the
-        # recogniser bumpiness on foreshortened poses makes
-        # honest single-frame drops cost a full anchor reset.
+        # Sticky-active grace + pre-activation streak tracking.
+        #
+        # last_seen: monotonic time of the most recent frame where
+        #   the recogniser actually labelled this slot 'pinch'.
+        # streak_start: when the CURRENT continuous pinch streak
+        #   began. Continuous = label seen within grace; an
+        #   uninterrupted >= grace_seconds gap clears the streak.
+        # The streak only counts as 'active' once it has lasted
+        # _pinch_activation_delay seconds — that's the pre-roll
+        # the user asked for so the drawing doesn't jump the
+        # instant a transient pinch label stabilises.
         if primary_pinch:
+            in_primary_grace = (now - self._pinch_last_seen_primary) < self._pinch_grace_seconds
+            if not in_primary_grace or self._pinch_streak_start_primary <= 0.0:
+                self._pinch_streak_start_primary = now
             self._pinch_last_seen_primary = now
+        elif (now - self._pinch_last_seen_primary) >= self._pinch_grace_seconds:
+            self._pinch_streak_start_primary = 0.0
+
         if secondary_pinch:
+            in_secondary_grace = (now - self._pinch_last_seen_secondary) < self._pinch_grace_seconds
+            if not in_secondary_grace or self._pinch_streak_start_secondary <= 0.0:
+                self._pinch_streak_start_secondary = now
             self._pinch_last_seen_secondary = now
-        primary_active = primary_pinch or (
-            now - self._pinch_last_seen_primary < self._pinch_grace_seconds
+        elif (now - self._pinch_last_seen_secondary) >= self._pinch_grace_seconds:
+            self._pinch_streak_start_secondary = 0.0
+
+        primary_in_grace = primary_pinch or (
+            (now - self._pinch_last_seen_primary) < self._pinch_grace_seconds
         )
-        secondary_active = secondary_pinch or (
-            now - self._pinch_last_seen_secondary < self._pinch_grace_seconds
+        secondary_in_grace = secondary_pinch or (
+            (now - self._pinch_last_seen_secondary) < self._pinch_grace_seconds
         )
+        primary_held_long_enough = (
+            self._pinch_streak_start_primary > 0.0
+            and (now - self._pinch_streak_start_primary) >= self._pinch_activation_delay
+        )
+        secondary_held_long_enough = (
+            self._pinch_streak_start_secondary > 0.0
+            and (now - self._pinch_streak_start_secondary) >= self._pinch_activation_delay
+        )
+        primary_active = primary_in_grace and primary_held_long_enough
+        secondary_active = secondary_in_grace and secondary_held_long_enough
 
         # Mode + slot decision. Two-hand stretch needs both slots
         # active; otherwise EITHER slot pinching alone is a
@@ -5157,21 +5197,20 @@ class GestureWorker(QObject):
             new_mode = "none"
             new_one_slot = None
 
-        # Apply EMA smoothing on the palm coords used for grab
-        # math. The raw values still drive the active/inactive
-        # decision above (so we react to genuine pose changes
-        # promptly); only the math used to compute the transform
-        # is damped. Smoother resets to None when grab is
-        # inactive so the next grab session starts from the
-        # current raw position, not a stale damped one.
-        if new_mode == "none":
-            self._pinch_smoothed_primary = None
-            self._pinch_smoothed_secondary = None
-            primary_palm_s = None
-            secondary_palm_s = None
-        else:
-            primary_palm_s = self._smooth_palm("primary", primary_palm)
-            secondary_palm_s = self._smooth_palm("secondary", secondary_palm)
+        # ALWAYS run the smoother when there's a raw reading,
+        # regardless of the mode we're transitioning to. The
+        # previous version nulled primary_palm_s / secondary_palm_s
+        # the moment new_mode == 'none' — but that ran BEFORE the
+        # lock-in below, so the release frame's smoothed palm was
+        # gone before the lock-in could read it. Result: the
+        # cumulative offset never absorbed the user's drag, and
+        # the next pinch session started from the OLD accum,
+        # snapping the drawing back to its pre-grab position.
+        # Now the smoother stays valid through the transition;
+        # the post-transition reset (further down) wipes it only
+        # AFTER lock-in has consumed the smoothed values.
+        primary_palm_s = self._smooth_palm("primary", primary_palm)
+        secondary_palm_s = self._smooth_palm("secondary", secondary_palm)
 
         def _palm_for_slot(slot: Optional[str]) -> Optional[tuple[float, float]]:
             if slot == "primary":
@@ -5299,6 +5338,17 @@ class GestureWorker(QObject):
                 self._pinch_accum_dy + live_dy,
                 self._pinch_accum_scale * scale_factor,
             )
+
+        # Deferred smoother reset. Now that mode-transition lock-in
+        # AND the live transform emit have BOTH consumed the
+        # smoothed palm values, we can safely null the smoother
+        # state if we ended the frame in 'none' mode. Doing this
+        # earlier (the previous version did) skipped the lock-in
+        # on the release frame and lost the user's drag — the
+        # next pinch then snapped back to the pre-drag offset.
+        if self._pinch_mode == "none":
+            self._pinch_smoothed_primary = None
+            self._pinch_smoothed_secondary = None
 
     def _emit_pinch_transform(self, dx: float, dy: float, scale: float) -> None:
         # Palm coords are in user-perspective normalised image space

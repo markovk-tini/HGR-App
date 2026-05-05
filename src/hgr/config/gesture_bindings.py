@@ -84,6 +84,18 @@ _GESTURE_BIND_POSES: list[tuple[str, str, str, str]] = [
         "ScreenWheel.png",
         "Face your right palm toward the monitor. Extend the index finger and pinky while folding the thumb, middle, and ring (a 'rock on' shape). Hold for ~1s.",
     ),
+    (
+        "right_pinch",
+        "Right Hand Pinch",
+        "",
+        "Face your right palm toward the monitor. Curl the middle, ring, and pinky into the palm. Curve the thumb and index toward each other in a C-shape (they don't have to touch). Used to grab and move drawings; combine with left-hand pinch to stretch.",
+    ),
+    (
+        "left_pinch",
+        "Left Hand Pinch",
+        "",
+        "Face your left palm toward the monitor. Curl the middle, ring, and pinky into the palm. Curve the thumb and index toward each other in a C-shape (they don't have to touch). Used to grab and move drawings; combine with right-hand pinch to stretch.",
+    ),
 ]
 
 
@@ -125,6 +137,8 @@ STATIC_POSE_LABEL_MAP: dict[str, tuple[str, str]] = {
     "right_fist": ("Right", "fist"),
     "mute":       ("Right", "mute"),
     "wheel_pose": ("Right", "wheel_pose"),
+    "right_pinch": ("Right", "pinch"),
+    "left_pinch":  ("Left",  "pinch"),
 }
 
 STATIC_LABEL_TO_POSE: dict[tuple[str, str], str] = {
