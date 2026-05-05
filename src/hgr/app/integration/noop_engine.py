@@ -286,6 +286,17 @@ _UNDO_LABEL_PAIRS = {
 }
 
 
+# Two-hand pinch stretch sensitivity gain. The raw scale factor is
+# (cur_palm_distance / anchor_palm_distance); we amplify the
+# delta-from-1.0 by this multiplier before applying it to the
+# overlay scale. With the velocity-adaptive palm smoother heavily
+# damping slow motion to kill jitter (alpha=0.10 below 1.5% screen
+# / frame), slow stretches felt sluggish without the gain. 1.6×
+# means a 10% palm-spread becomes ~16% canvas-stretch, which the
+# user reported as the right responsiveness in testing.
+_PINCH_SCALE_SENSITIVITY = 1.6
+
+
 class _EngineRunner:
     # Runs engine.process_frame on a background Python thread so the
     # heaviest CPU step in the gesture loop (12-25 ms with MediaPipe,
@@ -1447,9 +1458,19 @@ class GestureWorker(QObject):
             return False
         if finger.state in {"closed", "mostly_curled", "partially_curled"}:
             return True
+        # Loosened thresholds for the rotated-wrist case the user
+        # hit: when the hand tilts even slightly while holding
+        # 'one', MediaPipe's thumb landmark estimate drifts and
+        # `state` can flip to fully_open / openness can rise toward
+        # ~0.9 even though the thumb is still tucked against the
+        # palm. The recogniser already gates this path on stable_
+        # label == 'one', so trusting that label and being permissive
+        # on the geometry double-check is safer than dropping a
+        # stroke mid-line. Old thresholds (openness ≤ 0.80, curl ≥
+        # 0.22) were too strict; this widens to (≤ 0.92, ≥ 0.10).
         openness = float(getattr(finger, "openness", 0.0) or 0.0)
         curl = float(getattr(finger, "curl", 0.0) or 0.0)
-        return openness <= 0.80 or curl >= 0.22
+        return openness <= 0.92 or curl >= 0.10
 
     def _drawing_draw_pose_active(self, prediction, hand_reading) -> bool:
         if hand_reading is None or prediction is None:
@@ -5146,7 +5167,19 @@ class GestureWorker(QObject):
                 self._pinch_accum_dx += cur_mid[0] - self._pinch_two_anchor_mid[0]
                 self._pinch_accum_dy += cur_mid[1] - self._pinch_two_anchor_mid[1]
                 if self._pinch_two_anchor_dist > 1e-4:
-                    self._pinch_accum_scale *= cur_dist / self._pinch_two_anchor_dist
+                    raw_ratio = cur_dist / self._pinch_two_anchor_dist
+                    # Sensitivity gain: amplify scale changes around
+                    # 1.0 so a small palm-distance change produces
+                    # a more decisive stretch / squish. The
+                    # palm-position smoother heavily damps slow
+                    # motion (alpha 0.10 below 1.5% screen / frame)
+                    # to kill jitter — that damping was making slow
+                    # stretches feel sluggish. Amplifying the scale
+                    # delta here recovers responsiveness without
+                    # weakening the smoother. Linear amplification
+                    # is symmetric: same gain applied to expand
+                    # (>1) and squish (<1).
+                    self._pinch_accum_scale *= 1.0 + _PINCH_SCALE_SENSITIVITY * (raw_ratio - 1.0)
             # Capture incoming-mode anchors.
             incoming_palm = _palm_for_slot(new_one_slot)
             if new_mode == "one" and incoming_palm is not None:
@@ -5203,10 +5236,14 @@ class GestureWorker(QObject):
             )
             live_dx = cur_mid[0] - self._pinch_two_anchor_mid[0]
             live_dy = cur_mid[1] - self._pinch_two_anchor_mid[1]
-            scale_factor = (
-                cur_dist / self._pinch_two_anchor_dist
-                if self._pinch_two_anchor_dist > 1e-4 else 1.0
-            )
+            if self._pinch_two_anchor_dist > 1e-4:
+                raw_ratio = cur_dist / self._pinch_two_anchor_dist
+                # Same sensitivity gain as the lock-in path so the
+                # live preview matches what gets baked when the
+                # user releases.
+                scale_factor = 1.0 + _PINCH_SCALE_SENSITIVITY * (raw_ratio - 1.0)
+            else:
+                scale_factor = 1.0
             self._emit_pinch_transform(
                 self._pinch_accum_dx + live_dx,
                 self._pinch_accum_dy + live_dy,
