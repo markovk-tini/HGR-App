@@ -35,6 +35,7 @@ class StaticGestureRecognizer:
         "volume_pose",
         "wheel_pose",
         "chrome_wheel_pose",
+        "pinch",
     )
     debug_labels: tuple[str, ...] = (
         "finger_together",
@@ -48,6 +49,26 @@ class StaticGestureRecognizer:
     def _closedish(self, hand: HandReading, name: str) -> float:
         finger = hand.fingers[name]
         return clamp01(0.52 * finger.curl + 0.48 * _CLOSED_WEIGHTS[finger.state])
+
+    def _partial_curl(self, hand: HandReading, name: str) -> float:
+        """Score for 'finger is curled to a hooked / partially-curled
+        shape, neither fully extended nor fully closed'. Used by the
+        pinch pose where the thumb and index finger are bent toward
+        each other in a C-shape but not touching. Peaks when the
+        finger.state is 'partially_curled' AND finger.curl is
+        mid-range; drops to zero at either extreme."""
+        finger = hand.fingers[name]
+        state_score = {
+            "fully_open": 0.05,
+            "partially_curled": 1.0,
+            "mostly_curled": 0.55,
+            "closed": 0.0,
+        }[finger.state]
+        # mid_curl peaks at finger.curl == 0.5 and falls to 0 at
+        # either end of the [0, 1] range, so a fully-extended or
+        # fully-closed finger never scores as partial.
+        mid_curl = clamp01(1.0 - 2.0 * abs(finger.curl - 0.5))
+        return clamp01(0.5 * state_score + 0.5 * mid_curl)
 
     def _volume_primary_gate(self, hand: HandReading, name: str) -> float:
         finger = hand.fingers[name]
@@ -310,6 +331,20 @@ class StaticGestureRecognizer:
                 )
                 * (0.18 + 0.82 * chrome_wheel_open_gate)
                 * (0.18 + 0.82 * chrome_wheel_fold_gate)
+            ),
+            # Pinch: middle / ring / pinky firmly closed, thumb +
+            # index partially curled (hooked toward each other in a
+            # C-shape but not necessarily touching). Used to grab
+            # and move drawing overlays. Distinct from `ok` because
+            # ok requires the thumb-tip + index-tip to form a closed
+            # loop; pinch tolerates any thumb-index distance as long
+            # as both are in the partially-curled range.
+            "pinch": clamp01(
+                0.30 * closedish["middle"]
+                + 0.20 * closedish["ring"]
+                + 0.20 * closedish["pinky"]
+                + 0.15 * self._partial_curl(hand, "thumb")
+                + 0.15 * self._partial_curl(hand, "index")
             ),
             "finger_together": clamp01(
                 0.56 * non_thumb_extended

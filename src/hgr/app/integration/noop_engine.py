@@ -473,6 +473,17 @@ class GestureWorker(QObject):
     # main window resolves it against the configured drawings dir
     # and toggles a transparent always-on-top overlay window.
     drawing_overlay_toggle_requested = Signal(str)
+    # Pinch-grab transform updates for the visible drawing overlay.
+    # Carries absolute (cumulative-since-overlay-shown) values
+    # — dx_norm, dy_norm in normalised screen units, and scale as a
+    # multiplier on the auto-fit base — so the main window forwards
+    # them straight to DrawingOverlayWindow.set_grab_transform with
+    # no further state.
+    drawing_overlay_grab_transform = Signal(float, float, float)
+    # True while at least one hand is actively pinching, False when
+    # the gesture releases. Lets the main window show / hide a
+    # subtle "grabbing" affordance without polling.
+    drawing_overlay_grab_active = Signal(bool)
 
     _LOW_FPS_AUTO_THRESHOLD = 18.0
     _LOW_FPS_AUTO_ENTER_SECONDS = 4.0
@@ -517,6 +528,21 @@ class GestureWorker(QObject):
         # its own pass) and so gesture actions don't fire while the
         # user is intentionally posing for sample capture.
         self._frozen = False
+        # Pinch-grab state for moving / scaling a visible drawing
+        # overlay. Modes: "none" (no pinch), "one" (single-hand
+        # translate), "two" (bimanual translate + scale). Mode
+        # transitions lock in the previous mode's contribution to
+        # _pinch_accum_* before starting a fresh anchor.
+        self._pinch_mode: str = "none"
+        self._pinch_anchor_palm: Optional[tuple[float, float]] = None  # one-hand
+        self._pinch_two_anchor_dist: float = 0.0
+        self._pinch_two_anchor_mid: tuple[float, float] = (0.0, 0.0)
+        # Cumulative transform applied to the overlay since it was
+        # shown. Live mode transforms add on top; mode transitions
+        # bake the live delta into these.
+        self._pinch_accum_dx: float = 0.0
+        self._pinch_accum_dy: float = 0.0
+        self._pinch_accum_scale: float = 1.0
         self._cap = None
         self._camera_info = None
         self.engine: GestureRecognitionEngine | None = None
@@ -4162,6 +4188,11 @@ class GestureWorker(QObject):
             self._window_pair_pose_metrics(result.hand_reading if hand_handedness == "Right" else None, now=monotonic_now)
             t_volume = time.perf_counter() if debug_timing else 0.0
             t_appctrl = t_volume
+        # Pinch grab runs regardless of mode-specific gating above —
+        # it doesn't compete with mouse / drawing / volume because
+        # main_window only forwards its transform when a drawing
+        # overlay is actually showing. Cheap when no pinch is held.
+        self._handle_pinch_grab(result, monotonic_now)
         self._update_chrome_wheel_overlay(monotonic_now)
         self._update_spotify_wheel_overlay(monotonic_now)
         self._update_youtube_wheel_overlay(monotonic_now)
@@ -4815,6 +4846,149 @@ class GestureWorker(QObject):
                 "drawing_overlay_toggle",
                 f"toggled drawing overlay: {filename}" if filename else "toggled drawing overlay",
             )
+        except Exception:
+            pass
+
+    def reset_pinch_grab_state(self) -> None:
+        """Clear cumulative transform + active mode. Called by
+        main_window when the drawing overlay is hidden (toggled off
+        or swapped to a different drawing) so the next pinch starts
+        from a clean baseline instead of inheriting the previous
+        drawing's offset."""
+        self._pinch_mode = "none"
+        self._pinch_anchor_palm = None
+        self._pinch_two_anchor_dist = 0.0
+        self._pinch_two_anchor_mid = (0.0, 0.0)
+        self._pinch_accum_dx = 0.0
+        self._pinch_accum_dy = 0.0
+        self._pinch_accum_scale = 1.0
+
+    def _palm_xy(self, hand_reading) -> Optional[tuple[float, float]]:
+        """Pull (x, y) out of a HandReading's palm.center. Returns
+        None for the no-hand or malformed-reading case so callers
+        can short-circuit cleanly."""
+        if hand_reading is None:
+            return None
+        try:
+            center = hand_reading.palm.center
+            return (float(center[0]), float(center[1]))
+        except Exception:
+            return None
+
+    def _handle_pinch_grab(self, result, now: float) -> None:
+        """Pinch-to-grab + bimanual-stretch driver.
+
+        Called every frame after the engine result lands. Walks the
+        primary + secondary hand predictions to decide which mode
+        is active (none / one-hand / two-hand) and emits an
+        absolute (cumulative-since-overlay-shown) transform when a
+        pinch is held. Stays silent when no overlay is visible
+        anyway — main_window only forwards the signal when
+        DrawingOverlayWindow is showing."""
+        primary_pred = getattr(result, "prediction", None)
+        secondary_pred = getattr(result, "secondary_prediction", None)
+        primary_pinch = (
+            primary_pred is not None
+            and getattr(primary_pred, "stable_label", "neutral") == "pinch"
+        )
+        secondary_pinch = (
+            secondary_pred is not None
+            and getattr(secondary_pred, "stable_label", "neutral") == "pinch"
+        )
+        primary_palm = self._palm_xy(getattr(result, "hand_reading", None))
+        secondary_palm = self._palm_xy(getattr(result, "secondary_hand_reading", None))
+
+        if primary_pinch and secondary_pinch and primary_palm and secondary_palm:
+            new_mode = "two"
+        elif primary_pinch and primary_palm:
+            new_mode = "one"
+        else:
+            new_mode = "none"
+
+        # --- mode transitions: lock the live delta of the OUTGOING
+        # mode into the cumulative state, then capture anchors for
+        # the INCOMING mode.
+        if new_mode != self._pinch_mode:
+            if self._pinch_mode == "one" and self._pinch_anchor_palm is not None and primary_palm is not None:
+                self._pinch_accum_dx += primary_palm[0] - self._pinch_anchor_palm[0]
+                self._pinch_accum_dy += primary_palm[1] - self._pinch_anchor_palm[1]
+            elif self._pinch_mode == "two" and primary_palm is not None and secondary_palm is not None:
+                cur_mid = (
+                    (primary_palm[0] + secondary_palm[0]) * 0.5,
+                    (primary_palm[1] + secondary_palm[1]) * 0.5,
+                )
+                cur_dist = max(
+                    1e-4,
+                    ((primary_palm[0] - secondary_palm[0]) ** 2
+                     + (primary_palm[1] - secondary_palm[1]) ** 2) ** 0.5,
+                )
+                self._pinch_accum_dx += cur_mid[0] - self._pinch_two_anchor_mid[0]
+                self._pinch_accum_dy += cur_mid[1] - self._pinch_two_anchor_mid[1]
+                if self._pinch_two_anchor_dist > 1e-4:
+                    self._pinch_accum_scale *= cur_dist / self._pinch_two_anchor_dist
+            # Capture incoming-mode anchors.
+            if new_mode == "one" and primary_palm is not None:
+                self._pinch_anchor_palm = primary_palm
+            elif new_mode == "two" and primary_palm is not None and secondary_palm is not None:
+                self._pinch_two_anchor_mid = (
+                    (primary_palm[0] + secondary_palm[0]) * 0.5,
+                    (primary_palm[1] + secondary_palm[1]) * 0.5,
+                )
+                self._pinch_two_anchor_dist = max(
+                    1e-4,
+                    ((primary_palm[0] - secondary_palm[0]) ** 2
+                     + (primary_palm[1] - secondary_palm[1]) ** 2) ** 0.5,
+                )
+            else:
+                self._pinch_anchor_palm = None
+            # Notify subscribers about active-state edge changes.
+            was_active = self._pinch_mode != "none"
+            now_active = new_mode != "none"
+            self._pinch_mode = new_mode
+            if was_active != now_active:
+                try:
+                    self.drawing_overlay_grab_active.emit(now_active)
+                except Exception:
+                    pass
+
+        # --- live transform every frame the mode is active.
+        if self._pinch_mode == "one" and self._pinch_anchor_palm is not None and primary_palm is not None:
+            live_dx = primary_palm[0] - self._pinch_anchor_palm[0]
+            live_dy = primary_palm[1] - self._pinch_anchor_palm[1]
+            self._emit_pinch_transform(
+                self._pinch_accum_dx + live_dx,
+                self._pinch_accum_dy + live_dy,
+                self._pinch_accum_scale,
+            )
+        elif self._pinch_mode == "two" and primary_palm is not None and secondary_palm is not None:
+            cur_mid = (
+                (primary_palm[0] + secondary_palm[0]) * 0.5,
+                (primary_palm[1] + secondary_palm[1]) * 0.5,
+            )
+            cur_dist = max(
+                1e-4,
+                ((primary_palm[0] - secondary_palm[0]) ** 2
+                 + (primary_palm[1] - secondary_palm[1]) ** 2) ** 0.5,
+            )
+            live_dx = cur_mid[0] - self._pinch_two_anchor_mid[0]
+            live_dy = cur_mid[1] - self._pinch_two_anchor_mid[1]
+            scale_factor = (
+                cur_dist / self._pinch_two_anchor_dist
+                if self._pinch_two_anchor_dist > 1e-4 else 1.0
+            )
+            self._emit_pinch_transform(
+                self._pinch_accum_dx + live_dx,
+                self._pinch_accum_dy + live_dy,
+                self._pinch_accum_scale * scale_factor,
+            )
+
+    def _emit_pinch_transform(self, dx: float, dy: float, scale: float) -> None:
+        # Palm coords are in user-perspective normalised image space
+        # (cv2.flip is applied before MediaPipe), so a swipe to the
+        # right increases palm-x. The displayed overlay should move
+        # in the same direction → no axis inversion.
+        try:
+            self.drawing_overlay_grab_transform.emit(float(dx), float(dy), float(scale))
         except Exception:
             pass
 
