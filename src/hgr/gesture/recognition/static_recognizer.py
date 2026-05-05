@@ -60,7 +60,16 @@ class StaticGestureRecognizer:
         bend angles say 'mostly straight' but extension says
         'closed' — that's the FORESHORTENING case (finger pointing
         toward the camera) which would otherwise mis-classify as
-        closed and let pinch lose to fist."""
+        closed and let pinch lose to fist.
+
+        The not_folded bonus is gated on curl evidence so a
+        genuinely-extended finger (curl ≈ 0, joints straight)
+        can't pad pinch's score — without the gate, a
+        right-hand 'one' pose was leaking into pinch's score
+        because the index finger's straight bend angles awarded
+        full not_folded credit even though the finger wasn't
+        hooked at all.
+        """
         finger = hand.fingers[name]
         state_score = {
             "fully_open": 0.05,
@@ -79,7 +88,11 @@ class StaticGestureRecognizer:
         # curled. 180° = fully straight, 0° = fully folded back.
         bend_avg = (float(finger.bend_proximal) + float(finger.bend_distal)) * 0.5
         not_folded = clamp01((bend_avg - 120.0) / 50.0)  # ramps 120→170°
-        return clamp01(0.30 * state_score + 0.30 * mid_curl + 0.40 * not_folded)
+        # Hook evidence: at least SOME curl is required to award the
+        # not_folded bonus. Fully extended → 0.2× damping (can't
+        # pretend to be a partial); curl ≥ 0.20 → full bonus.
+        hook_evidence = 0.2 + 0.8 * clamp01(float(finger.curl) / 0.20)
+        return clamp01(0.30 * state_score + 0.30 * mid_curl + 0.40 * not_folded * hook_evidence)
 
     def _volume_primary_gate(self, hand: HandReading, name: str) -> float:
         finger = hand.fingers[name]
@@ -274,6 +287,20 @@ class StaticGestureRecognizer:
         pinch_bend_gate = clamp01(
             (min(thumb_bend_avg, index_bend_avg) - 110.0) / 50.0
         )
+        # Pinch separation gate. The thumb and index tips have to
+        # be at least somewhat APART for this pose — when they
+        # touch (or nearly touch) it's an 'ok' sign, not a pinch.
+        # thumb_index_ratio is the raw 4→8 landmark distance
+        # divided by palm scale; 'ok' fires below 0.27, so we
+        # require ≥ ~0.30 here. Ramps gradually so a pose with
+        # tips at 0.28 still gets some pinch credit (the user can
+        # bring tips closer mid-grab without instantly dropping
+        # the gesture), but ramps in fully by 0.40 — matched the
+        # 'C-shape, definitely not touching' reference image the
+        # user provided when the pose was originally designed.
+        pinch_separation_gate = clamp01(
+            (thumb_index_ratio - 0.25) / 0.15
+        )
 
         scores = {
             "open_hand": clamp01(
@@ -386,6 +413,7 @@ class StaticGestureRecognizer:
                     + 0.18 * self._partial_curl(hand, "index")
                 )
                 * (0.30 + 0.70 * pinch_bend_gate)
+                * (0.20 + 0.80 * pinch_separation_gate)
             ),
             "finger_together": clamp01(
                 0.56 * non_thumb_extended

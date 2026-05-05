@@ -1458,19 +1458,29 @@ class GestureWorker(QObject):
             return False
         if finger.state in {"closed", "mostly_curled", "partially_curled"}:
             return True
-        # Loosened thresholds for the rotated-wrist case the user
-        # hit: when the hand tilts even slightly while holding
-        # 'one', MediaPipe's thumb landmark estimate drifts and
-        # `state` can flip to fully_open / openness can rise toward
-        # ~0.9 even though the thumb is still tucked against the
-        # palm. The recogniser already gates this path on stable_
-        # label == 'one', so trusting that label and being permissive
-        # on the geometry double-check is safer than dropping a
-        # stroke mid-line. Old thresholds (openness ≤ 0.80, curl ≥
-        # 0.22) were too strict; this widens to (≤ 0.92, ≥ 0.10).
-        openness = float(getattr(finger, "openness", 0.0) or 0.0)
+        # Rotation-invariant tucked-thumb detection. MediaPipe's
+        # `openness` and `state` are derived from the wrist→tip
+        # extension distance, which grows when the hand tilts even
+        # slightly — so a thumb that's still physically tucked
+        # against the palm starts reading as 'fully_open' the
+        # moment the user rotates their wrist. Two more stable
+        # signals exist on the finger object: `palm_distance`
+        # (tip-to-palm-center, smaller when tucked) and the bend
+        # angles (low when joints are folded). Either of those
+        # confirming a tucked posture is enough to treat the thumb
+        # as folded for the drawing path.
+        palm_distance = float(getattr(finger, "palm_distance", 1.0) or 1.0)
         curl = float(getattr(finger, "curl", 0.0) or 0.0)
-        return openness <= 0.92 or curl >= 0.10
+        bend_distal = float(getattr(finger, "bend_distal", 180.0) or 180.0)
+        bend_proximal = float(getattr(finger, "bend_proximal", 180.0) or 180.0)
+        openness = float(getattr(finger, "openness", 0.0) or 0.0)
+        return (
+            palm_distance < 0.55
+            or curl >= 0.10
+            or bend_distal < 150.0
+            or bend_proximal < 140.0
+            or openness <= 0.92
+        )
 
     def _drawing_draw_pose_active(self, prediction, hand_reading) -> bool:
         if hand_reading is None or prediction is None:
