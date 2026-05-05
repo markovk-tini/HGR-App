@@ -243,18 +243,20 @@ class CustomGesturesPanel(QWidget):
 
         row.addStretch(1)
 
-        # Import / Export. Same neutral styling as Sandbox so they
-        # don't compete with the primary "Create" button for
-        # attention. Right-aligned via the stretch above so they sit
+        # Import / Export. Compact tertiary buttons — shorter labels,
+        # tighter padding, and a smaller min-height than Sandbox so
+        # they don't crowd the primary actions on the left side of
+        # the row. Right-aligned via the stretch above so they sit
         # at the far end of the row.
         secondary_btn_style = (
             "QPushButton {"
             "  background: rgba(127,127,127,0.10);"
             f"  color: {self._config.text_color};"
             "  font-weight: 600;"
+            "  font-size: 12px;"
             "  border: 1px solid rgba(127,127,127,0.22);"
             "  border-radius: 8px;"
-            "  padding: 8px 14px;"
+            "  padding: 4px 10px;"
             "}"
             "QPushButton:hover { background: rgba(255,255,255,0.10); }"
             "QPushButton:disabled {"
@@ -262,15 +264,17 @@ class CustomGesturesPanel(QWidget):
             "  border: 1px solid rgba(127,127,127,0.12);"
             "}"
         )
-        self.import_button = QPushButton("Import…")
-        self.import_button.setMinimumHeight(38)
+        self.import_button = QPushButton("Import")
+        self.import_button.setMinimumHeight(30)
+        self.import_button.setMaximumHeight(34)
         self.import_button.setToolTip("Load custom gestures from a .tlg file shared by another Touchless user.")
         self.import_button.setStyleSheet(secondary_btn_style)
         self.import_button.clicked.connect(self.import_requested)
         row.addWidget(self.import_button)
 
-        self.export_all_button = QPushButton("Export All…")
-        self.export_all_button.setMinimumHeight(38)
+        self.export_all_button = QPushButton("Export All")
+        self.export_all_button.setMinimumHeight(30)
+        self.export_all_button.setMaximumHeight(34)
         self.export_all_button.setToolTip("Save every custom gesture into a single .tlg file you can share or back up.")
         self.export_all_button.setStyleSheet(secondary_btn_style)
         self.export_all_button.clicked.connect(self.export_all_requested)
