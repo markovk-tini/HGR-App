@@ -534,6 +534,13 @@ class GestureWorker(QObject):
         # transitions lock in the previous mode's contribution to
         # _pinch_accum_* before starting a fresh anchor.
         self._pinch_mode: str = "none"
+        # Which palm slot is driving the current single-hand grab.
+        # "primary" or "secondary" depending on which hand the user
+        # is pinching with. Lets the user grab with EITHER hand
+        # (left alone, right alone, or both for stretch). Switching
+        # hands mid-grab is treated as a mode transition so the
+        # accumulated offset doesn't teleport.
+        self._pinch_one_slot: Optional[str] = None
         self._pinch_anchor_palm: Optional[tuple[float, float]] = None  # one-hand
         self._pinch_two_anchor_dist: float = 0.0
         self._pinch_two_anchor_mid: tuple[float, float] = (0.0, 0.0)
@@ -1445,7 +1452,23 @@ class GestureWorker(QObject):
         return openness <= 0.80 or curl >= 0.22
 
     def _drawing_draw_pose_active(self, prediction, hand_reading) -> bool:
-        if hand_reading is None:
+        if hand_reading is None or prediction is None:
+            return False
+        # Require the recogniser to actually report 'one' (or a
+        # high-confidence raw 'one' the stabiliser hasn't latched
+        # onto yet). The earlier landmark-only check accepted any
+        # 'index extendedish + others folded' shape, which let a
+        # foreshortened pinch — where index is partially_curled
+        # (still counted as extendedish by the helper) and thumb +
+        # middle/ring/pinky look folded — trip the draw tool. Now
+        # the user has to clearly hold a 'one' to ink, and the
+        # geometry checks below stay as a sanity gate so draw can't
+        # fire on, say, a generic three-finger label that briefly
+        # stabilised to 'one' on a transition.
+        stable = str(getattr(prediction, "stable_label", "neutral") or "neutral")
+        raw = str(getattr(prediction, "raw_label", "neutral") or "neutral")
+        confidence = float(getattr(prediction, "confidence", 0.0) or 0.0)
+        if stable != "one" and not (raw == "one" and confidence >= 0.55):
             return False
         fingers = hand_reading.fingers
         outer_folded = sum(1 for name in ("middle", "ring", "pinky") if self._drawing_finger_foldedish(fingers.get(name)))
@@ -3717,9 +3740,32 @@ class GestureWorker(QObject):
                 ffmpeg_cap.release()
             except Exception:
                 pass
-        recovered = open_camera_by_index(index_int, max_index=self.config.camera_scan_limit)
-        if isinstance(recovered, tuple) and len(recovered) >= 2 and recovered[1] is not None:
-            return recovered
+        # DirectShow-release race guard: the OpenCV cap was released
+        # just moments ago (line above the ffmpeg attempt) so the
+        # Windows DSHOW filter may still be tearing down. Reopening
+        # too quickly returns a half-dead cap that reports isOpened()
+        # = False. With the old 8 s ffmpeg timeout this was never
+        # observed because by the time ffmpeg gave up the driver had
+        # long since freed the device. The new 2.5 s timeout opens
+        # the race on slow-release webcams (Razer Kiyo Pro is the
+        # one we observed in user logs — it can take 1.5-2 s to
+        # finish releasing). Retry up to 8 times with 250 ms gaps:
+        # total worst-case added latency 2 s, which is still half
+        # of the 4 s saved by dropping the per-attempt ffmpeg
+        # timeout from 8 s to 2.5 s, AND converges on the first
+        # retry on cameras that release fast.
+        recovered = None
+        for retry_idx in range(8):
+            recovered = open_camera_by_index(index_int, max_index=self.config.camera_scan_limit)
+            if (
+                isinstance(recovered, tuple)
+                and len(recovered) >= 2
+                and recovered[1] is not None
+            ):
+                if retry_idx > 0:
+                    _log(f"OpenCV reopen succeeded on retry {retry_idx}")
+                return recovered
+            time.sleep(0.25)
         # Last-ditch: open with Media Foundation so we have *some*
         # camera object — even default-format YUY2 is better than
         # leaving the engine with self._cap = None. Explicit MSMF
@@ -3732,9 +3778,14 @@ class GestureWorker(QObject):
             backend = getattr(cv2, "CAP_MSMF", getattr(cv2, "CAP_ANY", 0))
             recovered_cap = cv2.VideoCapture(index_int, backend)
             if recovered_cap.isOpened():
+                _log("MSMF last-ditch reopen engaged")
                 return (info, recovered_cap)
         except Exception:
             pass
+        _log(
+            f"all OpenCV reopens failed after ffmpeg startup miss — "
+            f"engine will report no-camera and tutorial/UI will show 'runtime stopped'"
+        )
         return open_result
 
     def _draw_low_fps_badge(self, frame) -> None:
@@ -4889,6 +4940,7 @@ class GestureWorker(QObject):
         from a clean baseline instead of inheriting the previous
         drawing's offset."""
         self._pinch_mode = "none"
+        self._pinch_one_slot = None
         self._pinch_anchor_palm = None
         self._pinch_two_anchor_dist = 0.0
         self._pinch_two_anchor_mid = (0.0, 0.0)
@@ -5016,12 +5068,23 @@ class GestureWorker(QObject):
             now - self._pinch_last_seen_secondary < self._pinch_grace_seconds
         )
 
+        # Mode + slot decision. Two-hand stretch needs both slots
+        # active; otherwise EITHER slot pinching alone is a
+        # one-hand grab — works with the user's left, right, or
+        # whichever single hand is in frame after the right-as-
+        # primary normalisation.
         if primary_active and secondary_active and primary_palm and secondary_palm:
             new_mode = "two"
+            new_one_slot: Optional[str] = None
         elif primary_active and primary_palm:
             new_mode = "one"
+            new_one_slot = "primary"
+        elif secondary_active and secondary_palm:
+            new_mode = "one"
+            new_one_slot = "secondary"
         else:
             new_mode = "none"
+            new_one_slot = None
 
         # Apply EMA smoothing on the palm coords used for grab
         # math. The raw values still drive the active/inactive
@@ -5039,18 +5102,33 @@ class GestureWorker(QObject):
             primary_palm_s = self._smooth_palm("primary", primary_palm)
             secondary_palm_s = self._smooth_palm("secondary", secondary_palm)
 
-        # --- mode transitions: lock the live delta of the OUTGOING
-        # mode into the cumulative state, then capture anchors for
-        # the INCOMING mode. Uses smoothed palm coords throughout so
+        def _palm_for_slot(slot: Optional[str]) -> Optional[tuple[float, float]]:
+            if slot == "primary":
+                return primary_palm_s
+            if slot == "secondary":
+                return secondary_palm_s
+            return None
+
+        # --- mode transitions. Trigger on string-mode change OR
+        # one-hand slot change (left↔right swap mid-grab). Lock
+        # the live delta of the OUTGOING configuration into the
+        # cumulative state, then capture anchors for the INCOMING
+        # configuration. Uses smoothed palm coords throughout so
         # the lock-in matches what the user actually saw drawn.
-        if new_mode != self._pinch_mode:
+        slot_changed = (
+            new_mode == "one"
+            and self._pinch_mode == "one"
+            and new_one_slot != self._pinch_one_slot
+        )
+        if new_mode != self._pinch_mode or slot_changed:
+            outgoing_palm = _palm_for_slot(self._pinch_one_slot)
             if (
                 self._pinch_mode == "one"
                 and self._pinch_anchor_palm is not None
-                and primary_palm_s is not None
+                and outgoing_palm is not None
             ):
-                self._pinch_accum_dx += primary_palm_s[0] - self._pinch_anchor_palm[0]
-                self._pinch_accum_dy += primary_palm_s[1] - self._pinch_anchor_palm[1]
+                self._pinch_accum_dx += outgoing_palm[0] - self._pinch_anchor_palm[0]
+                self._pinch_accum_dy += outgoing_palm[1] - self._pinch_anchor_palm[1]
             elif (
                 self._pinch_mode == "two"
                 and primary_palm_s is not None
@@ -5070,8 +5148,9 @@ class GestureWorker(QObject):
                 if self._pinch_two_anchor_dist > 1e-4:
                     self._pinch_accum_scale *= cur_dist / self._pinch_two_anchor_dist
             # Capture incoming-mode anchors.
-            if new_mode == "one" and primary_palm_s is not None:
-                self._pinch_anchor_palm = primary_palm_s
+            incoming_palm = _palm_for_slot(new_one_slot)
+            if new_mode == "one" and incoming_palm is not None:
+                self._pinch_anchor_palm = incoming_palm
             elif new_mode == "two" and primary_palm_s is not None and secondary_palm_s is not None:
                 self._pinch_two_anchor_mid = (
                     (primary_palm_s[0] + secondary_palm_s[0]) * 0.5,
@@ -5088,6 +5167,7 @@ class GestureWorker(QObject):
             was_active = self._pinch_mode != "none"
             now_active = new_mode != "none"
             self._pinch_mode = new_mode
+            self._pinch_one_slot = new_one_slot
             if was_active != now_active:
                 try:
                     self.drawing_overlay_grab_active.emit(now_active)
@@ -5097,18 +5177,16 @@ class GestureWorker(QObject):
         # --- live transform every frame the mode is active. Same
         # smoothed-coord story: the displayed transform is computed
         # from the damped palm to keep the drawing visually steady.
-        if (
-            self._pinch_mode == "one"
-            and self._pinch_anchor_palm is not None
-            and primary_palm_s is not None
-        ):
-            live_dx = primary_palm_s[0] - self._pinch_anchor_palm[0]
-            live_dy = primary_palm_s[1] - self._pinch_anchor_palm[1]
-            self._emit_pinch_transform(
-                self._pinch_accum_dx + live_dx,
-                self._pinch_accum_dy + live_dy,
-                self._pinch_accum_scale,
-            )
+        if self._pinch_mode == "one" and self._pinch_anchor_palm is not None:
+            active_palm = _palm_for_slot(self._pinch_one_slot)
+            if active_palm is not None:
+                live_dx = active_palm[0] - self._pinch_anchor_palm[0]
+                live_dy = active_palm[1] - self._pinch_anchor_palm[1]
+                self._emit_pinch_transform(
+                    self._pinch_accum_dx + live_dx,
+                    self._pinch_accum_dy + live_dy,
+                    self._pinch_accum_scale,
+                )
         elif (
             self._pinch_mode == "two"
             and primary_palm_s is not None
