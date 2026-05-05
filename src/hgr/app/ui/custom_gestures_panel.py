@@ -118,6 +118,14 @@ class CustomGesturesPanel(QWidget):
     open_create_requested = Signal()
     open_sandbox_requested = Signal()
     open_edit_requested = Signal(str)  # emits gesture name to edit
+    # Import / export bundle requests. The panel doesn't own a
+    # parent QWidget for QFileDialog (or for conflict-resolution
+    # message boxes) reliably — main_window does — so the panel
+    # emits and main_window opens the file picker, runs the
+    # bundle helper, and pings refresh_cards on success.
+    import_requested = Signal()
+    export_all_requested = Signal()
+    export_one_requested = Signal(str)  # gesture name
 
     def __init__(
         self,
@@ -234,6 +242,40 @@ class CustomGesturesPanel(QWidget):
         row.addWidget(self.sandbox_button)
 
         row.addStretch(1)
+
+        # Import / Export. Same neutral styling as Sandbox so they
+        # don't compete with the primary "Create" button for
+        # attention. Right-aligned via the stretch above so they sit
+        # at the far end of the row.
+        secondary_btn_style = (
+            "QPushButton {"
+            "  background: rgba(127,127,127,0.10);"
+            f"  color: {self._config.text_color};"
+            "  font-weight: 600;"
+            "  border: 1px solid rgba(127,127,127,0.22);"
+            "  border-radius: 8px;"
+            "  padding: 8px 14px;"
+            "}"
+            "QPushButton:hover { background: rgba(255,255,255,0.10); }"
+            "QPushButton:disabled {"
+            f"  color: rgba(127,127,127,0.55);"
+            "  border: 1px solid rgba(127,127,127,0.12);"
+            "}"
+        )
+        self.import_button = QPushButton("Import…")
+        self.import_button.setMinimumHeight(38)
+        self.import_button.setToolTip("Load custom gestures from a .tlg file shared by another Touchless user.")
+        self.import_button.setStyleSheet(secondary_btn_style)
+        self.import_button.clicked.connect(self.import_requested)
+        row.addWidget(self.import_button)
+
+        self.export_all_button = QPushButton("Export All…")
+        self.export_all_button.setMinimumHeight(38)
+        self.export_all_button.setToolTip("Save every custom gesture into a single .tlg file you can share or back up.")
+        self.export_all_button.setStyleSheet(secondary_btn_style)
+        self.export_all_button.clicked.connect(self.export_all_requested)
+        row.addWidget(self.export_all_button)
+
         layout.addLayout(row)
         return box
 
@@ -301,6 +343,11 @@ class CustomGesturesPanel(QWidget):
             card.deleteLater()
         self._cards.clear()
         gestures = self._registry.list()
+        # Export-All is meaningless with an empty registry; toggle it
+        # so users get a clear "nothing to export" affordance instead
+        # of an empty error dialog.
+        if hasattr(self, "export_all_button"):
+            self.export_all_button.setEnabled(bool(gestures))
         if not gestures:
             self._empty_label.show()
             return
@@ -313,6 +360,7 @@ class CustomGesturesPanel(QWidget):
                 g,
                 on_delete=self._on_delete_gesture,
                 on_edit=self._on_edit_gesture,
+                on_export=lambda name: self.export_one_requested.emit(name),
                 parent=self._cards_container,
                 text_color=str(getattr(self._config, "text_color", "") or "#E5F6FF"),
             )
@@ -349,6 +397,7 @@ class GestureCard(QFrame):
         gesture: CustomGesture,
         on_delete: Callable[[str], None],
         on_edit: Optional[Callable[[str], None]] = None,
+        on_export: Optional[Callable[[str], None]] = None,
         parent: Optional[QWidget] = None,
         text_color: Optional[str] = None,
     ) -> None:
@@ -356,6 +405,7 @@ class GestureCard(QFrame):
         self._gesture = gesture
         self._on_delete = on_delete
         self._on_edit = on_edit
+        self._on_export = on_export
         self._expanded = False
         # Cache the active text colour so this card (which is built
         # outside the main MainWindow.apply_theme path) reads in both
@@ -424,6 +474,28 @@ class GestureCard(QFrame):
             edit_button.setEnabled(False)
         top_row.addWidget(edit_button, 0)
 
+        export_button = QPushButton("Export")
+        export_button.setFixedWidth(72)
+        export_button.setToolTip("Save this gesture as a .tlg file you can share or back up.")
+        export_button.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent;"
+            f"  color: {self._text_color};"
+            "  border: 1px solid rgba(127,127,127,0.45);"
+            "  border-radius: 6px;"
+            "  padding: 4px 10px;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(127,127,127,0.18);"
+            "}"
+        )
+        if self._on_export is not None:
+            export_button.clicked.connect(lambda: self._on_export(self._gesture.name))
+        else:
+            export_button.setEnabled(False)
+        top_row.addWidget(export_button, 0)
+
         delete_button = QPushButton("Delete")
         delete_button.setFixedWidth(78)
         delete_button.setStyleSheet(
@@ -457,8 +529,18 @@ class GestureCard(QFrame):
         action_label.setWordWrap(True)
         root.addWidget(action_label)
 
+        # Expanded body: description on the left, thumbnail on the
+        # right. Was previously two stacked widgets (description above,
+        # thumbnail below); side-by-side reads more like a "details
+        # card" — the user can scan the summary text while seeing the
+        # captured pose without having to scroll.
+        expanded_row = QHBoxLayout()
+        expanded_row.setSpacing(10)
+
         self._details = QLabel()
         self._details.setWordWrap(True)
+        self._details.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._details.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._details.setStyleSheet(
             f"color: {self._text_color};"
             " font-family: Consolas, 'Courier New', monospace;"
@@ -469,16 +551,14 @@ class GestureCard(QFrame):
         )
         self._details.setText(format_gesture_summary(gesture))
         self._details.hide()
-        root.addWidget(self._details)
+        expanded_row.addWidget(self._details, 1)
 
-        # Thumbnail (only shown when the card is expanded). Larger than
-        # the old collapsed-card thumbnail because there's more room
-        # inside the dropdown.
+        # Thumbnail: fixed width so it doesn't squeeze the description
+        # away when the card is wide. Shown only when expanded.
         self._expanded_thumb_label = QLabel()
         self._expanded_thumb_label.setObjectName("gestureCardExpandedThumb")
         self._expanded_thumb_label.setAlignment(Qt.AlignCenter)
-        self._expanded_thumb_label.setFixedHeight(180)
-        self._expanded_thumb_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._expanded_thumb_label.setFixedSize(240, 180)
         self._expanded_thumb_label.setStyleSheet(
             "QLabel#gestureCardExpandedThumb {"
             "  background: rgba(0,0,0,0.30);"
@@ -490,7 +570,9 @@ class GestureCard(QFrame):
             "}"
         )
         self._expanded_thumb_label.hide()
-        root.addWidget(self._expanded_thumb_label)
+        expanded_row.addWidget(self._expanded_thumb_label, 0, Qt.AlignTop)
+
+        root.addLayout(expanded_row)
 
     def _toggle(self) -> None:
         self._expanded = not self._expanded
@@ -518,10 +600,13 @@ class GestureCard(QFrame):
         if path is not None:
             pix = QPixmap(str(path))
             if not pix.isNull():
+                # Subtract the label's CSS padding (8px each side) so
+                # the scaled pixmap doesn't render past the rounded
+                # border. The fixed label size is 240×180.
                 self._expanded_thumb_label.setPixmap(
                     pix.scaled(
-                        self._expanded_thumb_label.width() or 240,
-                        self._expanded_thumb_label.height() or 180,
+                        224,
+                        164,
                         Qt.KeepAspectRatio,
                         Qt.SmoothTransformation,
                     )
