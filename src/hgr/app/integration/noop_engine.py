@@ -3997,6 +3997,23 @@ class GestureWorker(QObject):
         frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
         t_prep = time.perf_counter() if debug_timing else 0.0
+        # Camera-target drawing composite. The drawing canvas
+        # accumulates strokes in _update_camera_drawing_canvas
+        # (called per tick), but the GPU-decoupled-display rewrite
+        # accidentally dropped the call site that BLITS that canvas
+        # onto the displayed frame — so strokes were going into the
+        # canvas correctly but never reached the live view, which
+        # is why 'switch view' to camera mode showed nothing as the
+        # user drew. Blend before the raw_frame_ready emit so the
+        # mini viewer + enlarged live view (both painting from
+        # raw_frame_ready) show the strokes the moment they're
+        # drawn. Fast-paths to a no-op when target != "camera" or
+        # the canvas is empty, so the screen-target case stays
+        # zero-cost.
+        try:
+            self._blend_camera_drawing_overlay(frame)
+        except Exception:
+            pass
         # Decoupled display path. CRUCIAL ordering: emit the raw
         # frame BEFORE the back-pressure check below. This is what
         # makes the live view update at camera fps even when GPU

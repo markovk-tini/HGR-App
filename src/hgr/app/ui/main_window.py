@@ -427,7 +427,7 @@ class StartTutorialDialog(QDialog):
         root.setContentsMargins(20, 16, 20, 14)
         root.setSpacing(8)
 
-        title = QLabel("Quick 2-min gesture tutorial?")
+        title = QLabel("Would you like to start the tutorial? (2 minuets)")
         title.setObjectName("startDialogTitle")
         title.setWordWrap(True)
         root.addWidget(title)
@@ -1490,22 +1490,26 @@ def _build_gesture_guide_dynamic_cards() -> list[GestureGuideCard]:
             video_name="DrawingSettingsWheel.mp4",
         ),
         GestureGuideCard(
-            title="Pinch (one or two hands)",
-            action="Grab and move drawings; with both hands, stretch / squish them",
+            title="Pinch (drawings only)",
+            action="Move, stretch, and resize drawings — works on the live drawing canvas and on saved drawings shown as overlays",
             how_to=(
-                "How To: Curl your middle, ring, and pinky into your palm, and curve your thumb and index toward each "
+                "What it's for: pinch ONLY acts on DRAWINGS. While drawing mode is on it grabs the live canvas — every "
+                "stroke you've drawn so far moves, stretches, or resizes as a unit. When a saved drawing is currently "
+                "shown as a transparent overlay (via a custom gesture's 'Show a saved drawing as overlay' binding), "
+                "pinch grabs that overlay instead. Outside those two contexts the pose does nothing — it never fires "
+                "any other action.\n\n"
+                "How To: curl your middle, ring, and pinky into your palm and curve your thumb and index toward each "
                 "other in a C-shape — they don't have to touch. Hold the pose for about 0.7 seconds before moving so "
-                "the grab activates cleanly. Move your hand to translate the drawing; release the pose to drop it where "
-                "it is.\n\n"
-                "Two-hand stretch: hold pinch with BOTH hands at the same time. Move them apart to stretch the drawing "
-                "outward, together to squish it; move both in parallel to translate. Either hand alone works as a "
-                "single-hand grab if the other is out of frame.\n\n"
-                "Where it works: while drawing mode is on, pinch grabs the live drawing canvas. When a saved drawing "
-                "is being shown as a transparent overlay (via a custom-gesture 'Show a saved drawing as overlay' "
-                "binding), pinch grabs that overlay instead. A left-swipe undoes the whole grab session — move and "
-                "stretch revert together as one history entry."
+                "the grab activates cleanly (this prevents accidental nudges from a transient label). Move your hand "
+                "to translate the drawing; release the pose to drop it where it is.\n\n"
+                "Two hands = stretch / resize: hold pinch with BOTH hands at once. Move your hands APART to stretch "
+                "the drawing outward, TOGETHER to squish / resize down; move both in PARALLEL to translate. Either "
+                "hand alone keeps working as a single-hand move if the other goes out of frame.\n\n"
+                "Undo: a left-hand swipe reverts the whole grab session — move + stretch + resize roll back together "
+                "as one undo step."
             ),
             gesture_key="pinch",
+            video_name="pinch.mp4",
         ),
     ]
 
@@ -7463,17 +7467,24 @@ class MainWindow(QMainWindow):
         tutorial_layout.setContentsMargins(16, 16, 16, 16)
         tutorial_layout.setSpacing(10)
 
-        items = [
-            "Part 1: practice three right swipes and three left swipes. After that, swipe right moves to the next tutorial step and swipe left moves to the previous step.",
-            "Part 2: use the right-hand two gesture to actually open or focus Spotify.",
-            "Part 3: use the right-hand fist gesture to actually pause and play Spotify so you can verify the app control is working.",
-            "Part 4: use the wheel pose to open the real Spotify gesture wheel. There is also a separate Google Chrome gesture wheel in the full app.",
-            "Part 5: turn mouse mode on, learn how the right hand controls the cursor, click the tutorial targets, then turn mouse mode off again.",
-            "Part 6: hold left-hand 'one' to start the voice listener, then speak a command. The tutorial confirms each phrase before advancing — a quick check that your microphone is wired up and the listener trigger feels right.",
+        part_descriptions = [
+            "practice three right swipes and three left swipes. After that, swipe right moves to the next tutorial step and swipe left moves to the previous step.",
+            "use the right-hand two gesture to actually open or focus Spotify.",
+            "use the right-hand fist gesture to actually pause and play Spotify so you can verify the app control is working.",
+            "use the wheel pose to open the real Spotify gesture wheel. There is also a separate Google Chrome gesture wheel in the full app.",
+            "turn mouse mode on, learn how the right hand controls the cursor, click the tutorial targets, then turn mouse mode off again.",
+            "hold left-hand 'one' to start the voice listener, then speak a command. The tutorial confirms each phrase before advancing - a quick check that your microphone is wired up and the listener trigger feels right.",
         ]
-        for item in items:
-            lbl = QLabel(f"• {item}")
+        accent = self.config.accent_color or "#1DE9B6"
+        for index, description in enumerate(part_descriptions, start=1):
+            lbl = QLabel(
+                f'- <a href="tutorial_part:{index - 1}" style="color: {accent};">Part {index}</a>: {description}'
+            )
             lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            lbl.setOpenExternalLinks(False)
+            lbl.linkActivated.connect(self._open_tutorial_part_link)
             tutorial_layout.addWidget(lbl)
 
         open_tutorial_button = QPushButton("Open Tutorial")
@@ -7483,6 +7494,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(tutorial_box)
         layout.addStretch(1)
         return panel
+
+    def _open_tutorial_part_link(self, link: str) -> None:
+        try:
+            _prefix, raw_index = str(link or "").split(":", 1)
+            step_index = int(raw_index)
+        except Exception:
+            step_index = 0
+        self.open_tutorial(from_settings=True, start_step_index=step_index)
 
     def _build_updates_panel(self) -> QWidget:
         from ... import __version__ as APP_VERSION  # local import keeps top-of-module clean
@@ -8128,7 +8147,7 @@ Admin elevation
         self.page_stack.setCurrentWidget(self.home_page)
 
 
-    def open_tutorial(self, from_settings: bool = False) -> None:
+    def open_tutorial(self, from_settings: bool = False, start_step_index: int = 0) -> None:
         if self.tutorial_window is None:
             self.tutorial_window = TutorialWindow(self.config, self)
             self.tutorial_window.tutorial_closed.connect(self._on_tutorial_closed)
@@ -8140,11 +8159,15 @@ Admin elevation
             camera_index=None,
             launched_from_settings=from_settings,
             auto_start_on_done=not from_settings,
+            start_step_index=start_step_index,
         )
         self.tutorial_window.show()
         self.tutorial_window.raise_()
         self.tutorial_window.activateWindow()
-        self.last_action_label.setText("Last action: opened tutorial")
+        if start_step_index > 0:
+            self.last_action_label.setText(f"Last action: opened tutorial at part {start_step_index + 1}")
+        else:
+            self.last_action_label.setText("Last action: opened tutorial")
 
     def _on_tutorial_closed(self, completed: bool, auto_start: bool, launched_from_settings: bool) -> None:
         if launched_from_settings:
