@@ -112,8 +112,8 @@ _VK_LAYOUT_ROWS: tuple[tuple[tuple[str, str, float], ...], ...] = (
     ),
 )
 
-_VK_UNIT_WIDTH = 28
-_VK_KEY_HEIGHT = 26
+_VK_UNIT_WIDTH = 24
+_VK_KEY_HEIGHT = 24
 _VK_KEY_GAP = 2
 
 
@@ -281,7 +281,12 @@ class CreateGestureWizard(QDialog):
         self._edit_mode = bool(edit_mode)
         self.setWindowTitle("Edit Custom Gesture" if self._edit_mode else "Create Custom Gesture")
         self.setModal(True)
-        self.setMinimumWidth(520)
+        # Bumped from 520 to 560 to give the mock keyboard a little
+        # breathing room. Keyboard's natural width with 24-px unit
+        # keys is ~386 px; 560 - 40 px content margins leaves ~520 px
+        # inner so the keyboard sits comfortably without visually
+        # crowding the dialog edges.
+        self.setMinimumWidth(560)
         self.setMinimumHeight(540)
         self._accent_color = accent_color
         self._original_name = original_name if self._edit_mode else None
