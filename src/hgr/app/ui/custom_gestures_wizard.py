@@ -112,8 +112,8 @@ _VK_LAYOUT_ROWS: tuple[tuple[tuple[str, str, float], ...], ...] = (
     ),
 )
 
-_VK_UNIT_WIDTH = 24
-_VK_KEY_HEIGHT = 24
+_VK_UNIT_WIDTH = 22
+_VK_KEY_HEIGHT = 22
 _VK_KEY_GAP = 2
 
 
@@ -188,13 +188,24 @@ class _VirtualKeyboard(QWidget):
 
     def _make_key(self, label: str, key: str, width_units: float) -> QPushButton:
         btn = QPushButton(label)
+        btn.setObjectName("vkKey")
         btn.setFocusPolicy(Qt.NoFocus)
         btn.setAutoDefault(False)
         btn.setDefault(False)
-        btn.setFixedSize(
-            int(width_units * _VK_UNIT_WIDTH + max(0, width_units - 1) * _VK_KEY_GAP),
-            _VK_KEY_HEIGHT,
-        )
+        # Stash the target pixel size on the button so
+        # _apply_button_style can bake it into the stylesheet.
+        # setFixedSize alone wasn't enforcing the size — the parent
+        # wizard's QPushButton rule (padding 8 18) was cascading to
+        # these buttons and Qt was honouring that padding's implied
+        # min content size, so each key rendered ~100 px wide
+        # regardless of what we asked for. Putting min-width and
+        # max-width inside the per-button CSS forces the size.
+        pixel_w = int(width_units * _VK_UNIT_WIDTH + max(0, width_units - 1) * _VK_KEY_GAP)
+        pixel_h = _VK_KEY_HEIGHT
+        btn._vk_w = pixel_w  # type: ignore[attr-defined]
+        btn._vk_h = pixel_h  # type: ignore[attr-defined]
+        btn.setFixedSize(pixel_w, pixel_h)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(lambda _checked=False, k=key: self._on_clicked(k))
         self._buttons_by_key.setdefault(key, []).append(btn)
@@ -228,31 +239,43 @@ class _VirtualKeyboard(QWidget):
                 self._apply_button_style(btn, sel)
 
     def _apply_button_style(self, btn: QPushButton, selected: bool) -> None:
+        # Bake explicit min/max width + height into the stylesheet
+        # so the size sticks even with the wizard's general
+        # QPushButton rule (which has padding 8 18) cascaded down.
+        # padding: 0 also has to be set explicitly here so the parent
+        # rule doesn't reintroduce horizontal slack.
+        w = int(getattr(btn, "_vk_w", _VK_UNIT_WIDTH))
+        h = int(getattr(btn, "_vk_h", _VK_KEY_HEIGHT))
+        size_css = (
+            f"  min-width: {w}px; max-width: {w}px;"
+            f"  min-height: {h}px; max-height: {h}px;"
+            f"  padding: 0;"
+        )
         if selected:
             btn.setStyleSheet(
-                f"QPushButton {{"
+                f"QPushButton#vkKey {{"
                 f"  background: {self._accent_color};"
                 f"  color: #0B1620;"
                 f"  border: 1px solid {self._accent_color};"
-                f"  border-radius: 4px;"
+                f"  border-radius: 3px;"
                 f"  font-weight: 700;"
-                f"  font-size: 11px;"
-                f"  padding: 0 2px;"
+                f"  font-size: 10px;"
+                f"{size_css}"
                 f"}}"
-                f"QPushButton:hover {{ filter: brightness(1.05); }}"
+                f"QPushButton#vkKey:hover {{ filter: brightness(1.05); }}"
             )
         else:
             btn.setStyleSheet(
-                "QPushButton {"
+                "QPushButton#vkKey {"
                 "  background: rgba(255,255,255,0.05);"
                 "  color: #DCE9F2;"
                 "  border: 1px solid rgba(255,255,255,0.15);"
-                "  border-radius: 4px;"
+                "  border-radius: 3px;"
                 "  font-weight: 600;"
-                "  font-size: 11px;"
-                "  padding: 0 2px;"
+                "  font-size: 10px;"
+                f"{size_css}"
                 "}"
-                "QPushButton:hover {"
+                "QPushButton#vkKey:hover {"
                 "  background: rgba(255,255,255,0.12);"
                 "  border-color: rgba(255,255,255,0.30);"
                 "}"
@@ -281,12 +304,12 @@ class CreateGestureWizard(QDialog):
         self._edit_mode = bool(edit_mode)
         self.setWindowTitle("Edit Custom Gesture" if self._edit_mode else "Create Custom Gesture")
         self.setModal(True)
-        # Bumped from 520 to 560 to give the mock keyboard a little
-        # breathing room. Keyboard's natural width with 24-px unit
-        # keys is ~386 px; 560 - 40 px content margins leaves ~520 px
-        # inner so the keyboard sits comfortably without visually
-        # crowding the dialog edges.
-        self.setMinimumWidth(560)
+        # Keyboard's natural width with 22-px unit keys is ~334 px,
+        # so the original 520-wide dialog has plenty of room. Kept
+        # the modest bump to 540 for a small safety margin without
+        # making the dialog feel oversized for users with the other
+        # action kinds (text / URL / command / file / overlay).
+        self.setMinimumWidth(540)
         self.setMinimumHeight(540)
         self._accent_color = accent_color
         self._original_name = original_name if self._edit_mode else None
