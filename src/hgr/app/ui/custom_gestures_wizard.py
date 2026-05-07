@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QComboBox,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +58,205 @@ class WizardResult:
     hold_seconds: float
     cooldown_seconds: float
     action: Action
+
+
+# Mock keyboard layout. (display_label, action_key_name, width_units).
+# 1.0 width-unit ≈ 28 px. Width-units roughly match a real US QWERTY
+# keyboard so the visual reads as familiar. Right-side modifier
+# duplicates (R-Shift / R-Ctrl etc.) collapse to the same key name on
+# selection — clicking 'Shift' twice on either side toggles the same
+# entry, which matches what the underlying SendInput layer does.
+_VK_LAYOUT_ROWS: tuple[tuple[tuple[str, str, float], ...], ...] = (
+    (
+        ("Esc", "esc", 1.5),
+        ("F1", "f1", 1.0), ("F2", "f2", 1.0), ("F3", "f3", 1.0), ("F4", "f4", 1.0),
+        ("F5", "f5", 1.0), ("F6", "f6", 1.0), ("F7", "f7", 1.0), ("F8", "f8", 1.0),
+        ("F9", "f9", 1.0), ("F10", "f10", 1.0), ("F11", "f11", 1.0), ("F12", "f12", 1.0),
+    ),
+    (
+        ("`", "`", 1.0),
+        ("1", "1", 1.0), ("2", "2", 1.0), ("3", "3", 1.0), ("4", "4", 1.0),
+        ("5", "5", 1.0), ("6", "6", 1.0), ("7", "7", 1.0), ("8", "8", 1.0),
+        ("9", "9", 1.0), ("0", "0", 1.0),
+        ("-", "-", 1.0), ("=", "=", 1.0),
+        ("Backspace", "backspace", 2.0),
+    ),
+    (
+        ("Tab", "tab", 1.5),
+        ("Q", "q", 1.0), ("W", "w", 1.0), ("E", "e", 1.0), ("R", "r", 1.0), ("T", "t", 1.0),
+        ("Y", "y", 1.0), ("U", "u", 1.0), ("I", "i", 1.0), ("O", "o", 1.0), ("P", "p", 1.0),
+        ("[", "[", 1.0), ("]", "]", 1.0), ("\\", "\\", 1.5),
+    ),
+    (
+        ("Caps", "caps", 1.75),
+        ("A", "a", 1.0), ("S", "s", 1.0), ("D", "d", 1.0), ("F", "f", 1.0), ("G", "g", 1.0),
+        ("H", "h", 1.0), ("J", "j", 1.0), ("K", "k", 1.0), ("L", "l", 1.0),
+        (";", ";", 1.0), ("'", "'", 1.0),
+        ("Enter", "enter", 2.25),
+    ),
+    (
+        ("Shift", "shift", 2.25),
+        ("Z", "z", 1.0), ("X", "x", 1.0), ("C", "c", 1.0), ("V", "v", 1.0), ("B", "b", 1.0),
+        ("N", "n", 1.0), ("M", "m", 1.0),
+        (",", ",", 1.0), (".", ".", 1.0), ("/", "/", 1.0),
+        ("Shift", "shift", 2.75),
+    ),
+    (
+        ("Ctrl", "ctrl", 1.5),
+        ("Win", "win", 1.25),
+        ("Alt", "alt", 1.25),
+        ("Space", "space", 6.25),
+        ("Alt", "alt", 1.25),
+        ("Win", "win", 1.25),
+        ("Ctrl", "ctrl", 1.5),
+    ),
+)
+
+_VK_UNIT_WIDTH = 28
+_VK_KEY_HEIGHT = 26
+_VK_KEY_GAP = 2
+
+
+class _VirtualKeyboard(QWidget):
+    """Compact clickable keyboard for the gesture wizard. Two modes:
+    'single' (only one key may be selected) and 'combo' (multi-key
+    chord). Emits keys_changed with the formatted string ('a',
+    'enter', 'ctrl+shift+t', etc.) so the wizard's QLineEdit can
+    follow along.
+
+    Future: detect the user's actual keyboard layout via Win32
+    GetKeyboardLayoutName and swap rows. For now we ship US QWERTY,
+    which covers the vast majority of bindable shortcuts the user is
+    likely to want."""
+
+    keys_changed = Signal(str)
+
+    def __init__(self, accent_color: str, parent=None):
+        super().__init__(parent)
+        self._accent_color = accent_color
+        self._mode = "single"
+        self._selected: list[str] = []
+        # Each action_key_name may be on multiple buttons (left + right
+        # Shift / Ctrl / Win / Alt). Keep them all so we can highlight
+        # both sides when one is clicked.
+        self._buttons_by_key: dict[str, list[QPushButton]] = {}
+        self._build()
+
+    def set_mode(self, mode: str) -> None:
+        """'single' = one key only (replaces on click); 'combo' = chord
+        (toggles each key on click). Clears the current selection on
+        mode change so a stale combo doesn't leak into a freshly-
+        selected single-key action."""
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self._selected = []
+        self._refresh_visual()
+        self.keys_changed.emit("")
+
+    def set_value(self, value: str) -> None:
+        """Sync from an external string so manual typing in the wizard's
+        QLineEdit reflects on the keyboard's highlighted keys."""
+        text = (value or "").strip().lower()
+        if not text:
+            self._selected = []
+        elif self._mode == "single":
+            self._selected = [text]
+        else:
+            self._selected = [p.strip() for p in text.split("+") if p.strip()]
+        self._refresh_visual()
+
+    def selection(self) -> str:
+        return self._format()
+
+    # --- internal -----------------------------------------------------
+
+    def _build(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(_VK_KEY_GAP)
+        for row_cells in _VK_LAYOUT_ROWS:
+            row = QHBoxLayout()
+            row.setSpacing(_VK_KEY_GAP)
+            row.setContentsMargins(0, 0, 0, 0)
+            for label, key, width_units in row_cells:
+                btn = self._make_key(label, key, width_units)
+                row.addWidget(btn)
+            row.addStretch(1)
+            outer.addLayout(row)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+    def _make_key(self, label: str, key: str, width_units: float) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
+        btn.setFixedSize(
+            int(width_units * _VK_UNIT_WIDTH + max(0, width_units - 1) * _VK_KEY_GAP),
+            _VK_KEY_HEIGHT,
+        )
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(lambda _checked=False, k=key: self._on_clicked(k))
+        self._buttons_by_key.setdefault(key, []).append(btn)
+        self._apply_button_style(btn, selected=False)
+        return btn
+
+    def _on_clicked(self, key: str) -> None:
+        if self._mode == "single":
+            # Toggle: clicking the already-selected key clears it,
+            # clicking any other replaces.
+            self._selected = [] if self._selected == [key] else [key]
+        else:
+            if key in self._selected:
+                self._selected.remove(key)
+            else:
+                self._selected.append(key)
+        self._refresh_visual()
+        self.keys_changed.emit(self._format())
+
+    def _format(self) -> str:
+        if not self._selected:
+            return ""
+        if self._mode == "single":
+            return self._selected[0]
+        return "+".join(self._selected)
+
+    def _refresh_visual(self) -> None:
+        for key, buttons in self._buttons_by_key.items():
+            sel = key in self._selected
+            for btn in buttons:
+                self._apply_button_style(btn, sel)
+
+    def _apply_button_style(self, btn: QPushButton, selected: bool) -> None:
+        if selected:
+            btn.setStyleSheet(
+                f"QPushButton {{"
+                f"  background: {self._accent_color};"
+                f"  color: #0B1620;"
+                f"  border: 1px solid {self._accent_color};"
+                f"  border-radius: 4px;"
+                f"  font-weight: 700;"
+                f"  font-size: 11px;"
+                f"  padding: 0 2px;"
+                f"}}"
+                f"QPushButton:hover {{ filter: brightness(1.05); }}"
+            )
+        else:
+            btn.setStyleSheet(
+                "QPushButton {"
+                "  background: rgba(255,255,255,0.05);"
+                "  color: #DCE9F2;"
+                "  border: 1px solid rgba(255,255,255,0.15);"
+                "  border-radius: 4px;"
+                "  font-weight: 600;"
+                "  font-size: 11px;"
+                "  padding: 0 2px;"
+                "}"
+                "QPushButton:hover {"
+                "  background: rgba(255,255,255,0.12);"
+                "  border-color: rgba(255,255,255,0.30);"
+                "}"
+            )
 
 
 class CreateGestureWizard(QDialog):
@@ -253,7 +453,23 @@ class CreateGestureWizard(QDialog):
         root.addWidget(self.action_value_label)
         self.action_value_edit = QLineEdit()
         self.action_value_edit.hide()
+        # Manual typing in the line edit updates the keyboard's
+        # highlighted keys so the two views stay in sync. Use
+        # textEdited (not textChanged) — textEdited fires only on
+        # actual user input, so the keyboard's own setText calls
+        # don't loop back through here.
+        self.action_value_edit.textEdited.connect(self._on_value_text_edited)
         root.addWidget(self.action_value_edit)
+
+        # Mock keyboard, shown only for keystroke / hotkey actions.
+        # Single-mode for keystroke (one key replaces another),
+        # combo-mode for hotkey (chord). The user can either type
+        # in the line edit above OR click keys here; both paths
+        # stay in sync.
+        self.action_value_keyboard = _VirtualKeyboard(self._accent_color, parent=self)
+        self.action_value_keyboard.hide()
+        self.action_value_keyboard.keys_changed.connect(self._on_keyboard_keys_changed)
+        root.addWidget(self.action_value_keyboard)
 
         root.addStretch(1)
 
@@ -318,6 +534,14 @@ class CreateGestureWizard(QDialog):
                     break
             if self._initial_action_value:
                 self.action_value_edit.setText(self._initial_action_value)
+                # Mirror to the mock keyboard for keystroke / hotkey
+                # so editing an existing gesture shows the saved keys
+                # already highlighted. The keyboard's set_mode call
+                # in _refresh_action_value already ran via the
+                # currentIndexChanged trigger above, so the mode is
+                # set; we only need to push the value in.
+                if self._initial_action_kind in ("keystroke", "hotkey"):
+                    self.action_value_keyboard.set_value(self._initial_action_value)
 
     def _refresh_action_value(self) -> None:
         kind = self.action_combo.currentData()
@@ -326,19 +550,54 @@ class CreateGestureWizard(QDialog):
             # hidden and the Start button disabled.
             self.action_value_label.hide()
             self.action_value_edit.hide()
+            self.action_value_keyboard.hide()
             self.action_value_edit.setText("")
             self._start_button.setEnabled(False)
             return
         # Look up the matching prompt + placeholder for the chosen kind.
         for _label, k, prompt, placeholder in _ACTION_KINDS:
             if k == kind:
-                self.action_value_label.setText(prompt)
+                # Keystroke / hotkey actions get the mock keyboard
+                # below the input plus a clearer prompt that mentions
+                # both input methods. Other action kinds keep their
+                # original "Key name" / "Keys (joined by +)" / "URL"
+                # / etc. prompt.
+                if kind in ("keystroke", "hotkey"):
+                    self.action_value_label.setText("Type or select key(s) below")
+                else:
+                    self.action_value_label.setText(prompt)
                 self.action_value_edit.setPlaceholderText(placeholder)
                 self.action_value_edit.setText("")
                 self.action_value_label.show()
                 self.action_value_edit.show()
+                if kind == "keystroke":
+                    self.action_value_keyboard.set_mode("single")
+                    self.action_value_keyboard.set_value("")
+                    self.action_value_keyboard.show()
+                elif kind == "hotkey":
+                    self.action_value_keyboard.set_mode("combo")
+                    self.action_value_keyboard.set_value("")
+                    self.action_value_keyboard.show()
+                else:
+                    self.action_value_keyboard.hide()
                 break
         self._start_button.setEnabled(True)
+
+    def _on_keyboard_keys_changed(self, value: str) -> None:
+        """User clicked / unclicked a key on the mock keyboard.
+        Push the formatted string into the line edit. Setting via
+        setText doesn't fire textEdited, so this won't loop back
+        through _on_value_text_edited."""
+        self.action_value_edit.setText(value)
+
+    def _on_value_text_edited(self, text: str) -> None:
+        """User typed in the line edit. Mirror to the keyboard's
+        highlighted keys so clicks-vs-typing stay consistent. No-op
+        when the keyboard isn't visible (non keystroke/hotkey
+        action), so other action kinds aren't affected."""
+        if not self.action_value_keyboard.isVisible():
+            return
+        self.action_value_keyboard.set_value(text)
 
     # --- validation + accept --------------------------------------------
 
