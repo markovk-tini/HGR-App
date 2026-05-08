@@ -17179,15 +17179,15 @@ Admin elevation
         if target.isNull() or target.width() <= 1 or target.height() <= 1:
             self.last_action_label.setText("Last action: clip canceled")
             return
-        # Cache warm-up + duration-correctness guard — without this
-        # the Processing pill appears for one frame and disappears
-        # (export thread returns instantly with empty manifest), or
-        # it produces a clip SHORTER than the user asked for. The
-        # ffmpeg trim filter caps at the available buffer length,
-        # so a 60 s clip request against a 35 s buffer silently
-        # writes a 35 s file. Refuse here instead, with a clear
-        # message that names the actual buffer size, so 60 s clips
-        # are always 60 s and 30 s clips are always 30 s.
+        # Cache warm-up guard — refuse only when the buffer is
+        # completely empty. We used to also refuse when the buffer
+        # had less than the requested duration, but the user wants
+        # "crossover" semantics: save whatever's there. ffmpeg /
+        # opencv naturally cap at the available buffer length, so
+        # a 60 s request against a 25 s buffer just produces a
+        # 25 s file. The success label below reports the ACTUAL
+        # saved duration (`actual_seconds`), so the user sees
+        # exactly what landed on disk.
         buffered_seconds = self._buffered_clip_seconds()
         if buffered_seconds <= 0.0:
             seg_seconds = int(round(float(self._clip_cache_segment_seconds)))
@@ -17196,23 +17196,17 @@ Admin elevation
                 f"{seg_seconds}s after Start before requesting a clip"
             )
             return
-        # Tiny tolerance for segment-boundary jitter: ffmpeg
-        # finalizes 10 s segments at keyframe boundaries, so the
-        # last segment may be 9.8-10.2 s. Without the tolerance, a
-        # buffer that's "60 s" by intention but 59.7 s by manifest
-        # arithmetic would refuse a 60 s clip even though the
-        # output would round to 60.0 s.
+        # Show the processing pill labeled with the smaller of
+        # requested vs buffered so the overlay text matches what
+        # the user is actually about to receive.
         margin = 0.5
-        if buffered_seconds + margin < float(duration_seconds):
-            self.last_action_label.setText(
-                "Last action: only "
-                f"{buffered_seconds:.1f}s of clip buffer available — keep "
-                f"recording for at least {int(duration_seconds)}s before "
-                f"requesting a {int(duration_seconds)}s clip"
-            )
-            return
+        effective_seconds = min(
+            float(duration_seconds), buffered_seconds + margin
+        )
         try:
-            self.processing_overlay.show_processing(f"Processing {duration_seconds}s clip")
+            self.processing_overlay.show_processing(
+                f"Processing {effective_seconds:.0f}s clip"
+            )
         except Exception:
             pass
 
