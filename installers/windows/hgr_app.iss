@@ -1,5 +1,24 @@
 ; Touchless Windows installer
 ; Place this file at installers/windows/hgr_app.iss
+;
+; -- Build modes --
+;   Default  : STUB installer. Tiny (~5-15 MB) Setup.exe that
+;              downloads Touchless_Payload_v<version>.zip from R2
+;              at install time and unpacks it into {app}. Mirrors the
+;              Adobe / Discord / Spotify pattern; lets the website
+;              link feel like a few-second click.
+;   /DMONOLITHIC=1 : the original behavior — Setup.exe carries the
+;              entire dist/Touchless tree inside it (~2.4 GB). Kept
+;              as the "offline edition" for users on planes / air-
+;              gapped machines, behind the MONOLITHIC=1 env flag in
+;              builder/windows/build_windows.bat.
+;
+; -- Defines passed in by build_windows.bat --
+;   /DPAYLOAD_URL=<full https URL>     (stub mode, required)
+;   /DPAYLOAD_FILE=<filename only>     (stub mode, required)
+;   /DPAYLOAD_SHA256=<lowercase hex>   (stub mode, required — verifies the
+;                                       downloaded zip before extraction)
+;   /DMONOLITHIC=1                     (optional — switches to embedded zip)
 
 #define MyAppName "Touchless"
 #define MyAppVersion "1.1.0b6"
@@ -7,6 +26,22 @@
 #define MyAppExeName "Touchless.exe"
 #define DistDir "..\..\dist\Touchless"
 #define IconFile "..\..\assets\icons\touchless_icon.ico"
+
+#ifndef MONOLITHIC
+  #define STUB
+#endif
+
+#ifdef STUB
+  #ifndef PAYLOAD_URL
+    #error "STUB build requires /DPAYLOAD_URL=https://..."
+  #endif
+  #ifndef PAYLOAD_FILE
+    #error "STUB build requires /DPAYLOAD_FILE=filename.zip"
+  #endif
+  #ifndef PAYLOAD_SHA256
+    #error "STUB build requires /DPAYLOAD_SHA256=lowercase-hex"
+  #endif
+#endif
 
 [Setup]
 AppId={{2C4EE680-53F5-4D83-92A8-ADF4D2D8794E}
@@ -64,7 +99,17 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "defender_exclusion"; Description: "Allow Touchless to use your GPU (adds the install folder to Microsoft Defender exclusions — one UAC prompt)"; GroupDescription: "GPU acceleration:"
 
 [Files]
+#ifdef MONOLITHIC
+; Original embedded-payload behavior. Pulls the entire PyInstaller
+; bundle into the installer at compile time. Used only when the
+; build is invoked with MONOLITHIC=1 (offline-edition build).
 Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
+#ifdef STUB
+; STUB mode has no embedded files — everything ships in the
+; downloaded payload zip. The [Code] section handles the download
+; and extraction.
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
@@ -119,4 +164,97 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Verb: run
 ; change uninstall harmlessly.
 Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ""try {{ Remove-MpPreference -ExclusionPath '{app}' -ErrorAction Stop }} catch {{ exit 0 }}"""; Verb: runas; Flags: shellexec waituntilterminated; RunOnceId: "RemoveDefenderExclusion"
 
-; Author: Konstantin Markov
+#ifdef STUB
+[Code]
+// Stub installer download + extract logic. Uses Inno Setup 6.1+'s
+// built-in CreateDownloadPage + DownloadTemporaryFile (no third-
+// party plugins). Flow:
+//   1. NextButtonClick(wpReady) shows the download page with a
+//      progress bar; user can't proceed until the download lands
+//      (or they cancel).
+//   2. CurStepChanged(ssInstall) unpacks the zip into the install
+//      directory via PowerShell's Expand-Archive (built into
+//      Windows 10+).
+//   3. The post-Install [Run] entries (Defender exclusion + Launch
+//      checkbox) and [Icons] / [UninstallRun] all reference the
+//      install directory, which is populated by step 2 — no
+//      other plumbing changes.
+//
+// SHA256 verification is built into DownloadPage.Add — if the
+// downloaded zip doesn't match PAYLOAD_SHA256 (baked in at
+// compile time by build_windows.bat), Inno raises an exception
+// before extraction runs.
+
+var
+  DownloadPage: TDownloadWizardPage;
+
+procedure InitializeWizard;
+begin
+  DownloadPage := CreateDownloadPage(
+    'Downloading Touchless',
+    'Please wait while Setup downloads the Touchless payload from the Touchless website.',
+    nil);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  if CurPageID = wpReady then begin
+    DownloadPage.Clear;
+    DownloadPage.Add('{#PAYLOAD_URL}', '{#PAYLOAD_FILE}', '{#PAYLOAD_SHA256}');
+    DownloadPage.Show;
+    try
+      try
+        DownloadPage.Download;
+        Result := True;
+      except
+        if DownloadPage.AbortedByUser then begin
+          Log('Aborted by user.');
+          Result := False;
+        end else begin
+          SuppressibleMsgBox(
+            'Download failed: ' + GetExceptionMessage,
+            mbCriticalError,
+            MB_OK,
+            IDOK);
+          Result := False;
+        end;
+      end;
+    finally
+      DownloadPage.Hide;
+    end;
+  end else
+    Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  ZipPath: String;
+  ExtractDir: String;
+  PsCmd: String;
+begin
+  if CurStep = ssInstall then begin
+    ZipPath := ExpandConstant('{tmp}\{#PAYLOAD_FILE}');
+    ExtractDir := ExpandConstant('{app}');
+    if not ForceDirectories(ExtractDir) then
+      RaiseException('Could not create install directory: ' + ExtractDir);
+    // PowerShell's Expand-Archive -- bundled with Windows 10+,
+    // handles arbitrary nested zip layouts, no extra binary to
+    // ship. -Force overwrites any partial extraction left by a
+    // previous failed attempt. Single-quoted PowerShell strings
+    // avoid having to backslash-escape the Windows paths.
+    PsCmd :=
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+      '-Command "Expand-Archive -LiteralPath ''' + ZipPath + ''' ' +
+      '-DestinationPath ''' + ExtractDir + ''' -Force"';
+    if not Exec('powershell.exe', PsCmd, '', SW_HIDE,
+                ewWaitUntilTerminated, ResultCode) then
+      RaiseException('Could not launch PowerShell to extract payload.');
+    if ResultCode <> 0 then
+      RaiseException('Payload extraction failed (PowerShell exit code ' +
+                     IntToStr(ResultCode) + '). Try running the installer ' +
+                     'again, or use the offline edition from the Touchless ' +
+                     'website if the issue persists.');
+  end;
+end;
+#endif

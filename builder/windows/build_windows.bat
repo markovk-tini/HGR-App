@@ -1,6 +1,20 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM === Touchless Windows release build ====================================
+REM
+REM Default mode: STUB INSTALLER. Produces a tiny (~5-15 MB) Setup.exe
+REM that downloads Touchless_Payload_v<version>.zip from R2 at install
+REM time. Both artifacts must be uploaded to R2 -- see the rclone hints
+REM at the end of this script.
+REM
+REM Set MONOLITHIC=1 in env to build the legacy ~2.4 GB embedded
+REM installer (offline edition / air-gapped fallback). The payload zip
+REM is still produced so the auto-update path stays unchanged.
+REM
+REM Set SKIP_SIGNING=1 to bypass dotnet sign (dev builds).
+REM ========================================================================
+
 set "SCRIPT_DIR=%~dp0"
 pushd "%SCRIPT_DIR%\..\.."
 set "ROOT=%CD%"
@@ -27,19 +41,26 @@ if not exist "%ISS%" (
   exit /b 1
 )
 
+REM Sanity-check for the streaming whisper binary (the actual one
+REM hgr_app.spec collects -- the older script looked for whisper-cli.exe
+REM which the app doesn't ship). Accepts any of the cuda/vulkan/cpu
+REM stream builds; the spec collects whichever ones are present.
 set "WHISPER_OK="
-if exist "%ROOT%\whisper.cpp\build\bin\Release\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper.cpp\build\bin\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper.cpp\build_stream\bin\Release\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper.cpp\build_stream\bin\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper.cpp\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper_bundle\build\bin\Release\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper_bundle\build\bin\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper_bundle\build_stream\bin\Release\whisper-cli.exe" set "WHISPER_OK=1"
-if exist "%ROOT%\whisper_bundle\build_stream\bin\whisper-cli.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper.cpp\build_cuda\bin\Release\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper.cpp\build_cuda\bin\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper.cpp\build_stream\bin\Release\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper.cpp\build_stream\bin\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper.cpp\build_vulkan\bin\Release\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper.cpp\build_vulkan\bin\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper_bundle\build_cuda\bin\Release\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper_bundle\build_cuda\bin\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper_bundle\build_stream\bin\Release\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper_bundle\build_stream\bin\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper_bundle\build_vulkan\bin\Release\whisper-stream.exe" set "WHISPER_OK=1"
+if exist "%ROOT%\whisper_bundle\build_vulkan\bin\whisper-stream.exe" set "WHISPER_OK=1"
 if not defined WHISPER_OK (
-  echo [ERROR] Could not find whisper-cli.exe under whisper.cpp\ or whisper_bundle\.
-  echo         Build whisper.cpp first, or place the CLI under either bundle's build\bin or build_stream\bin.
+  echo [ERROR] Could not find whisper-stream.exe under whisper.cpp\ or whisper_bundle\.
+  echo         Build whisper.cpp ^(cuda/vulkan/stream variants^) before running this script.
   popd
   exit /b 1
 )
@@ -58,12 +79,37 @@ if not exist "%ROOT%\whisper.cpp\models\ggml-silero-v5.1.2.bin" if not exist "%R
   echo [WARN] Optional VAD model not found: ggml-silero-v5.1.2.bin
 )
 
-echo [1/4] Cleaning previous build output...
+REM Read app version (single source of truth) -- used for payload zip name + URL.
+for /f "delims=" %%V in ('"%PYTHON%" -c "import re,sys; t=open(r'%ROOT%\src\hgr\__init__.py',encoding='utf-8').read(); m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', t); sys.stdout.write(m.group(1) if m else '')"') do set "APP_VERSION=%%V"
+if "%APP_VERSION%"=="" (
+  echo [ERROR] Could not read __version__ from src\hgr\__init__.py
+  popd
+  exit /b 1
+)
+set "PAYLOAD_FILE=Touchless_Payload_v%APP_VERSION%.zip"
+set "PAYLOAD_URL_BASE=https://pub-3116ebd541fa4ca18a84371667d029fe.r2.dev/windows/v%APP_VERSION%"
+set "PAYLOAD_URL=%PAYLOAD_URL_BASE%/%PAYLOAD_FILE%"
+
+if "%MONOLITHIC%"=="1" (
+  set "BUILD_MODE=monolithic"
+) else (
+  set "BUILD_MODE=stub"
+)
+
+echo [info] Build mode:    %BUILD_MODE%
+echo [info] App version:   %APP_VERSION%
+echo [info] Payload file:  %PAYLOAD_FILE%
+echo [info] Payload URL:   %PAYLOAD_URL%
+echo.
+
+echo [1/6] Cleaning previous build output...
 if exist "%ROOT%\build" rmdir /s /q "%ROOT%\build"
 if exist "%ROOT%\dist\Touchless" rmdir /s /q "%ROOT%\dist\Touchless"
 if exist "%ROOT%\dist\HGR App" rmdir /s /q "%ROOT%\dist\HGR App"
+if exist "%ROOT%\release\%PAYLOAD_FILE%" del /q "%ROOT%\release\%PAYLOAD_FILE%"
+if exist "%ROOT%\release\Touchless_Installer.exe" del /q "%ROOT%\release\Touchless_Installer.exe"
 
-echo [2/4] Building PyInstaller bundle...
+echo [2/6] Building PyInstaller bundle...
 "%PYTHON%" -m PyInstaller "%SPEC%" --noconfirm --clean
 if errorlevel 1 (
   echo [ERROR] PyInstaller build failed.
@@ -77,19 +123,50 @@ if not exist "%ROOT%\dist\Touchless\Touchless.exe" (
   exit /b 1
 )
 
-REM Sign the inner Touchless.exe BEFORE Inno Setup packs it, so both the
-REM ZIP-only update path AND the installer carry a signed exe. Skip
-REM signing entirely if SKIP_SIGNING=1 in env (useful for dev builds
-REM where you don't want to spend signature cost or hit Azure).
+REM Sign the inner Touchless.exe BEFORE we zip it, so users get a
+REM signed exe whether they install via the stub, the monolithic
+REM installer, or the auto-update zip path. Skip with SKIP_SIGNING=1.
 if not "%SKIP_SIGNING%"=="1" (
-  echo [2.5/4] Signing Touchless.exe...
+  echo [3/6] Signing Touchless.exe...
   call "%ROOT%\signing\sign-file.bat" "%ROOT%\dist\Touchless\Touchless.exe" "Touchless"
   if !errorlevel! neq 0 (
     echo [ERROR] Signing Touchless.exe failed. Set SKIP_SIGNING=1 to bypass for dev builds.
     popd
     exit /b 1
   )
+) else (
+  echo [3/6] Skipping signing of Touchless.exe ^(SKIP_SIGNING=1^)
 )
+
+REM Pack the dist tree into the payload zip BEFORE running ISCC, so
+REM the SHA256 we bake into the stub matches the bytes we'll upload.
+if not exist "%ROOT%\release" mkdir "%ROOT%\release"
+echo [4/6] Building payload zip ^(release\%PAYLOAD_FILE%^)...
+REM Use PowerShell Compress-Archive -- built into Windows, deterministic
+REM enough for our purposes, no extra build dependency.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%ROOT%\dist\Touchless\*' -DestinationPath '%ROOT%\release\%PAYLOAD_FILE%' -CompressionLevel Optimal -Force"
+if errorlevel 1 (
+  echo [ERROR] Payload zip build failed.
+  popd
+  exit /b 1
+)
+if not exist "%ROOT%\release\%PAYLOAD_FILE%" (
+  echo [ERROR] Payload zip not produced.
+  popd
+  exit /b 1
+)
+REM Compute SHA256 of the zip and stash for ISCC to bake into the
+REM stub. Lowercase hex (Inno's DownloadPage.Add accepts either case
+REM but lowercase is the convention).
+for /f "delims=" %%H in ('powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '%ROOT%\release\%PAYLOAD_FILE%').Hash.ToLower()"') do set "PAYLOAD_SHA256=%%H"
+if "%PAYLOAD_SHA256%"=="" (
+  echo [ERROR] Could not compute SHA256 for payload zip.
+  popd
+  exit /b 1
+)
+for %%S in ("%ROOT%\release\%PAYLOAD_FILE%") do set "PAYLOAD_SIZE=%%~zS"
+echo [info] Payload size:   %PAYLOAD_SIZE% bytes
+echo [info] Payload SHA256: %PAYLOAD_SHA256%
 
 if not exist "%ISCC%" (
   echo [ERROR] Inno Setup compiler not found at:
@@ -99,8 +176,16 @@ if not exist "%ISCC%" (
   exit /b 1
 )
 
-echo [3/4] Building installer...
-"%ISCC%" "%ISS%"
+echo [5/6] Building installer ^(%BUILD_MODE%^)...
+if "%BUILD_MODE%"=="stub" (
+  "%ISCC%" /Q ^
+    "/DPAYLOAD_URL=%PAYLOAD_URL%" ^
+    "/DPAYLOAD_FILE=%PAYLOAD_FILE%" ^
+    "/DPAYLOAD_SHA256=%PAYLOAD_SHA256%" ^
+    "%ISS%"
+) else (
+  "%ISCC%" /Q "/DMONOLITHIC=1" "%ISS%"
+)
 if errorlevel 1 (
   echo [ERROR] Installer build failed.
   popd
@@ -109,7 +194,7 @@ if errorlevel 1 (
 
 REM Sign the installer Inno Setup just produced. Same skip flag applies.
 if not "%SKIP_SIGNING%"=="1" (
-  echo [3.5/4] Signing installer...
+  echo [5.5/6] Signing installer...
   call "%ROOT%\signing\sign-file.bat" "%ROOT%\release\Touchless_Installer.exe" "Touchless Installer"
   if !errorlevel! neq 0 (
     echo [ERROR] Signing installer failed. Set SKIP_SIGNING=1 to bypass for dev builds.
@@ -118,21 +203,39 @@ if not "%SKIP_SIGNING%"=="1" (
   )
 )
 
-echo [4/4] Building app-only update zip (small download for incremental updates)...
+echo [6/6] Building app-only update zip ^(small download for incremental updates^)...
 "%PYTHON%" "%ROOT%\builder\windows\build_app_update_zip.py"
 if errorlevel 1 (
   echo [WARN] App-only zip build failed; full installer is still good.
 )
 
+REM Print the installer size so the operator can sanity-check stub mode
+REM (~5-15 MB) vs monolithic mode (~2.4 GB) at a glance.
+for %%S in ("%ROOT%\release\Touchless_Installer.exe") do set "INSTALLER_SIZE=%%~zS"
+
 echo.
-echo Build complete.
-echo Bundle:        %ROOT%\dist\Touchless
-echo Installer:     %ROOT%\release\Touchless_Installer.exe
-echo App update zip:%ROOT%\release\Touchless_App_Update_*.zip
+echo ===============================================================
+echo Build complete.  Mode: %BUILD_MODE%   Version: %APP_VERSION%
+echo ===============================================================
+echo Bundle:           %ROOT%\dist\Touchless
+echo Installer:        %ROOT%\release\Touchless_Installer.exe   ^(%INSTALLER_SIZE% bytes^)
+echo Payload zip:      %ROOT%\release\%PAYLOAD_FILE%   ^(%PAYLOAD_SIZE% bytes^)
+echo App update zip:   %ROOT%\release\Touchless_App_Update_*.zip
 echo.
-echo Upload BOTH artifacts to the GitHub release for that version:
-echo   - Touchless_Installer.exe   (full install / first download / breaking change)
-echo   - Touchless_App_Update_*.zip (small auto-update for existing users)
+if "%BUILD_MODE%"=="stub" (
+  echo Stub mode: BOTH the installer AND the payload zip MUST be uploaded
+  echo to R2, otherwise users will get a download error during install.
+  echo.
+  echo Upload commands ^(rclone^):
+  echo   rclone copyto "release\Touchless_Installer.exe" r2:hgr-downloads/windows/v%APP_VERSION%/Touchless_Installer.exe --s3-upload-cutoff=100M --s3-chunk-size=100M
+  echo   rclone copyto "release\%PAYLOAD_FILE%" r2:hgr-downloads/windows/v%APP_VERSION%/%PAYLOAD_FILE% --s3-upload-cutoff=100M --s3-chunk-size=100M
+) else (
+  echo Monolithic mode: upload the installer + the app-update zip to
+  echo R2 / GitHub release. The payload zip is for the auto-update path
+  echo only; users won't download it directly because everything is in
+  echo the installer.
+)
+echo.
 
 popd
 exit /b 0
