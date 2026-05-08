@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hgr.debug.chrome_controller import ChromeController
-from hgr.debug.desktop_controller import DesktopController
+from hgr.debug.desktop_controller import DesktopAppEntry, DesktopController
 from hgr.debug.spotify_controller import SpotifyController
 from hgr.voice.command_processor import VoiceCommandContext, VoiceCommandProcessor, VoiceProfileStore
 
@@ -29,6 +29,26 @@ class VoiceCommandProcessorTest(unittest.TestCase):
             spotify_controller=SpotifyController(env_paths=(), token_paths=(), executable_paths=()),
             desktop_controller=DesktopController(outlook_paths=()),
             profile_store=VoiceProfileStore(path=profile_path),
+        )
+
+    def _app_entry(
+        self,
+        processor: VoiceCommandProcessor,
+        display_name: str,
+        target: str,
+        *,
+        source: str = "start_apps",
+        aliases: tuple[str, ...] = (),
+        category: str = "gaming",
+    ) -> DesktopAppEntry:
+        controller = processor.desktop_controller
+        return DesktopAppEntry(
+            display_name=display_name,
+            normalized_name=controller._normalize_application_name(display_name),
+            target=target,
+            source=source,
+            aliases=controller._build_entry_aliases(display_name, aliases),
+            category=category,
         )
 
     def test_parse_play_spotify_routes_to_resume(self) -> None:
@@ -275,6 +295,60 @@ class VoiceCommandProcessorTest(unittest.TestCase):
         assert intent is not None
         self.assertEqual(intent.app_name, "chrome")
         self.assertEqual(intent.query, "youtube")
+
+    def test_execute_ambiguous_app_prompt_uses_letters_and_opens_exact_selection(self) -> None:
+        with self._profile_dir() as tmp_dir:
+            processor = self._make_processor(tmp_dir / "voice_profile.json")
+            sequel = self._app_entry(processor, "Slay the Spire 2", "C:/Games/SlayTheSpire2.exe")
+            original = self._app_entry(processor, "Slay the Spire", "C:/Games/SlayTheSpire.exe")
+
+            with patch.object(
+                processor.desktop_controller,
+                "resolve_named_application_options",
+                return_value=(sequel, [sequel, original]),
+            ), patch.object(
+                processor.desktop_controller,
+                "can_resolve_application",
+                return_value=True,
+            ):
+                prompt = processor.execute("open slay the spire")
+
+            self.assertFalse(prompt.success)
+            self.assertEqual(prompt.target, "voice_selection")
+            self.assertIn("A. Slay the Spire 2", prompt.display_text or "")
+            self.assertIn("B. Slay the Spire", prompt.display_text or "")
+
+            with patch.object(processor.desktop_controller, "open_desktop_entry", return_value=True) as open_mock:
+                followup = processor.execute("open option a")
+
+        self.assertTrue(followup.success)
+        open_mock.assert_called_once()
+        self.assertEqual(open_mock.call_args.args[0].target, "C:/Games/SlayTheSpire2.exe")
+
+    def test_execute_ambiguous_app_prompt_still_accepts_number_selection(self) -> None:
+        with self._profile_dir() as tmp_dir:
+            processor = self._make_processor(tmp_dir / "voice_profile.json")
+            fallout_3 = self._app_entry(processor, "Fallout 3", "C:/Games/Fallout3.exe")
+            new_vegas = self._app_entry(processor, "Fallout New Vegas", "C:/Games/FalloutNV.exe")
+
+            with patch.object(
+                processor.desktop_controller,
+                "resolve_named_application_options",
+                return_value=(fallout_3, [fallout_3, new_vegas]),
+            ), patch.object(
+                processor.desktop_controller,
+                "can_resolve_application",
+                return_value=True,
+            ):
+                prompt = processor.execute("open fallout")
+
+            self.assertFalse(prompt.success)
+            with patch.object(processor.desktop_controller, "open_desktop_entry", return_value=True) as open_mock:
+                followup = processor.execute("open one")
+
+        self.assertTrue(followup.success)
+        open_mock.assert_called_once()
+        self.assertEqual(open_mock.call_args.args[0].target, "C:/Games/Fallout3.exe")
 
     def test_execute_routes_to_spotify_search_request(self) -> None:
         with self._profile_dir() as tmp_dir:

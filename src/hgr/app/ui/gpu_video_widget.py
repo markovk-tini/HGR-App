@@ -181,6 +181,8 @@ class GpuVideoWidget(QWidget):
                 anchor = mouse_overlay_raw.get("anchor")
                 cursor = mouse_overlay_raw.get("cursor")
                 if bounds is not None and len(bounds) == 4:
+                    raw_active = mouse_overlay_raw.get("active_monitor_index")
+                    active_idx = raw_active if isinstance(raw_active, int) else None
                     self._mouse_overlay = {
                         "bounds": tuple(float(v) for v in bounds),
                         "anchor": (
@@ -193,6 +195,7 @@ class GpuVideoWidget(QWidget):
                             if cursor is not None and len(cursor) == 2
                             else None
                         ),
+                        "active_monitor_index": active_idx,
                     }
                 else:
                     self._mouse_overlay = None
@@ -359,12 +362,38 @@ class GpuVideoWidget(QWidget):
             screens = QGuiApplication.screens()
             map_origin = None  # (mx, my, scale, v_left, v_top, v_w, v_h)
             if screens:
-                v_left = min(s.geometry().x() for s in screens)
-                v_top = min(s.geometry().y() for s in screens)
-                v_right = max(s.geometry().x() + s.geometry().width() for s in screens)
-                v_bottom = max(s.geometry().y() + s.geometry().height() for s in screens)
-                v_w = max(1, v_right - v_left)
-                v_h = max(1, v_bottom - v_top)
+                primary = QGuiApplication.primaryScreen()
+                active_idx = self._mouse_overlay.get("active_monitor_index")
+                # Single-monitor mode: the chosen monitor IS the
+                # whole map (cursor mapping is constrained to it,
+                # so visually it makes sense to fill the box with
+                # just that monitor). Compute layout from only the
+                # chosen screen's geometry so the rest of the
+                # function — cache signature, pixmap rebuild, blit,
+                # cursor dot — operates on a single rectangle the
+                # same way it would for an all-monitors layout.
+                #
+                # Multi-monitor / All-Monitors mode: keep the
+                # virtual-desktop union with each monitor in
+                # proportional position.
+                single_geo = None
+                if isinstance(active_idx, int) and 0 <= active_idx < len(screens):
+                    try:
+                        single_geo = screens[active_idx].geometry()
+                    except Exception:
+                        single_geo = None
+                if single_geo is not None:
+                    v_left = single_geo.x()
+                    v_top = single_geo.y()
+                    v_w = max(1, single_geo.width())
+                    v_h = max(1, single_geo.height())
+                else:
+                    v_left = min(s.geometry().x() for s in screens)
+                    v_top = min(s.geometry().y() for s in screens)
+                    v_right = max(s.geometry().x() + s.geometry().width() for s in screens)
+                    v_bottom = max(s.geometry().y() + s.geometry().height() for s in screens)
+                    v_w = max(1, v_right - v_left)
+                    v_h = max(1, v_bottom - v_top)
                 inset = 12.0
                 inner_w = max(40.0, box_rect.width() - 2 * inset)
                 inner_h = max(40.0, box_rect.height() - 2 * inset)
@@ -374,10 +403,10 @@ class GpuVideoWidget(QWidget):
                 mx = box_rect.x() + (box_rect.width() - map_w) / 2.0
                 my = box_rect.y() + (box_rect.height() - map_h) / 2.0
                 map_origin = (mx, my, scale, v_left, v_top, v_w, v_h)
-                primary = QGuiApplication.primaryScreen()
-                # Cache key: every input that changes the rendered
-                # layout. Box position + size, virtual desktop, and
-                # each screen geometry + which one is primary.
+                # Cache key. Box position + size, computed v-rect,
+                # screen list, and active_idx — covers every input
+                # that changes the rendered layout including
+                # switching from "All Monitors" to a single screen.
                 signature = (
                     int(round(box_rect.x())),
                     int(round(box_rect.y())),
@@ -390,6 +419,7 @@ class GpuVideoWidget(QWidget):
                          s == primary)
                         for s in screens
                     ),
+                    active_idx if isinstance(active_idx, int) else -1,
                 )
                 if signature != self._mouse_box_signature or self._mouse_box_pixmap is None:
                     pm_w = max(1, int(round(box_rect.width())))
@@ -406,17 +436,52 @@ class GpuVideoWidget(QWidget):
                         local_mx = mx - box_rect.x()
                         local_my = my - box_rect.y()
                         pm_painter.fillRect(QRectF(local_mx, local_my, map_w, map_h), QColor(8, 14, 26, 140))
-                        for screen in screens:
-                            geo = screen.geometry()
-                            sx = local_mx + (geo.x() - v_left) * scale
-                            sy = local_my + (geo.y() - v_top) * scale
-                            sw = geo.width() * scale
-                            sh = geo.height() * scale
-                            fill = QColor(58, 122, 96, 200) if screen == primary else QColor(39, 72, 108, 200)
-                            pm_painter.fillRect(QRectF(sx, sy, sw, sh), fill)
-                            pm_painter.setPen(QPen(QColor(228, 236, 243, 220), 1))
+                        # Per-monitor fill rule (mirrors the OpenCV
+                        # overlay in mouse_overlay.py and the Save
+                        # Locations preview):
+                        #   active_idx is None -> historical look
+                        #     (primary in green, others in blue)
+                        #   active_idx == this screen's index -> bright
+                        #     accent green; non-active screens get a
+                        #     dim slate so the user can see at a
+                        #     glance which display the cursor is
+                        #     constrained to.
+                        accent_fill = QColor(140, 220, 184, 220)
+                        accent_border = QColor(228, 240, 232, 240)
+                        neutral_primary = QColor(58, 122, 96, 200)
+                        neutral_secondary = QColor(39, 72, 108, 200)
+                        neutral_border = QColor(228, 236, 243, 220)
+                        if single_geo is not None:
+                            # Single-monitor mode: that one screen IS
+                            # the whole map. Fill the entire area
+                            # (which equals single_geo at this point)
+                            # with the accent color so the user sees
+                            # one bold rectangle, not a tiny green
+                            # speck inside a multi-screen layout.
+                            pm_painter.fillRect(QRectF(local_mx, local_my, map_w, map_h), accent_fill)
+                            pm_painter.setPen(QPen(accent_border, 2))
                             pm_painter.setBrush(Qt.NoBrush)
-                            pm_painter.drawRect(QRectF(sx, sy, sw, sh))
+                            pm_painter.drawRect(QRectF(local_mx, local_my, map_w, map_h))
+                            label = f"Monitor {active_idx + 1}"
+                            pm_painter.setPen(QPen(QColor(245, 250, 252, 240)))
+                            pm_painter.drawText(
+                                QRectF(local_mx, local_my, map_w, map_h),
+                                int(Qt.AlignCenter),
+                                label,
+                            )
+                        else:
+                            for idx, screen in enumerate(screens):
+                                geo = screen.geometry()
+                                sx = local_mx + (geo.x() - v_left) * scale
+                                sy = local_my + (geo.y() - v_top) * scale
+                                sw = geo.width() * scale
+                                sh = geo.height() * scale
+                                fill = neutral_primary if screen == primary else neutral_secondary
+                                border = neutral_border
+                                pm_painter.fillRect(QRectF(sx, sy, sw, sh), fill)
+                                pm_painter.setPen(QPen(border, 1))
+                                pm_painter.setBrush(Qt.NoBrush)
+                                pm_painter.drawRect(QRectF(sx, sy, sw, sh))
                     finally:
                         pm_painter.end()
                     self._mouse_box_pixmap = pm

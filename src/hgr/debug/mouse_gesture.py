@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 from ..gesture.analysis.geometry import clamp01
@@ -57,14 +58,19 @@ class MouseGestureTracker:
         vertical_margin: float = 0.12,
         cursor_reference_width: float = 0.40,
         cursor_reference_height: float = 0.34,
-        control_box_center_x: float = 0.50,
+        control_box_center_x: float = 0.62,
         control_box_center_y: float = 0.55,
-        control_box_area: float = 0.36,
+        control_box_area: float = 0.18,
         control_box_aspect_power: float = 0.40,
-        control_box_min_width: float = 0.58,
-        control_box_max_width: float = 0.84,
-        control_box_min_height: float = 0.42,
-        control_box_max_height: float = 0.66,
+        # Mouse-pad-style box: small forearm-sized patch in the
+        # mirrored frame that maps to the full monitor. Min widths
+        # and heights here used to be ~0.58/0.42 (i.e. always at
+        # least half the frame), which clamped the smaller box back
+        # up to the old "fills most of the camera" footprint.
+        control_box_min_width: float = 0.30,
+        control_box_max_width: float = 0.62,
+        control_box_min_height: float = 0.32,
+        control_box_max_height: float = 0.62,
         scroll_confirm_frames: int = 2,
         scroll_hold_seconds: float = 0.28,
         scroll_step_distance: float = 0.065,
@@ -106,6 +112,12 @@ class MouseGestureTracker:
         self.pose_grace_seconds = float(pose_grace_seconds)
         self.no_hand_grace_seconds = float(no_hand_grace_seconds)
         self._desktop_aspect_ratio = 16.0 / 9.0
+        # When the cursor is constrained to a single monitor (the
+        # default case), skip the aspect-compression treatment so
+        # the camera-frame box hugs the monitor's actual aspect.
+        # set_desktop_bounds() flips this to False when the bounds
+        # span a multi-monitor virtual desktop (>= ~21:9).
+        self._use_raw_aspect = True
         self.reset()
 
     @property
@@ -149,6 +161,14 @@ class MouseGestureTracker:
         width = max(1.0, float(width))
         height = max(1.0, float(height))
         self._desktop_aspect_ratio = max(0.80, min(4.50, width / height))
+        # Single-monitor (typical 4:3 .. 21:9 range) → tightly match
+        # the monitor's aspect so the camera-frame box doesn't have
+        # large empty horizontal padding around the rendered green
+        # monitor rectangle. Multi-monitor (32:9 dual or wider) →
+        # keep the compressed aspect_power treatment so an extreme
+        # virtual desktop doesn't produce a comically flat box that
+        # hand-tracking can't comfortably cover.
+        self._use_raw_aspect = self._desktop_aspect_ratio <= 2.40
 
     def reset(self) -> None:
         self._mode_enabled = False
@@ -509,10 +529,31 @@ class MouseGestureTracker:
         available_width = max(0.24, available_right - available_left)
         available_height = max(0.24, available_bottom - available_top)
 
-        compressed_aspect = max(0.90, min(2.10, self._desktop_aspect_ratio ** self.control_box_aspect_power))
-        target_area = max(0.18, min(0.44, self.control_box_area))
-        width = math.sqrt(target_area * compressed_aspect)
-        height = math.sqrt(target_area / compressed_aspect)
+        # The previous version computed the box's normalized
+        # width/height from the desktop aspect directly, but the
+        # camera frame itself is 16:9 — so a normalized box aspect
+        # of 1.78 ends up displaying as a 1.78 * (16/9) = 3.16
+        # visual aspect (way wider than the monitor). The user
+        # reported this as "too much mouse control area to the
+        # left and right of the monitor". Fix: divide by the
+        # camera-frame aspect so visual aspect ≈ monitor aspect.
+        # Assumes 16:9 frame (the common webcam case); ultrawide
+        # frame cameras would still get a slightly off match,
+        # but the result is far closer than treating the frame as
+        # square.
+        FRAME_ASPECT = 16.0 / 9.0
+        if getattr(self, "_use_raw_aspect", True):
+            target_visual_aspect = max(0.90, min(2.40, self._desktop_aspect_ratio))
+        else:
+            target_visual_aspect = max(0.90, min(2.40, self._desktop_aspect_ratio ** self.control_box_aspect_power))
+        # Convert visual-aspect to normalized-aspect (divide by frame
+        # aspect). For a 16:9 monitor on a 16:9 frame this yields 1.0
+        # → square in normalized coords → 16:9 visually, matching the
+        # monitor's aspect exactly.
+        box_aspect = target_visual_aspect / FRAME_ASPECT
+        target_area = max(0.08, min(0.44, self.control_box_area))
+        width = math.sqrt(target_area * box_aspect)
+        height = math.sqrt(target_area / box_aspect)
         width = min(max(width, min(self.control_box_min_width, available_width)), min(self.control_box_max_width, available_width))
         height = min(max(height, min(self.control_box_min_height, available_height)), min(self.control_box_max_height, available_height))
 
@@ -559,8 +600,19 @@ class MouseGestureTracker:
         if self._cursor_position is None:
             self._cursor_position = cursor_seed if cursor_seed is not None else (target_x, target_y)
         if reanchor or self._cursor_anchor_hand is None or self._cursor_anchor_screen is None:
-            if cursor_seed is not None:
-                self._cursor_position = cursor_seed
+            # Refresh the anchor refs (used by the debug overlay
+            # only) but DO NOT warp _cursor_position to cursor_seed.
+            # The previous version snapped here, which produced the
+            # "cursor rubber-bands toward the OS cursor's last
+            # position the moment a click is detected" symptom: a
+            # single-frame motion-pose dropout between cursor
+            # tracking and pinch detection cleared
+            # _cursor_reference_active, so the next frame's pinch
+            # entered _update_cursor with reanchor=True and warped
+            # the smoothed cursor onto the lagged OS cursor — often
+            # mid-screen, producing the visible jump-on-click. The
+            # absolute palm→screen mapping with smoothing converges
+            # naturally without any warp here.
             self._cursor_anchor_hand = (float(hand_reading.palm.center[0]), float(hand_reading.palm.center[1]))
             self._cursor_anchor_screen = (target_x, target_y)
 
@@ -570,28 +622,56 @@ class MouseGestureTracker:
         if motion <= self.cursor_deadzone:
             return self._cursor_position
 
-        # Velocity-adaptive alpha tuned for cursor precision. The
-        # earlier curve held alpha around 0.25-0.40 for slow motion,
-        # which made the cursor lag a few frames behind the
-        # fingertip target — when the user tried to land on a small
-        # tutorial dot the cursor would drift past, the user would
-        # correct, the cursor would over-correct in the other
-        # direction, etc. ("rubber-banding"). Higher alpha at slow
-        # speeds keeps the cursor hugging the target so precision
-        # moves settle cleanly.
+        # Velocity-adaptive alpha tuned for cursor precision and
+        # smoothness. User reported the previous curve still felt
+        # "snappy / jittery" — bumping alpha down across the band
+        # gives more visible damping on every move WITHOUT making
+        # fast sweeps feel laggy (the upper end stays close to
+        # near-passthrough). Curve points:
         #
         #   motion just above deadzone (~0.012, slow precision):
-        #     alpha = 0.55  -> cursor follows tightly
+        #     alpha = 0.40  -> heavy smoothing for hover/aim
         #   motion ~0.05 (deliberate move):
-        #     alpha ~ 0.78  -> responsive
+        #     alpha ~ 0.66  -> smooth but responsive
         #   motion >= 0.10 (fast sweep):
-        #     alpha = 0.92  -> near-passthrough so big moves
-        #                      don't lag noticeably
+        #     alpha = 0.86  -> near-passthrough so big sweeps
+        #                      arrive in the same frame batch
         if motion >= 0.10:
-            alpha = 0.92
+            alpha = 0.86
         else:
             t = motion / 0.10  # 0..1 across the slow-to-fast band
-            alpha = 0.55 + (0.92 - 0.55) * t
+            alpha = 0.40 + (0.86 - 0.40) * t
+
+        # Click-latch damping: shrink alpha hard for the FIRST
+        # ~120 ms after a pinch starts so the click lands on
+        # whatever the user was aiming at when they began the
+        # pinch — protects against the natural index-curl-toward-
+        # thumb motion of pinching dragging the cursor off-target.
+        # After that brief settle, drop back to normal alpha so a
+        # click-and-drag doesn't feel sluggish for the whole drag
+        # duration. Earlier version applied the damping for the
+        # entire pinch hold, which the user reported as "very
+        # leggy when clicking" — every drag felt stuck because
+        # alpha was 0.35x normal the whole way through.
+        #
+        # We pick the most recent press timestamp across both
+        # finger states (left/right pinch) so right-click pinches
+        # get the same stabilization on their first frames.
+        latest_press = None
+        for state in (self._index_state, self._middle_state):
+            if state.press_started_at is not None:
+                if latest_press is None or state.press_started_at > latest_press:
+                    latest_press = state.press_started_at
+        if latest_press is not None:
+            press_age = max(0.0, time.monotonic() - latest_press)
+            if press_age < 0.12:
+                # Click moment — heavy latch, cursor barely moves
+                # so the click lands cleanly.
+                alpha *= 0.18
+            # else: pinch is held but past the click-settle window;
+            # use the natural alpha so click-and-drag tracks the
+            # hand normally.
+
         self._cursor_position = (
             clamp01(self._cursor_position[0] + alpha * dx),
             clamp01(self._cursor_position[1] + alpha * dy),
@@ -599,88 +679,69 @@ class MouseGestureTracker:
         return self._cursor_position
 
     def _update_left_sequence(self, hand_reading, now: float) -> tuple[bool, bool, bool]:
-        finger = hand_reading.fingers["index"]
-        openish = self._primary_open(finger)
-        curled = self._click_curled(finger)
-        context_ready = self._left_click_context_ready(hand_reading)
+        """Pinch-driven left button sequence. State machine:
+            not-pinching -> pinching: emit left_press, hold drag.
+            pinching -> not-pinching: emit left_release.
+        The press/release pair turns into a clean MOUSEEVENTF_LEFTDOWN
+        + MOUSEEVENTF_LEFTUP at the controller layer, which Windows
+        interprets as a single left click for short taps and as a
+        click-and-drag for held pinches — both for free, no separate
+        click event needed.
+
+        We do NOT also emit left_click on tap-style releases: the
+        controller's left_click() helper fires its own synthetic
+        down+up, which when stacked on top of the press/release pair
+        produces down-up-DOWN-UP per tap. Windows reads that as a
+        double-click or, more commonly, drops one half of it
+        entirely — that's the "doesn't actually click always even
+        though the app detected clicking" symptom the user reported.
+        """
+        pinching = self._pinch_active(hand_reading, "index")
+        was_pressing = self._index_state.press_started_at is not None
 
         if self._dragging:
-            if openish or not context_ready:
+            # We're already in held-mouse-button mode. Stay there
+            # until the pinch is released.
+            if not pinching:
                 self._dragging = False
-                self._reset_sequence(self._index_state, preserve_open=openish)
+                self._reset_sequence(self._index_state, preserve_open=not pinching)
                 return False, True, False
             return False, False, False
 
-        if not context_ready:
-            self._reset_sequence(self._index_state, preserve_open=openish)
-            return False, False, False
+        if pinching and not was_pressing:
+            # Pinch just started. Emit press + enter drag immediately
+            # so the mouse button goes down on the first frame —
+            # users expect "tips touch -> button down" with no
+            # buffering delay.
+            self._index_state.press_started_at = now
+            self._dragging = True
+            return True, False, False
 
-        if openish:
-            left_click = False
-            if (
-                self._index_state.press_started_at is not None
-                and self._index_state.curl_frames >= self.curl_confirm_frames
-            ):
-                duration = now - self._index_state.press_started_at
-                if duration < self.drag_hold_seconds:
-                    left_click = True
-            self._index_state.open_frames = min(self._index_state.open_frames + 1, self.open_confirm_frames + 2)
-            self._index_state.curl_frames = 0
-            self._index_state.press_started_at = None
-            return False, False, left_click
+        if not pinching and was_pressing:
+            # Pinch just released. Emit release; the press+release
+            # already produces a single Windows click for short
+            # pinches, so no extra left_click event needed.
+            self._reset_sequence(self._index_state, preserve_open=True)
+            return False, True, False
 
-        if curled and self._index_state.open_frames >= self.open_confirm_frames:
-            self._index_state.curl_frames += 1
-            if (
-                self._index_state.curl_frames >= self.curl_confirm_frames
-                and self._index_state.press_started_at is None
-            ):
-                self._index_state.press_started_at = now
-            if (
-                self._index_state.press_started_at is not None
-                and (now - self._index_state.press_started_at) >= self.drag_hold_seconds
-            ):
-                self._dragging = True
-                return True, False, False
-            return False, False, False
-
-        self._reset_sequence(self._index_state, preserve_open=openish)
+        # No edge — either still pinching but already dragging
+        # (handled above), or still not pinching.
         return False, False, False
 
     def _update_right_sequence(self, hand_reading, now: float) -> bool:
-        finger = hand_reading.fingers["middle"]
-        openish = self._primary_open(finger)
-        curled = self._click_curled(finger)
-        context_ready = self._right_click_context_ready(hand_reading)
+        """Pinch-driven right button sequence. Right-click is one-
+        shot rather than held (the OS doesn't have a meaningful
+        "right-click drag" mode), so we emit right_click on the
+        not-pinching -> pinching edge and then hold off until the
+        user releases."""
+        pinching = self._pinch_active(hand_reading, "middle")
+        was_pressing = self._middle_state.press_started_at is not None
 
-        if not context_ready:
-            self._reset_sequence(self._middle_state, preserve_open=openish)
-            return False
-
-        if openish:
-            right_click = False
-            if (
-                self._middle_state.press_started_at is not None
-                and self._middle_state.curl_frames >= self.curl_confirm_frames
-            ):
-                duration = now - self._middle_state.press_started_at
-                if duration <= max(self.drag_hold_seconds + 0.20, 0.58):
-                    right_click = True
-            self._middle_state.open_frames = min(self._middle_state.open_frames + 1, self.open_confirm_frames + 2)
-            self._middle_state.curl_frames = 0
-            self._middle_state.press_started_at = None
-            return right_click
-
-        if curled and self._middle_state.open_frames >= self.open_confirm_frames:
-            self._middle_state.curl_frames += 1
-            if (
-                self._middle_state.curl_frames >= self.curl_confirm_frames
-                and self._middle_state.press_started_at is None
-            ):
-                self._middle_state.press_started_at = now
-            return False
-
-        self._reset_sequence(self._middle_state, preserve_open=openish)
+        if pinching and not was_pressing:
+            self._middle_state.press_started_at = now
+            return True
+        if not pinching and was_pressing:
+            self._reset_sequence(self._middle_state, preserve_open=True)
         return False
 
     def _reset_sequence(self, state: _FingerSequenceState, *, preserve_open: bool = False) -> None:
@@ -756,9 +817,15 @@ class MouseGestureTracker:
         )
 
     def _click_pose_active(self, hand_reading, *, primary: str) -> bool:
-        if primary == "index":
-            return self._left_click_context_ready(hand_reading) and self._click_curled(hand_reading.fingers["index"])
-        return self._right_click_context_ready(hand_reading) and self._click_curled(hand_reading.fingers["middle"])
+        # Was: curl-based check ("the named finger is currently
+        # curled, and the rest of the hand is in the click context").
+        # Now: pinch-based — _pinch_active already does the
+        # "tip-to-thumb close + other 3 fingers relaxed" composite
+        # check, which IS the new click pose. The primary's not-fully-
+        # extended state is implicit (you can't pinch with a fully-
+        # extended finger), so the original click-context gates are
+        # subsumed.
+        return self._pinch_active(hand_reading, primary)
 
     def _scroll_pose_ready_from_hand(self, hand_reading) -> bool:
         fingers = hand_reading.fingers
@@ -857,5 +924,90 @@ class MouseGestureTracker:
             and finger.curl >= 0.40
             and finger.bend_distal <= 146.0
         )
+
+    # ---- Pinch (thumb-tip ↔ finger-tip) click detection -----------
+    # Replaces the original curl-based click logic. User-facing
+    # behavior: bring the thumb tip and the index tip close together
+    # to hold left-click; thumb tip + middle tip = right-click. The
+    # other three fingers must be extended or partial-curl (not a
+    # full fist) so we don't fire on closed-hand poses.
+    #
+    # Distance is normalized by hand size (wrist-to-index-MCP) so the
+    # threshold works at any camera distance — the same pinch
+    # gesture produces the same ratio whether the hand is 30 cm or
+    # 90 cm from the camera. Threshold 0.42 was tuned empirically:
+    # actual tip-touch lands at ~0.10-0.18, comfortable air-pinch
+    # (1-2 cm gap) at ~0.30-0.38, neutral relaxed hand at ~0.55+.
+    _PINCH_THUMB_TIP_LM = 4
+    _PINCH_TIP_LMS = {"index": 8, "middle": 12, "ring": 16, "pinky": 20}
+    _PINCH_WRIST_LM = 0
+    _PINCH_INDEX_MCP_LM = 5
+    _PINCH_THRESHOLD = 0.42  # tip-distance / hand-size below this = pinch
+
+    def _hand_size(self, landmarks) -> float:
+        """Wrist-to-index-MCP distance, used as the normalization
+        reference. This segment of the hand barely changes shape
+        across poses, which makes it a more stable scale ref than
+        bbox dimensions (which stretch with finger spread)."""
+        try:
+            wrist = landmarks[self._PINCH_WRIST_LM]
+            mcp = landmarks[self._PINCH_INDEX_MCP_LM]
+            dx = float(wrist[0]) - float(mcp[0])
+            dy = float(wrist[1]) - float(mcp[1])
+            return max(0.001, math.hypot(dx, dy))
+        except Exception:
+            return 0.001
+
+    def _pinch_distance_ratio(self, hand_reading, finger_name: str) -> float:
+        """Distance from thumb tip to the named finger's tip,
+        divided by hand size. Returns +inf if landmarks aren't
+        available so the caller's threshold check naturally falls
+        through to "not pinching"."""
+        try:
+            landmarks = hand_reading.landmarks
+            if landmarks is None or len(landmarks) <= self._PINCH_TIP_LMS[finger_name]:
+                return float("inf")
+            thumb = landmarks[self._PINCH_THUMB_TIP_LM]
+            target = landmarks[self._PINCH_TIP_LMS[finger_name]]
+            dx = float(thumb[0]) - float(target[0])
+            dy = float(thumb[1]) - float(target[1])
+            tip_dist = math.hypot(dx, dy)
+            return tip_dist / self._hand_size(landmarks)
+        except Exception:
+            return float("inf")
+
+    def _pinch_others_relaxed(self, hand_reading, primary: str) -> bool:
+        """The 3 fingers NOT involved in the current pinch must be
+        extended or partial-curl (not closed/fist). Without this
+        guard, a closed-hand pose with thumb tucked over index would
+        still register as a pinch and fire spurious clicks. Uses
+        finger.state from the standard reading rather than landmark
+        distance so the reading's own smoothing applies."""
+        if primary == "index":
+            others = ("middle", "ring", "pinky")
+        elif primary == "middle":
+            others = ("index", "ring", "pinky")
+        else:
+            return False
+        for name in others:
+            finger = hand_reading.fingers.get(name)
+            if finger is None:
+                return False
+            # Reject anything that's clearly a full curl. "fully_open",
+            # "mostly_open", and "partially_curled" all pass; only
+            # "mostly_curled" and "closed" fail.
+            if finger.state in {"mostly_curled", "closed"}:
+                return False
+        return True
+
+    def _pinch_active(self, hand_reading, primary: str) -> bool:
+        """True iff the user is currently holding a {primary}-pinch:
+        thumb tip + named-finger tip close, other 3 fingers relaxed.
+        Drives both the press/release logic and the "is the cursor
+        pose still acceptable while clicking" gates in the main
+        update loop."""
+        if self._pinch_distance_ratio(hand_reading, primary) > self._PINCH_THRESHOLD:
+            return False
+        return self._pinch_others_relaxed(hand_reading, primary)
 
 # Author: Konstantin Markov

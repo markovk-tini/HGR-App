@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -178,9 +178,29 @@ class CustomGesturesPanel(QWidget):
 
     # --- card builders ---------------------------------------------------
 
+    def _inner_card_stylesheet(self) -> str:
+        try:
+            c = QColor(getattr(self._config, "surface_color", "") or "#0F172A")
+            r, g, b, _ = c.getRgb()
+            is_light = (0.299 * r + 0.587 * g + 0.114 * b) > 160
+        except Exception:
+            is_light = False
+        card_bg = "rgba(0,0,0,0.05)" if is_light else "rgba(255,255,255,0.04)"
+        card_border = "rgba(11,61,145,0.18)" if is_light else "rgba(29,233,182,0.22)"
+        return (
+            f"QFrame#innerCard {{"
+            f"  background-color: {card_bg};"
+            f"  border: 1px solid {card_border};"
+            f"  border-radius: 18px;"
+            f"  color: {getattr(self._config, 'text_color', '#E5F6FF')};"
+            f"}}"
+        )
+
     def _inner_card(self, title: str) -> tuple[QFrame, QVBoxLayout]:
         box = QFrame()
         box.setObjectName("innerCard")
+        box.setAttribute(Qt.WA_StyledBackground, True)
+        box.setStyleSheet(self._inner_card_stylesheet())
         layout = QVBoxLayout(box)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
@@ -226,7 +246,6 @@ class CustomGesturesPanel(QWidget):
         row.addWidget(self.create_button)
 
         self.sandbox_button = QPushButton("Sandbox")
-        self.sandbox_button.setToolTip("Test custom gestures live without firing their bound actions.")
         self.sandbox_button.setMinimumHeight(38)
         self.sandbox_button.setStyleSheet(
             "QPushButton {"
@@ -268,7 +287,6 @@ class CustomGesturesPanel(QWidget):
         self.import_button = QPushButton("Import")
         self.import_button.setMinimumHeight(30)
         self.import_button.setMaximumHeight(34)
-        self.import_button.setToolTip("Load custom gestures from a .tlg file shared by another Touchless user.")
         self.import_button.setStyleSheet(secondary_btn_style)
         self.import_button.clicked.connect(self.import_requested)
         row.addWidget(self.import_button)
@@ -276,7 +294,6 @@ class CustomGesturesPanel(QWidget):
         self.export_all_button = QPushButton("Export All")
         self.export_all_button.setMinimumHeight(30)
         self.export_all_button.setMaximumHeight(34)
-        self.export_all_button.setToolTip("Save every custom gesture into a single .tlg file you can share or back up.")
         self.export_all_button.setStyleSheet(secondary_btn_style)
         self.export_all_button.clicked.connect(self.export_all_requested)
         row.addWidget(self.export_all_button)
@@ -481,7 +498,6 @@ class GestureCard(QFrame):
 
         export_button = QPushButton("Export")
         export_button.setFixedWidth(72)
-        export_button.setToolTip("Save this gesture as a .tlg file you can share or back up.")
         export_button.setStyleSheet(
             "QPushButton {"
             "  background: transparent;"

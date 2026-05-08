@@ -76,6 +76,47 @@ APP_ALIASES: dict[str, tuple[str, ...]] = {
     "outlook": ("outlook", "mail app"),
 }
 
+
+# Voice command "open touchless [tab]" → maps tab keywords to a
+# stable section key. The executor finds the live MainWindow
+# (in-process) and translates the key to the section index, so
+# we don't need to import section constants here (no circular
+# import). Order matters: longer / more-specific phrases first
+# so "custom gestures" wins over plain "gestures".
+TOUCHLESS_TAB_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("custom gestures", "custom_gestures"),
+    ("custom gesture", "custom_gestures"),
+    ("control guide", "gestures"),
+    ("preset gestures", "gestures"),
+    ("gesture guide", "gestures"),
+    ("gesture binds", "gesture_binds"),
+    ("gesture bindings", "gesture_binds"),
+    ("save locations", "save_locations"),
+    ("save location", "save_locations"),
+    ("instructions", "instructions"),
+    ("walkthrough", "tutorial"),
+    ("microphone", "microphone"),
+    ("gestures", "gestures"),
+    ("rebind", "gesture_binds"),
+    ("bindings", "gesture_binds"),
+    ("binds", "gesture_binds"),
+    ("camera", "camera"),
+    ("webcam", "camera"),
+    ("colors", "colors"),
+    ("color", "colors"),
+    ("theme", "colors"),
+    ("appearance", "colors"),
+    ("tutorial", "tutorial"),
+    ("updates", "updates"),
+    ("update", "updates"),
+    ("intro", "instructions"),
+    ("home", "_home"),
+    ("main page", "_home"),
+    ("homepage", "_home"),
+    ("mic", "microphone"),
+    ("saves", "save_locations"),
+)
+
 SPOTIFY_PLAY_PHRASES = ("play", "put on", "listen to", "queue", "queue up", "start playing")
 CHROME_SEARCH_PHRASES = ("search up", "search for", "search", "look up", "look for", "find", "go to", "navigate to", "take me to")
 GENERIC_OPEN_PHRASES = ("open", "launch", "start", "bring up", "show")
@@ -94,6 +135,51 @@ APP_LAUNCH_PHRASES = APP_FOCUS_PHRASES + (
 )
 DEDICATED_APP_LAUNCH_PHRASES = tuple(phrase for phrase in APP_LAUNCH_PHRASES if phrase != "focus")
 CLOSE_WINDOW_PHRASES = ("close", "close the", "exit", "quit", "dismiss")
+
+# Touchless clip-export phrases. The voice command "clip that" auto-
+# exports the most-recent N seconds of footage from the rolling clip
+# cache and saves it to the default clips folder without asking the
+# user where to save (different from the gesture path, which prompts
+# for a save location). 1m is the default duration; "clip 30 seconds"
+# / "clip last 30" routes to the 30 s variant.
+CLIP_TRIGGER_PHRASES = (
+    "clip that",
+    "clip this",
+    "clip it",
+    "clip me",
+    "save clip",
+    "save the clip",
+    "save that clip",
+    "save this clip",
+    "make clip",
+    "make a clip",
+    "create clip",
+    "create a clip",
+    "grab clip",
+    "grab a clip",
+    "grab that clip",
+    "record clip",
+    "clip the last minute",
+    "clip last minute",
+    "clip the past minute",
+    "clip past minute",
+    "clip last 60 seconds",
+    "clip last sixty seconds",
+    "clip the last 30 seconds",
+    "clip last 30 seconds",
+    "clip last thirty seconds",
+)
+CLIP_30S_HINT_PHRASES = (
+    "30 second",
+    "30 seconds",
+    "thirty second",
+    "thirty seconds",
+    "last 30",
+    "last thirty",
+    "past 30",
+    "past thirty",
+    "half a minute",
+)
 APP_OBJECT_HINTS = (
     "app called",
     "application called",
@@ -205,6 +291,32 @@ FILE_REQUEST_HINTS = {
     "txt",
     "word",
     "xlsx",
+}
+
+SELECTION_LETTERS = "ABCDEFGH"
+SELECTION_LETTER_WORDS = {
+    "a": 1,
+    "ay": 1,
+    "alpha": 1,
+    "b": 2,
+    "bee": 2,
+    "bravo": 2,
+    "c": 3,
+    "cee": 3,
+    "charlie": 3,
+    "d": 4,
+    "dee": 4,
+    "delta": 4,
+    "e": 5,
+    "echo": 5,
+    "f": 6,
+    "foxtrot": 6,
+    "g": 7,
+    "gee": 7,
+    "golf": 7,
+    "h": 8,
+    "aitch": 8,
+    "hotel": 8,
 }
 
 
@@ -370,6 +482,8 @@ class VoiceCommandProcessor:
             return None
 
         candidates = [
+            self._parse_clip(normalized, raw_text=spoken_text, context=context),
+            self._parse_touchless_app(normalized, raw_text=spoken_text, context=context),
             self._parse_spotify(normalized, raw_text=spoken_text, context=context),
             self._parse_chrome(normalized, raw_text=spoken_text, context=context),
             self._parse_settings(normalized, raw_text=spoken_text, context=context),
@@ -431,6 +545,14 @@ class VoiceCommandProcessor:
             result.display_text = self._display_text_for_intent(intent)
         return result
 
+    @staticmethod
+    def _selection_key_for_index(index: int) -> str:
+        if index < 0:
+            return "?"
+        if index < len(SELECTION_LETTERS):
+            return SELECTION_LETTERS[index]
+        return str(index + 1)
+
     def _extract_selection_number(self, spoken_text: str) -> int | None:
         normalized = self._normalize_text(spoken_text)
         if not normalized:
@@ -467,7 +589,53 @@ class VoiceCommandProcessor:
         word_match = re.search(rf"\b{prefix}\s*(one|two|three|four|five|six|seven|eight)\b", normalized)
         if word_match:
             return word_map.get(word_match.group(1))
+        letter_match = re.search(
+            rf"^(?:{prefix}\s*)?(?:option|number|letter|choice|pick)?\s*"
+            r"(a|ay|alpha|b|bee|bravo|c|cee|charlie|d|dee|delta|e|echo|f|foxtrot|g|gee|golf|h|aitch|hotel)\s*$",
+            normalized,
+        )
+        if letter_match:
+            return SELECTION_LETTER_WORDS.get(letter_match.group(1))
         return None
+
+    def _serialize_desktop_entry(self, entry: DesktopAppEntry) -> dict[str, Any]:
+        return {
+            "label": entry.display_name,
+            "app_name": entry.display_name,
+            "display_name": entry.display_name,
+            "normalized_name": entry.normalized_name,
+            "target": entry.target,
+            "source": entry.source,
+            "aliases": list(entry.aliases),
+            "category": entry.category,
+        }
+
+    def _deserialize_desktop_entry(self, payload: dict[str, Any]) -> DesktopAppEntry | None:
+        target = str(payload.get("target", "") or "").strip()
+        display_name = str(
+            payload.get("display_name")
+            or payload.get("app_name")
+            or payload.get("label")
+            or ""
+        ).strip()
+        if not display_name or not target:
+            return None
+        normalized_name = str(payload.get("normalized_name", "") or "").strip()
+        if not normalized_name:
+            normalized_name = self.desktop_controller._normalize_application_name(display_name)
+        aliases_raw = payload.get("aliases") or ()
+        if isinstance(aliases_raw, (list, tuple)):
+            aliases = tuple(str(alias or "").strip() for alias in aliases_raw if str(alias or "").strip())
+        else:
+            aliases = ()
+        return DesktopAppEntry(
+            display_name=display_name,
+            normalized_name=normalized_name,
+            target=target,
+            source=str(payload.get("source", "voice_selection") or "voice_selection"),
+            aliases=aliases,
+            category=str(payload.get("category", "generic") or "generic"),
+        )
 
     def _create_pending_selection(self, *, kind: str, query: str, heard_text: str, options: list[dict[str, Any]]) -> str:
         cleaned: list[dict[str, Any]] = []
@@ -489,11 +657,12 @@ class VoiceCommandProcessor:
         title = "Which file/folder?" if kind == "file" else "Which app?"
         lines = [title]
         for index, option in enumerate(self._pending_selection["options"], start=1):
+            selection_key = self._selection_key_for_index(index - 1)
             if kind == "file":
-                lines.append(f"{index}. {option['label']} — {option.get('path', '')}")
+                lines.append(f"{selection_key}. {option['label']} — {option.get('path', '')}")
             else:
-                lines.append(f"{index}. {option['label']}")
-        lines.append("Say the corresponding number.")
+                lines.append(f"{selection_key}. {option['label']}")
+        lines.append("Say the corresponding letter.")
         return "\n".join(lines)
 
     def _execute_pending_selection(self, spoken_text: str) -> VoiceExecutionResult | None:
@@ -545,7 +714,11 @@ class VoiceCommandProcessor:
         selected = options[choice - 1]
         self._pending_selection = None
         if pending.get("kind") == "app":
-            success = self.desktop_controller.open_named_application(str(selected.get("app_name", selected.get("label", ""))))
+            selected_entry = self._deserialize_desktop_entry(selected)
+            if selected_entry is not None:
+                success = self.desktop_controller.open_desktop_entry(selected_entry)
+            else:
+                success = self.desktop_controller.open_named_application(str(selected.get("app_name", selected.get("label", ""))))
             return VoiceExecutionResult(
                 success=success,
                 target="system",
@@ -574,7 +747,11 @@ class VoiceCommandProcessor:
         return builder.export_bundle(output_dir=output_dir)
 
     def _execute_intent(self, intent: ParsedVoiceCommand) -> VoiceExecutionResult:
-        if intent.app_name == "spotify":
+        if intent.app_name == "touchless":
+            result = self._execute_clip(intent)
+        elif intent.app_name == "touchless_app":
+            result = self._execute_touchless_app(intent)
+        elif intent.app_name == "spotify":
             result = self._execute_spotify(intent)
         elif intent.app_name == "chrome":
             result = self._execute_chrome(intent)
@@ -589,12 +766,150 @@ class VoiceCommandProcessor:
         result.intent = intent
         return result
 
+    def _execute_touchless_app(self, intent: ParsedVoiceCommand) -> VoiceExecutionResult:
+        """Bring the Touchless main window to the foreground and,
+        if a tab keyword was matched, navigate to that section.
+        Runs in-process: we find the MainWindow via QApplication's
+        top-level widgets and dispatch the show + navigate calls
+        on the GUI thread via QTimer.singleShot(0, ...)."""
+        target_key = intent.query
+        info: str
+        try:
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import QTimer
+            app = QApplication.instance()
+            if app is None:
+                return VoiceExecutionResult(
+                    success=False,
+                    target="touchless_app",
+                    heard_text=intent.raw_text,
+                    control_text="touchless not running",
+                    info_text="touchless not running",
+                )
+            main_window = None
+            for widget in app.topLevelWidgets():
+                if widget.__class__.__name__ == "MainWindow":
+                    main_window = widget
+                    break
+            if main_window is None:
+                return VoiceExecutionResult(
+                    success=False,
+                    target="touchless_app",
+                    heard_text=intent.raw_text,
+                    control_text="touchless main window not found",
+                    info_text="touchless main window not found",
+                )
+
+            def _focus_and_navigate():
+                try:
+                    if main_window.isMinimized():
+                        main_window.showNormal()
+                    else:
+                        main_window.show()
+                    main_window.raise_()
+                    main_window.activateWindow()
+                    if target_key and target_key != "_home":
+                        section_idx = self._touchless_section_index(
+                            main_window, target_key
+                        )
+                        if section_idx is not None:
+                            try:
+                                main_window.show_settings_page(section_idx)
+                            except Exception:
+                                pass
+                    elif target_key == "_home":
+                        try:
+                            main_window.show_home_page()
+                        except Exception:
+                            pass
+                    # Win32 SetForegroundWindow as a belt-and-
+                    # suspenders fallback — Qt's activateWindow
+                    # is sometimes a no-op on Windows when
+                    # another app stole focus recently.
+                    try:
+                        import ctypes
+                        hwnd = int(main_window.winId())
+                        if hwnd:
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _focus_and_navigate)
+            label = target_key or "home"
+            info = f"opening Touchless ({label})" if target_key else "focusing Touchless"
+            return VoiceExecutionResult(
+                success=True,
+                target="touchless_app",
+                heard_text=intent.raw_text,
+                control_text=info,
+                info_text=info,
+            )
+        except Exception as exc:
+            info = f"open touchless failed: {exc}"
+            return VoiceExecutionResult(
+                success=False,
+                target="touchless_app",
+                heard_text=intent.raw_text,
+                control_text=info,
+                info_text=info,
+            )
+
+    @staticmethod
+    def _touchless_section_index(main_window, target_key: str):
+        """Map a TOUCHLESS_TAB_KEYWORDS value (e.g. 'gestures',
+        'camera') to the SECTION_* integer constant defined in
+        main_window. We import the constants here (deferred) so
+        the voice processor doesn't have a top-level dependency
+        on main_window."""
+        try:
+            from ..app.ui import main_window as _mw
+        except Exception:
+            return None
+        mapping = {
+            "instructions": getattr(_mw, "SECTION_INSTRUCTIONS", None),
+            "gestures": getattr(_mw, "SECTION_GESTURES", None),
+            "custom_gestures": getattr(_mw, "SECTION_CUSTOM_GESTURE", None),
+            "gesture_binds": getattr(_mw, "SECTION_GESTURE_BINDS", None),
+            "camera": getattr(_mw, "SECTION_CAMERA", None),
+            "microphone": getattr(_mw, "SECTION_MICROPHONE", None),
+            "save_locations": getattr(_mw, "SECTION_SAVE_LOCATIONS", None),
+            "colors": getattr(_mw, "SECTION_COLORS", None),
+            "tutorial": getattr(_mw, "SECTION_TUTORIAL", None),
+            "updates": getattr(_mw, "SECTION_UPDATES", None),
+        }
+        return mapping.get(target_key)
+
+    def _execute_clip(self, intent: ParsedVoiceCommand) -> VoiceExecutionResult:
+        """Voice-triggered clip export. Side effect (firing the
+        actual clip + skipping the save-location prompt) is handled
+        by the engine layer, which inspects this intent and queues
+        a utility request — the processor itself has no UI handle
+        to call _export_recent_clip directly. We just return a
+        success result with a clear control_text so the live status
+        line reads naturally."""
+        action = intent.action or "clip_1m"
+        seconds_label = "1-minute" if action == "clip_1m" else "30-second"
+        info = f"saving last {seconds_label} clip"
+        return VoiceExecutionResult(
+            success=True,
+            target="touchless_clip",
+            heard_text=intent.raw_text,
+            control_text=info,
+            info_text=info,
+        )
+
     def _best_intent(self, intents: list[ParsedVoiceCommand]) -> ParsedVoiceCommand | None:
         if not intents:
             return None
         return max(intents, key=lambda item: item.confidence)
 
     def _can_skip_catalog_lookup(self, intent: ParsedVoiceCommand) -> bool:
+        if intent.app_name == "touchless":
+            return True
+        if intent.app_name == "touchless_app":
+            return True
         if intent.app_name == "file_explorer" and bool(intent.query):
             return True
         if intent.app_name == "settings":
@@ -651,6 +966,10 @@ class VoiceCommandProcessor:
             return f"open {query} settings"
         elif intent.app_name == "outlook" and query:
             return f"open {query} in outlook"
+        elif intent.app_name == "touchless":
+            if intent.action == "clip_30s":
+                return "save 30-second clip"
+            return "save 1-minute clip"
         return intent.normalized_text or intent.raw_text
 
     def _execute_spotify(self, intent: ParsedVoiceCommand) -> VoiceExecutionResult:
@@ -845,7 +1164,10 @@ class VoiceCommandProcessor:
                 kind="app",
                 query=intent.query or "",
                 heard_text=intent.raw_text,
-                options=[{"app_name": entry.display_name, "label": entry.display_name} for entry in ([best_entry] if best_entry is not None else []) + list(ambiguous_entries)],
+                options=[
+                    self._serialize_desktop_entry(entry)
+                    for entry in ([best_entry] if best_entry is not None else []) + list(ambiguous_entries)
+                ],
             )
             return VoiceExecutionResult(
                 success=False,
@@ -865,6 +1187,95 @@ class VoiceCommandProcessor:
             heard_text=intent.raw_text,
             control_text=self.desktop_controller.message,
             info_text=self.desktop_controller.message,
+        )
+
+    def _parse_touchless_app(
+        self,
+        text: str,
+        *,
+        raw_text: str,
+        context: VoiceCommandContext | None,
+    ) -> ParsedVoiceCommand | None:
+        """Recognise 'open touchless' / 'show touchless camera' /
+        'switch to touchless settings' style phrases. Routes to
+        app_name='touchless_app' so the executor can focus the
+        Touchless main window and (optionally) navigate to a
+        specific settings tab.
+
+        Distinct from _parse_clip's 'touchless' intent — that's
+        for clip-export commands like 'clip that'. The 'app' suffix
+        on this app_name keeps the two routes separate inside
+        _execute_intent."""
+        trimmed = (text or "").strip()
+        if not trimmed:
+            return None
+        # Need an explicit "touchless" mention so we don't grab
+        # generic "open camera" / "open settings" commands.
+        if "touchless" not in trimmed:
+            return None
+        if not self._contains_any(trimmed, APP_LAUNCH_PHRASES):
+            return None
+        # Find the most-specific tab keyword that matches.
+        matched_tab: str | None = None
+        for phrase, key in TOUCHLESS_TAB_KEYWORDS:
+            if phrase in trimmed:
+                matched_tab = key
+                break
+        confidence = 1.04 if matched_tab else 0.96
+        return ParsedVoiceCommand(
+            raw_text=raw_text,
+            normalized_text=text,
+            app_name="touchless_app",
+            action="navigate" if matched_tab else "open",
+            confidence=confidence,
+            query=matched_tab,
+            matched_alias="touchless",
+        )
+
+    def _parse_clip(
+        self,
+        text: str,
+        *,
+        raw_text: str,
+        context: VoiceCommandContext | None,
+    ) -> ParsedVoiceCommand | None:
+        """Recognise 'clip that' / 'clip the last minute' / 'save
+        clip' style phrases. Routes to app_name='touchless',
+        action='clip_1m' (or 'clip_30s' when a 30-second hint is
+        present). The engine catches this intent and fires the
+        clip-export with auto-save enabled."""
+        trimmed = (text or "").strip()
+        if not trimmed:
+            return None
+        # Bare "clip" alone is ambiguous (could be misheard "click",
+        # "clipboard", a Spotify queue follow-up, etc.). Require
+        # either an explicit phrase or 'clip' adjacent to a
+        # demonstrative / time qualifier.
+        matched = False
+        for phrase in CLIP_TRIGGER_PHRASES:
+            if phrase in trimmed:
+                matched = True
+                break
+        if not matched:
+            # Loose match: "clip" with a recency qualifier.
+            if re.search(r"\bclip\b.*\b(that|this|it|now|here|just|right now|last|past|previous|recent)\b", trimmed):
+                matched = True
+            elif re.search(r"\b(clip|record)\b.*\b(last|past)\b.*\b(minute|sixty|60|30|thirty)\b", trimmed):
+                matched = True
+        if not matched:
+            return None
+        # Pick duration variant.
+        action = "clip_1m"
+        if any(hint in trimmed for hint in CLIP_30S_HINT_PHRASES):
+            action = "clip_30s"
+        elif re.search(r"\b30\b|\bthirty\b", trimmed) and "minute" not in trimmed:
+            action = "clip_30s"
+        return ParsedVoiceCommand(
+            raw_text=raw_text,
+            normalized_text=text,
+            app_name="touchless",
+            action=action,
+            confidence=0.93,
         )
 
     def _parse_close_window(

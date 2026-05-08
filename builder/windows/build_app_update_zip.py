@@ -9,6 +9,13 @@ What goes IN:
   - Touchless.exe                     — bundled Python app code (PYZ)
   - _internal/assets/                 — icons / small data files
   - _internal/GestureGuide/           — bundled tutorial assets
+  - _internal/ffmpeg.EXE              — Canon EOS Webcam Utility
+    fallback capture path runs ffmpeg.exe in a subprocess so a buggy
+    DSHOW filter graph crashes the child instead of Touchless. Adds
+    ~142 MB to the auto-update download but is required for the
+    EOS-via-ffmpeg routing to work on machines that auto-update
+    rather than reinstalling. New in 1.1.0b4 — earlier zips didn't
+    include this because there was no ffmpeg in the bundle yet.
 
 What stays OUT:
   - _internal/whisper.cpp/            — ML stack, rarely changes
@@ -47,6 +54,7 @@ INCLUDED_PATHS = (
     "Touchless.exe",
     "_internal/assets",
     "_internal/GestureGuide",
+    "_internal/ffmpeg.EXE",
 )
 
 

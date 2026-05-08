@@ -12,6 +12,7 @@ def draw_mouse_control_box_overlay(
     debug_state: MouseDebugState,
     mode_enabled: bool,
     mouse_controller=None,
+    active_monitor_index: int | None = None,
 ) -> None:
     if not mode_enabled or debug_state.camera_control_bounds is None:
         return
@@ -70,15 +71,38 @@ def draw_mouse_control_box_overlay(
                 backdrop = frame.copy()
                 cv2.rectangle(backdrop, (map_x, map_y), (map_x + map_w, map_y + map_h), (8, 14, 26), thickness=-1)
                 cv2.addWeighted(backdrop, 0.55, frame, 0.45, 0.0, frame)
-                for screen in screens:
+                # Per-monitor highlighting:
+                #   - active_monitor_index is None ("All Monitors")
+                #     -> primary tinted green, secondaries blue,
+                #        same as the historical default.
+                #   - active_monitor_index is set to a specific
+                #     screen -> that screen renders in accent green
+                #     and every other screen renders DIMMER blue +
+                #     thinner outline so the user can see at a
+                #     glance which display the cursor is constrained
+                #     to. Mirrors what _MouseControlMonitorPreview
+                #     in main_window.py shows in Save Locations.
+                accent_fill = (140, 220, 184)         # bright accent green
+                accent_border = (220, 236, 232)       # near-white outline
+                dim_fill = (32, 56, 84)               # darker blue
+                dim_border = (96, 124, 156)           # softer outline
+                neutral_primary_fill = (58, 122, 96)
+                neutral_secondary_fill = (39, 72, 108)
+                for idx, screen in enumerate(screens):
                     geo = screen.geometry()
                     sx1 = map_x + int(round((geo.x() - v_left) * scale))
                     sy1 = map_y + int(round((geo.y() - v_top) * scale))
                     sx2 = map_x + int(round((geo.x() + geo.width() - v_left) * scale))
                     sy2 = map_y + int(round((geo.y() + geo.height() - v_top) * scale))
-                    fill = (58, 122, 96) if screen == primary else (39, 72, 108)
+                    if active_monitor_index is None:
+                        fill = neutral_primary_fill if screen == primary else neutral_secondary_fill
+                        border = (228, 236, 243)
+                    else:
+                        is_active = idx == active_monitor_index
+                        fill = accent_fill if is_active else dim_fill
+                        border = accent_border if is_active else dim_border
                     cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), fill, thickness=-1)
-                    cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), (228, 236, 243), thickness=1)
+                    cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), border, thickness=1)
                 drew_monitor_map = True
                 # Virtual cursor dot at the actual mouse position
                 # mapped into this monitor layout.
@@ -89,8 +113,8 @@ def draw_mouse_control_box_overlay(
                 if cursor_pos is not None:
                     cx = map_x + int(round((cursor_pos[0] - v_left) * scale))
                     cy = map_y + int(round((cursor_pos[1] - v_top) * scale))
-                    cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
-                    cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
+                    cv2.circle(frame, (cx, cy), 9, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+                    cv2.circle(frame, (cx, cy), 14, (36, 220, 184), thickness=3, lineType=cv2.LINE_AA)
 
     if not drew_monitor_map and debug_state.cursor_position is not None:
         # Single-monitor (or no controller passed): map the
@@ -101,8 +125,8 @@ def draw_mouse_control_box_overlay(
         box_h = max(1, y2 - y1)
         cx = x1 + int(round(float(debug_state.cursor_position[0]) * box_w))
         cy = y1 + int(round(float(debug_state.cursor_position[1]) * box_h))
-        cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
-        cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), 9, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), 14, (36, 220, 184), thickness=3, lineType=cv2.LINE_AA)
     # Anchor crosshair removed — it sat motionless in the box
     # while the cursor dot moved, which read as a stale duplicate
     # cursor. The box itself communicates the active region; the

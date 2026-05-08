@@ -133,6 +133,14 @@ class SpotifyController:
     def message(self) -> str:
         return self._message
 
+    @property
+    def has_authorization(self) -> bool:
+        """True if a saved access or refresh token was loaded for the
+        current user. Used by the Touchless first-time-Spotify-active
+        prompt to skip the Allow/Don't Allow modal when the user has
+        already authorised in a previous run."""
+        return bool(self._refresh_token) or bool(self._access_token)
+
     def ensure_ready(self, *, open_if_needed: bool = False) -> bool:
         if not self._available:
             self._message = "spotify unavailable on this platform"
@@ -885,7 +893,7 @@ class SpotifyController:
         import threading
         import webbrowser
 
-        redirect_uri = self._redirect_uri or f"http://localhost:{port}/callback"
+        redirect_uri = self._redirect_uri or f"http://127.0.0.1:{port}/callback"
         state = secrets.token_urlsafe(16)
         auth_params = {
             "client_id": self._client_id,
@@ -925,7 +933,7 @@ class SpotifyController:
                 done.set()
 
         try:
-            host = urllib_parse.urlparse(redirect_uri).hostname or "localhost"
+            host = urllib_parse.urlparse(redirect_uri).hostname or "127.0.0.1"
             httpd = socketserver.TCPServer((host, port), _Handler)
         except OSError as exc:
             self._message = f"spotify auth port busy: {exc}"
@@ -1058,7 +1066,7 @@ class SpotifyController:
         if env_client_id and env_client_secret:
             self._client_id = env_client_id
             self._client_secret = env_client_secret
-            self._redirect_uri = env_redirect_uri or "http://localhost:5000/callback"
+            self._redirect_uri = env_redirect_uri or "http://127.0.0.1:5000/callback"
             return
 
         for path in self._env_paths:
@@ -1067,7 +1075,7 @@ class SpotifyController:
                 self._env_path = path
                 self._client_id = values["CLIENT_ID"]
                 self._client_secret = values["CLIENT_SECRET"]
-                self._redirect_uri = values.get("REDIRECT_URI", "http://localhost:5000/callback")
+                self._redirect_uri = values.get("REDIRECT_URI", "http://127.0.0.1:5000/callback")
                 return
 
     def _load_tokens(self) -> None:

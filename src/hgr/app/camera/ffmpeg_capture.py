@@ -51,11 +51,30 @@ def locate_ffmpeg() -> str | None:
     the running interpreter / packaged exe (PyInstaller layout) over
     PATH, since the installer ships ffmpeg there and we want the
     bundled one to win on user machines that have an older system
-    ffmpeg installed."""
+    ffmpeg installed.
+
+    PyInstaller onedir layout (current): the main Touchless.exe sits
+    at dist/Touchless/Touchless.exe but bundled binaries (added via
+    the spec's `binaries` list) land in dist/Touchless/_internal/.
+    So `Path(sys.executable).resolve().with_name(exe_name)` looks
+    next to the exe and misses the bundled copy in `_internal/`. We
+    check both locations explicitly here so the bundled ffmpeg is
+    always discoverable in the packaged build, regardless of which
+    PyInstaller layout convention is current.
+    """
     exe_name = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
     candidates: list[Path] = []
     try:
-        candidates.append(Path(sys.executable).resolve().with_name(exe_name))
+        exe_path = Path(sys.executable).resolve()
+        # Same directory as the main executable (covers older
+        # PyInstaller onefile-extracted layouts and any future
+        # PyInstaller change that moves bundled binaries to the
+        # bundle root).
+        candidates.append(exe_path.with_name(exe_name))
+        # Sibling _internal/ directory (PyInstaller 5.x+ onedir
+        # default — this is where the bundled ffmpeg actually lands
+        # for our current spec).
+        candidates.append(exe_path.parent / "_internal" / exe_name)
     except Exception:
         pass
     try:
@@ -208,21 +227,42 @@ class FfmpegMjpegCapture:
         height: int = 720,
         fps: int = 60,
         ffmpeg_path: str | None = None,
-        startup_timeout_seconds: float = 8.0,
+        startup_timeout_seconds: float = 2.5,
     ) -> None:
         self._device_name = device_name
         self._width = int(width)
         self._height = int(height)
         self._fps = int(fps)
         self._ffmpeg_path = ffmpeg_path or locate_ffmpeg()
-        # Bumped startup_timeout from 4s to 8s. After we
-        # release-and-reopen on Windows DSHOW, the camera driver can
-        # take 2-5s to actually free the device on first toggle —
-        # 4s caught some real-world cases of "camera technically
-        # available but driver not done flushing yet" and reported
-        # them as ffmpeg failing, when in fact ffmpeg just hadn't
-        # gotten a chance to negotiate the format yet.
+        # Lowered startup_timeout from 8s to 2.5s. The 8s value was
+        # there to forgive a DSHOW driver that hadn't yet released
+        # the device after an in-app camera-restart — but on the
+        # cold-start path (e.g. tutorial launched from Settings while
+        # the main app is closed) there's no lingering driver lock,
+        # so 8s just means an extra 16 s of dead time when ffmpeg
+        # genuinely can't open the device (failure × two fps
+        # candidates). 2.5 s is plenty for the legitimate cold-open
+        # case (typical first-frame latency is <500 ms when ffmpeg
+        # works at all). The rare DSHOW-still-busy-after-restart
+        # case now falls through to OpenCV faster — the user
+        # perceives "camera came up" instead of "camera frozen for
+        # 16 s then came up".
         self._startup_timeout = float(startup_timeout_seconds)
+        # Known-fatal stderr substrings that mean ffmpeg has decided
+        # it can't open this device: when any of these appear in the
+        # stderr_loop's captured output we wake the startup waiter
+        # immediately instead of sitting through the timeout. Without
+        # this, ffmpeg can print "Error opening input file" within
+        # the first 100 ms but stay in a half-alive state that holds
+        # the pipes open until the OS reaps it, blocking us for the
+        # full timeout. Patterns are case-insensitive substring
+        # matches against the joined stderr buffer.
+        self._fatal_stderr_patterns = (
+            "could not set video options",
+            "error opening input",
+            "could not find video device",
+            "i/o error",
+        )
         self._proc: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -474,6 +514,19 @@ class FfmpegMjpegCapture:
                 self._stderr_log.append(text)
                 if len(self._stderr_log) > 200:
                     del self._stderr_log[:100]
+                # NB: we used to early-bailout here when stderr
+                # contained "could not set video options" / "error
+                # opening input" / etc., to fail in <500 ms instead
+                # of waiting for the full timeout. That worked but
+                # exposed a Windows DSHOW race: when ffmpeg fails
+                # too fast, the OpenCV cap we released a moment
+                # earlier hasn't finished tearing down on the driver
+                # side, so the recovery reopen returns a half-dead
+                # capture and the engine emits running_state=False.
+                # Reverted to the natural timeout so the driver gets
+                # ~2.5 s to release before we try to reopen — matches
+                # what slower webcams (Razer Kiyo Pro, Logitech
+                # BRIO at high resolution) actually need.
         except Exception:
             return
 

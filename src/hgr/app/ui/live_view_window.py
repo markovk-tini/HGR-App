@@ -105,7 +105,7 @@ class LiveViewWindow(QMainWindow):
         video_layout.addWidget(self.video_label, 1)
 
         # Centered "paused" overlay shown while the worker pipeline
-        # is frozen for a custom-gesture recording session. Same
+        # is frozen for a custom-gesture recorder or sandbox session. Same
         # treatment as MiniLiveViewer; sized to the video panel via
         # _reposition_frozen_overlay() on every resize.
         self._frozen_overlay = QLabel(self.video_label)
@@ -122,6 +122,7 @@ class LiveViewWindow(QMainWindow):
             "}"
         )
         self._frozen_overlay.hide()
+        self._frozen_overlay.setText("Paused\nCustom gesture tool active...")
 
         # Live latency readout: time from camera-frame decode to
         # this very paint, in milliseconds. EWMA-smoothed so the

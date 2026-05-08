@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import queue
@@ -59,7 +59,7 @@ class SpotifyWheelOverlay(QWidget):
         # center disc, title). set_wheel() runs every 15 ms tick so
         # the per-frame paint cost dominates if we re-render text +
         # 8 sector paths every time. Static slices change only when
-        # the wheel variant or theme changes — cache them in a
+        # the wheel variant or theme changes â€” cache them in a
         # pixmap; per-frame paint just blits + draws the active
         # slice overlay, selection arc, cursor, and subtitle.
         self._static_pixmap: QPixmap | None = None
@@ -93,7 +93,7 @@ class SpotifyWheelOverlay(QWidget):
 
     def apply_theme(self, config: AppConfig) -> None:
         self.config = config
-        # Theme colors are baked into the static pixmap — invalidate
+        # Theme colors are baked into the static pixmap â€” invalidate
         # so the next paintEvent regenerates it.
         self._static_pixmap = None
         self._static_signature = ()
@@ -434,7 +434,7 @@ class SpotifyWheelOverlay(QWidget):
             # Redraw the outer + inner rings on top so the active
             # slice's outline doesn't overlap them. In the original
             # un-cached paint path, rings were drawn after every
-            # slice so they masked all slice edges uniformly — we
+            # slice so they masked all slice edges uniformly â€” we
             # have to replicate that layering here when we redraw
             # an active slice over the cached static layer.
             painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(), 235), 4))
@@ -906,7 +906,7 @@ class GestureTestWindow(QMainWindow):
         if 0 <= index < len(self.info_labels):
             self.info_labels[index].setText(text)
 
-    def _begin_voice_selection_prompt(self, title: str, items: list[tuple[int, str, str]], instruction: str) -> None:
+    def _begin_voice_selection_prompt(self, title: str, items: list[tuple[str, str, str]], instruction: str) -> None:
         self._selection_prompt_active = True
         self._selection_auto_listen_at = time.monotonic() + 3.0
         self.voice_status_overlay.show_selection(title, items, instruction, status_text="Waiting for voice...")
@@ -1710,6 +1710,7 @@ class GestureTestWindow(QMainWindow):
             frame,
             debug_state=self.mouse_tracker.debug_state,
             mode_enabled=self._mouse_mode_enabled,
+            active_monitor_index=getattr(self.config, "mouse_active_monitor_index", None),
         )
 
     def _draw_mouse_monitor_overlay(self, frame) -> None:
@@ -2331,25 +2332,28 @@ class GestureTestWindow(QMainWindow):
                 duration=2.0,
             )
 
-    def _parse_voice_selection_text(self, text: str) -> tuple[str, list[tuple[int, str, str]], str]:
+    def _parse_voice_selection_text(self, text: str) -> tuple[str, list[tuple[str, str, str]], str]:
         lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
         title = "Which file/folder?"
-        if lines and "apps" in lines[0].lower():
+        if lines and "app" in lines[0].lower():
             title = "Which app?"
-        instruction = "Say the corresponding number"
-        items: list[tuple[int, str, str]] = []
+        instruction = "Say the corresponding letter"
+        items: list[tuple[str, str, str]] = []
         for line in lines:
-            match = re.match(r"^(\d+)\.\s+(.*?)(?:\s+[—-]\s+(.*))?$", line)
+            match = re.match(r"^([A-Za-z]|\d+)\.\s+(.*?)(?:\s+[—-]\s+(.*))?$", line)
             if match:
-                number = int(match.group(1))
+                selection_key = str(match.group(1) or "").strip().upper()
                 label = str(match.group(2) or "").strip()
                 path_text = str(match.group(3) or "").strip()
-                items.append((number, label, path_text))
+                items.append((selection_key, label, path_text))
+                continue
+            if line.lower().startswith("say "):
+                instruction = line
             elif line.lower().startswith("which "):
                 instruction = line
         return title, items, instruction
 
-    def _handle_voice_overlay_selection(self, number: int) -> None:
+    def _handle_voice_overlay_selection(self, selection_key: str) -> None:
         self._selection_prompt_active = False
         self._selection_auto_listen_at = 0.0
         try:
@@ -2357,7 +2361,7 @@ class GestureTestWindow(QMainWindow):
         except Exception:
             pass
         try:
-            result = self.voice_processor.execute(str(number))
+            result = self.voice_processor.execute(str(selection_key or "").strip())
         except Exception as exc:
             self._voice_queue.put((self._voice_request_id, {
                 "event": "result",
@@ -2457,3 +2461,4 @@ class GestureTestWindow(QMainWindow):
         super().closeEvent(event)
 
 # Author: Konstantin Markov
+

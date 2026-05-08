@@ -110,7 +110,7 @@ class MouseGestureTrackerTest(unittest.TestCase):
         self.assertGreater(second.cursor_position[1], first.cursor_position[1])
         self.assertLess(second.cursor_position[0], 0.82)
 
-    def test_multi_monitor_layout_produces_wide_camera_control_box(self) -> None:
+    def test_multi_monitor_layout_produces_compact_camera_control_box(self) -> None:
         update = self._update(
             make_pose("open_hand"),
             1.00,
@@ -123,10 +123,15 @@ class MouseGestureTrackerTest(unittest.TestCase):
         width = bounds[2] - bounds[0]
         height = bounds[3] - bounds[1]
         self.assertIsNotNone(update)
-        self.assertGreater(width, 0.62)
-        self.assertLess(width, 0.80)
-        self.assertGreater(height, 0.38)
-        self.assertLess(height, 0.58)
+        # Mouse-pad-style defaults: box stays a forearm-sized patch
+        # of the camera frame even with a 32:9 virtual desktop.
+        # Aspect-power compression still slightly tilts width/height
+        # but not enough to push the box back to the old "fills most
+        # of the frame" geometry.
+        self.assertGreater(width, 0.30)
+        self.assertLess(width, 0.62)
+        self.assertGreater(height, 0.30)
+        self.assertLess(height, 0.62)
 
     def test_small_hand_motion_stays_controlled_near_entry_anchor(self) -> None:
         self._toggle_mouse_mode_on()
@@ -136,8 +141,14 @@ class MouseGestureTrackerTest(unittest.TestCase):
         assert first.cursor_position is not None
         assert second.cursor_position is not None
         delta = second.cursor_position[0] - first.cursor_position[0]
+        # The mouse-pad-style control box is intentionally smaller
+        # than the previous "fills the frame" geometry, so the same
+        # hand-displacement maps to a larger fraction of the screen
+        # — that's the explicit design intent of the resize. Upper
+        # bound widened from 0.10 to 0.20 to reflect the new ratio
+        # while still asserting the smoothing damps the motion.
         self.assertGreater(delta, 0.01)
-        self.assertLess(delta, 0.10)
+        self.assertLess(delta, 0.20)
 
     def test_entry_anchor_mapping_reaches_full_desktop_without_full_frame_sweep(self) -> None:
         self._toggle_mouse_mode_on()

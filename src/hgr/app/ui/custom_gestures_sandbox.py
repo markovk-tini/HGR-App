@@ -407,7 +407,10 @@ class SandboxWindow(QDialog):
                 return
             # Mirror to selfie view when we own the camera; skip when
             # borrowing the worker's frames (already mirrored upstream).
-            mirrored = np_frame if not self._owns_camera else cv2.flip(np_frame, 1)
+            should_flip = self._owns_camera and not bool(
+                getattr(self._config, "camera_source_is_mirrored", False)
+            )
+            mirrored = cv2.flip(np_frame, 1) if should_flip else np_frame
             rgb = cv2.cvtColor(mirrored, cv2.COLOR_BGR2RGB) if mirrored.shape[2] == 3 else mirrored[:, :, :3]
             result = self._mp_hands.process(rgb)
             display_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)

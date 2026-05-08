@@ -11,7 +11,7 @@ from ...config.app_config import AppConfig
 
 
 class VoiceStatusOverlay(QWidget):
-    selectionChosen = Signal(int)
+    selectionChosen = Signal(str)
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
@@ -25,7 +25,7 @@ class VoiceStatusOverlay(QWidget):
 
         self._selection_title = ""
         self._selection_instruction = ""
-        self._selection_items: list[tuple[int, str, str]] = []
+        self._selection_items: list[tuple[str, str, str]] = []
         self._selection_scroll = 0
         self._selection_hover: int | None = None
         self._selection_path_scroll_ratio = 0.0
@@ -133,12 +133,12 @@ class VoiceStatusOverlay(QWidget):
         self._resize_for_info_hint(self._info_text)
         self._show_now()
 
-    def show_selection(self, title: str, items: list[tuple[int, str, str]], instruction: str, *, status_text: str = "") -> None:
+    def show_selection(self, title: str, items: list[tuple[str, str, str]], instruction: str, *, status_text: str = "") -> None:
         self._mode = "selection"
         self._status_text = str(status_text or "")
         self._command_text = ""
         self._selection_title = str(title or "Which file/folder?")
-        self._selection_instruction = str(instruction or "Say the corresponding number.")
+        self._selection_instruction = str(instruction or "Say the corresponding letter.")
         self._selection_items = list(items)
         self._selection_scroll = 0
         self._selection_hover = None
@@ -250,7 +250,7 @@ class VoiceStatusOverlay(QWidget):
         visible_rows = max(1, int((list_bottom - list_top) // row_h))
         return rect, box_rect, list_top, list_bottom, row_h, visible_rows
 
-    def _selection_visible_rows(self) -> list[tuple[int, tuple[int, str, str]]]:
+    def _selection_visible_rows(self) -> list[tuple[int, tuple[str, str, str]]]:
         _outer, _box, _top, _bottom, _row_h, visible_rows = self._selection_layout()
         max_scroll = max(0, len(self._selection_items) - visible_rows)
         self._selection_scroll = max(0, min(self._selection_scroll, max_scroll))
@@ -350,7 +350,7 @@ class VoiceStatusOverlay(QWidget):
             v_track = self._selection_vertical_scrollbar_rect()
             reserved_right = 18.0 if len(self._selection_items) > visible_rows else 0.0
             path_width = max(80.0, box_rect.width() - 28 - reserved_right)
-            for idx, (number, label, path_text) in self._selection_visible_rows():
+            for idx, (selection_key, label, path_text) in self._selection_visible_rows():
                 row_index = idx - self._selection_scroll
                 row_rect = QRectF(box_rect.left() + 14, list_top + row_index * row_h, box_rect.width() - 28 - reserved_right, row_h - 2)
                 hover = self._selection_hover == idx
@@ -362,7 +362,7 @@ class VoiceStatusOverlay(QWidget):
                 label_rect = QRectF(row_rect.left() + 38, row_rect.top(), row_rect.width() * 0.33, row_rect.height())
                 path_rect = QRectF(row_rect.left() + row_rect.width() * 0.38, row_rect.top(), row_rect.width() * 0.58, row_rect.height())
                 painter.setPen(QPen(QColor(245, 250, 255, 235)))
-                painter.drawText(number_rect, Qt.AlignVCenter | Qt.AlignLeft, f"{number}.")
+                painter.drawText(number_rect, Qt.AlignVCenter | Qt.AlignLeft, f"{selection_key}.")
                 painter.setPen(QPen(QColor(236, 246, 255, 230)))
                 painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, label)
                 painter.setPen(QPen(QColor(204, 226, 244, 195)))
@@ -372,7 +372,7 @@ class VoiceStatusOverlay(QWidget):
             instruction_font.setBold(True)
             painter.setFont(instruction_font)
             painter.setPen(QPen(QColor(230, 241, 250, 220)))
-            instruction = self._selection_instruction or "Say the corresponding number."
+            instruction = self._selection_instruction or "Say the corresponding letter."
             painter.drawText(QRectF(box_rect.left() + 18, box_rect.bottom() - 42.0, box_rect.width() - 36, 14), Qt.AlignCenter, instruction)
 
             h_track = self._selection_horizontal_scrollbar_rect()
@@ -621,7 +621,7 @@ class VoiceStatusOverlay(QWidget):
             return
         index = self._selection_index_at(pos.x(), pos.y())
         if index is not None and 0 <= index < len(self._selection_items):
-            self.selectionChosen.emit(self._selection_items[index][0])
+            self.selectionChosen.emit(str(self._selection_items[index][0]))
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._mode != "selection":

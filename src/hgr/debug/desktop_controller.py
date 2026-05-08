@@ -130,10 +130,61 @@ FILE_QUERY_ABBREVIATIONS = {
 }
 
 FILE_QUERY_HOMOPHONES = {
+    # 0-10 number words and digits map to one another so "report
+    # two" and "report 2" both surface "Report 2.pdf". The "two/
+    # too/to" cluster keeps its homophones because all three are
+    # commonly transcribed for the digit 2 — whisper sometimes
+    # picks "to" for ambiguous audio.
+    "0": ("0", "zero"),
+    "zero": ("0", "zero"),
+    "1": ("1", "one"),
+    "one": ("1", "one"),
     "2": ("2", "two", "too", "to"),
     "two": ("2", "two", "too", "to"),
     "too": ("2", "two", "too", "to"),
     "to": ("2", "two", "too", "to"),
+    "3": ("3", "three"),
+    "three": ("3", "three"),
+    "4": ("4", "four", "for"),
+    "four": ("4", "four", "for"),
+    "for": ("4", "four", "for"),
+    "5": ("5", "five"),
+    "five": ("5", "five"),
+    "6": ("6", "six"),
+    "six": ("6", "six"),
+    "7": ("7", "seven"),
+    "seven": ("7", "seven"),
+    "8": ("8", "eight"),
+    "eight": ("8", "eight"),
+    "9": ("9", "nine"),
+    "nine": ("9", "nine"),
+    "10": ("10", "ten"),
+    "ten": ("10", "ten"),
+}
+APPLICATION_NUMBER_WORDS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+}
+APPLICATION_ROMAN_NUMERALS = {
+    "i": "1",
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
 }
 
 WM_CLOSE = 0x0010
@@ -549,6 +600,45 @@ class DesktopController:
         if not normalized:
             return None, []
         ranked = self.rank_applications_in_text(normalized, limit=max(3, int(limit)))
+        # ---- Stem-disambiguation pass --------------------------------
+        # When the (canonicalised) query tokens are a strict subset of
+        # MULTIPLE installed app names, surface those entries directly
+        # — bypasses the fuzzy-score floor that otherwise filters out
+        # the longer-titled sibling. Real-world: "open fallout" should
+        # offer both Fallout 3 and Fallout: New Vegas; the fuzzy score
+        # for FNV's bare "fallout" stem lands ~0.5 because "fallout"
+        # is only one of three tokens in the title, but the user
+        # clearly wants to choose. Same logic also resolves "fallout
+        # three" → "fallout 3" cleanly to a single match (because
+        # `_exact_match_canonical_form` maps the number word to the
+        # digit), short-circuiting any later file-request fallback.
+        canonical_query = self._exact_match_canonical_form(normalized)
+        query_tokens = set(canonical_query.split()) if canonical_query else set()
+        if 1 <= len(query_tokens) <= 3:
+            stem_matches: list[DesktopAppEntry] = []
+            seen_displays: set[str] = set()
+            for entry in self._application_catalog():
+                candidate_canonical = self._exact_match_canonical_form(entry.normalized_name)
+                candidate_tokens = set(candidate_canonical.split()) if candidate_canonical else set()
+                if not candidate_tokens:
+                    continue
+                if query_tokens <= candidate_tokens and entry.display_name not in seen_displays:
+                    stem_matches.append(entry)
+                    seen_displays.add(entry.display_name)
+            if len(stem_matches) >= 2:
+                # Multiple titles contain the query tokens — return
+                # them all as disambiguation. Prefer the top-ranked
+                # entry as the "suggested default" if one of the
+                # stem matches is in the ranked list, else fall back
+                # to the first stem hit.
+                top_in_stems = next(
+                    (entry for entry, _, _ in (ranked or []) if entry.display_name in seen_displays),
+                    stem_matches[0],
+                )
+                return top_in_stems, stem_matches[: max(2, int(limit))]
+            if len(stem_matches) == 1:
+                return stem_matches[0], []
+        # ---- End stem pass -------------------------------------------
         if not ranked:
             resolved = self._resolve_application(app_name)
             if resolved is not None:
@@ -557,6 +647,40 @@ class DesktopController:
         top_entry, top_score, _matched_alias = ranked[0]
         if top_score < 0.78:
             return None, []
+        top_is_exact = self._entry_exact_query_match(top_entry, normalized)
+        # Exact-match short-circuit. When the user spoke (or typed) a
+        # full title that exactly matches one entry — including the
+        # numeric variant ("slay the spire two" → "Slay the Spire 2") —
+        # always open that exact title without offering siblings, even
+        # when a sibling shares the score (e.g., "Slay the Spire" ties
+        # at 1.08 because every alias the query-string matches against
+        # is also present in both entries' alias lists). Without this
+        # short-circuit the close-entries ambiguity path below would
+        # surface the sibling as a disambiguation choice and force the
+        # user to pick again, which directly contradicts what they
+        # asked for.
+        if top_is_exact:
+            return top_entry, []
+        # Token-superset ambiguity. When the query is a strict subset
+        # of multiple installed apps (e.g., "fallout" matches both
+        # "Fallout 3" and "Fallout New Vegas"), surface every such
+        # entry. Score gate is intentionally relaxed below the 0.78
+        # main threshold here — partial-name matches against
+        # multi-token titles often don't reach 0.78 because most of
+        # the title is missing from the query, but the user clearly
+        # intended a disambiguation. We keep a 0.55 floor so genuinely
+        # unrelated catalog entries don't sneak into the prompt.
+        token_superset_matches: list[DesktopAppEntry] = []
+        for entry, score, _alias in ranked[: max(3, int(limit))]:
+            if score < 0.55:
+                continue
+            if not self._entry_query_token_superset_match(entry, normalized):
+                continue
+            if any(existing.display_name == entry.display_name for existing in token_superset_matches):
+                continue
+            token_superset_matches.append(entry)
+        if len(token_superset_matches) >= 2:
+            return top_entry, token_superset_matches[: max(2, int(limit))]
         close_entries: list[DesktopAppEntry] = []
         top_category = str(getattr(top_entry, 'category', 'generic') or 'generic')
         top_norm = self._normalize_application_name(top_entry.display_name)
@@ -829,7 +953,21 @@ class DesktopController:
             query_numbers_union |= set(re.findall(r"\d+", variant))
         best_numbers = set(re.findall(r"\d+", self._normalize_file_token_text(best_path.name)))
         best_canonical = self._canonical_file_homophone_text(best_path.stem)
-        homophone_query = any(token in {"2", "two", "too", "to"} for variant in variants for token in variant.split())
+        # Treat any spoken-number-bearing query as homophone-aware so
+        # the looser ambiguity gate kicks in when the user said
+        # "report three" / "report 3" / "report iii" — all three
+        # canonicalize to the same form, and we want sibling files
+        # ("Report 3 v2.pdf") to surface as ambiguous candidates the
+        # same way they do for the "two" cluster.
+        homophone_tokens = (
+            {"2", "two", "too", "to"}
+            | set(APPLICATION_NUMBER_WORDS.keys())
+            | set(APPLICATION_NUMBER_WORDS.values())
+            | set(APPLICATION_ROMAN_NUMERALS.keys())
+        )
+        homophone_query = any(
+            token in homophone_tokens for variant in variants for token in variant.split()
+        )
         ambiguous: list[Path] = []
         for score, _mtime, path in scored[1:8]:
             same_parent = path.parent == best_path.parent
@@ -1388,13 +1526,28 @@ try {
         return normalized
 
     def _canonical_file_homophone_text(self, text: str) -> str:
+        """Canonicalize a file/folder name for ambiguity comparison.
+
+        Maps every spoken-form number to its digit equivalent (zero-
+        ten + roman numerals I-X), plus the "two/too/to" homophone
+        cluster. Both sides of an ambiguity check go through this
+        same pipeline so a user's spoken "report three" canonicalizes
+        to "report 3" and matches the on-disk "Report 3.pdf"; the
+        previous narrow mapping (only 2) left every other numbered
+        sequel falling through to fuzzy scoring."""
         normalized = self._normalize_file_token_text(text)
-        tokens = []
-        for token in normalized.split():
-            if token in {"two", "too", "to"}:
-                tokens.append("2")
-            else:
-                tokens.append(token)
+        if not normalized:
+            return ""
+        raw_tokens = [token for token in normalized.split() if token]
+        total_tokens = len(raw_tokens)
+        tokens: list[str] = []
+        for token in raw_tokens:
+            mapped = APPLICATION_NUMBER_WORDS.get(token)
+            if mapped is None and token in {"too", "to"}:
+                mapped = "2"
+            if mapped is None and total_tokens > 1:
+                mapped = APPLICATION_ROMAN_NUMERALS.get(token)
+            tokens.append(mapped or token)
         return " ".join(tokens).strip()
 
     def _normalize_file_query(self, text: str) -> str:
@@ -1571,6 +1724,13 @@ try {
         if explicit is not None:
             return explicit
 
+        for entry in self._quick_application_catalog():
+            if self._entry_exact_query_match(entry, query):
+                return entry
+        for entry in self._application_catalog():
+            if self._entry_exact_query_match(entry, query):
+                return entry
+
         best_entry: DesktopAppEntry | None = None
         best_score = 0.0
         for entry in self._quick_application_catalog():
@@ -1590,6 +1750,28 @@ try {
                 best_entry = entry
                 best_score = score
         if best_entry is None or best_score < 0.70:
+            # Stem-subset fallback. When the canonicalised query
+            # tokens are a strict subset of any catalog entry's
+            # normalised-name tokens, accept that entry as a valid
+            # resolution. This guarantees `can_resolve_application`
+            # returns True for queries like "fallout three" (which
+            # canonicalises to "fallout 3" and is a subset of "Fallout
+            # 3 - Game of the Year Edition" tokens), preventing the
+            # caller's file-request fallback from picking up some
+            # unrelated "draft3.raw" file. Cheap to compute — same
+            # canonical-form helper the disambiguation path uses.
+            canonical_query = self._exact_match_canonical_form(query)
+            stem_tokens = set(canonical_query.split()) if canonical_query else set()
+            if 1 <= len(stem_tokens) <= 3:
+                for catalog in (
+                    self._quick_application_catalog(),
+                    self._application_catalog(),
+                ):
+                    for entry in catalog:
+                        cand_canonical = self._exact_match_canonical_form(entry.normalized_name)
+                        cand_tokens = set(cand_canonical.split()) if cand_canonical else set()
+                        if cand_tokens and stem_tokens <= cand_tokens:
+                            return entry
             return None
         return best_entry
 
@@ -2072,17 +2254,131 @@ try {
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return normalized
 
+    def _canonical_application_numeric_text(self, text: str) -> str:
+        normalized = self._normalize_application_name(text)
+        if not normalized:
+            return ""
+        raw_tokens = [token for token in normalized.split() if token]
+        total_tokens = len(raw_tokens)
+        tokens: list[str] = []
+        for token in raw_tokens:
+            mapped = APPLICATION_NUMBER_WORDS.get(token)
+            if mapped is None and total_tokens > 1:
+                mapped = APPLICATION_ROMAN_NUMERALS.get(token)
+            tokens.append(mapped or token)
+        return " ".join(tokens).strip()
+
+    def _exact_match_canonical_form(self, text: str) -> str:
+        """Build the canonical form used for exact-match comparison
+        between a query and a catalog entry's titles/aliases. Both
+        sides go through the SAME pipeline so subtleties like stop-
+        words ("the", "a") and number-word vs. digit don't cause
+        false negatives. Without the stopword strip, a query like
+        "slay the spire two" (which `_normalize_application_query`
+        had already stripped to "slay spire two" upstream) would
+        fail to match the entry "Slay the Spire 2" (whose stop-
+        words were preserved in `_normalize_application_name`)."""
+        no_stopwords = self._normalize_application_query(text)
+        if not no_stopwords:
+            no_stopwords = self._normalize_application_name(text)
+        return self._canonical_application_numeric_text(no_stopwords)
+
+    def _entry_exact_query_match(self, entry: DesktopAppEntry, query: str) -> bool:
+        query_canonical = self._exact_match_canonical_form(query)
+        if not query_canonical:
+            return False
+        # Only the display name and normalized name count as exact-
+        # match candidates. Stem-style aliases like "fallout" for
+        # "Fallout 3" must NOT trigger an exact-match short-circuit:
+        # a user who said "open fallout" may have meant the bare-stem
+        # disambiguation between "Fallout 3" and "Fallout New Vegas",
+        # and accepting the stem alias as exact would silently open
+        # whichever title happened to land first in the ranking and
+        # skip the disambiguation prompt the user expected.
+        canonical_targets = {
+            self._exact_match_canonical_form(entry.display_name),
+            self._exact_match_canonical_form(entry.normalized_name),
+        }
+        return query_canonical in (target for target in canonical_targets if target)
+
+    def _entry_query_token_superset_match(self, entry: DesktopAppEntry, query: str) -> bool:
+        query_tokens = set(self._exact_match_canonical_form(query).split())
+        if not query_tokens:
+            return False
+        candidate_texts = [
+            entry.display_name,
+            entry.normalized_name,
+            *(alias for alias in entry.aliases if alias),
+        ]
+        for candidate in candidate_texts:
+            candidate_tokens = set(self._exact_match_canonical_form(candidate).split())
+            if not candidate_tokens:
+                continue
+            # Strict superset: every query token appears in this
+            # candidate. Best-case match.
+            if query_tokens <= candidate_tokens:
+                return True
+            # Whisper-noise tolerance: allow up to one query token
+            # that's NOT in the candidate, as long as the overlap
+            # contains a distinctive token (≥4 chars, non-numeric).
+            # Real-world: the user said "open fallout" but whisper
+            # heard "open fallout out". The leftover token "out"
+            # isn't in either Fallout title, but the meaningful
+            # overlap "fallout" is — so both Fallout 3 and Fallout
+            # New Vegas should still surface for disambiguation
+            # rather than us silently picking one. The 4-char floor
+            # prevents a stray short whisper artifact ("a", "the",
+            # "an") from latching onto every catalog entry.
+            overlap = query_tokens & candidate_tokens
+            leftover = query_tokens - candidate_tokens
+            if overlap and len(leftover) <= 1 and any(
+                len(token) >= 4 and not token.isdigit() for token in overlap
+            ):
+                return True
+        return False
+
     def _application_match_score(self, query: str, candidate: str) -> float:
         if not query or not candidate:
             return 0.0
+        query = self._normalize_application_name(query)
+        candidate = self._normalize_application_name(candidate)
         if query == candidate:
             return 1.0
+        canonical_query = self._canonical_application_numeric_text(query)
+        canonical_candidate = self._canonical_application_numeric_text(candidate)
+        if canonical_query == canonical_candidate and canonical_query:
+            return 1.08
         query_tokens = set(query.split())
         candidate_tokens = set(candidate.split())
-        overlap = len(query_tokens & candidate_tokens) / max(len(query_tokens), len(candidate_tokens), 1)
-        ratio = SequenceMatcher(None, query, candidate).ratio()
-        prefix_bonus = 0.12 if candidate.startswith(query) or query.startswith(candidate) else 0.0
-        return ratio * 0.62 + overlap * 0.38 + prefix_bonus
+        canonical_query_tokens = set(canonical_query.split())
+        canonical_candidate_tokens = set(canonical_candidate.split())
+        overlap = max(
+            len(query_tokens & candidate_tokens) / max(len(query_tokens), len(candidate_tokens), 1),
+            len(canonical_query_tokens & canonical_candidate_tokens) / max(len(canonical_query_tokens), len(canonical_candidate_tokens), 1),
+        )
+        ratio = max(
+            SequenceMatcher(None, query, candidate).ratio(),
+            SequenceMatcher(None, canonical_query, canonical_candidate).ratio(),
+        )
+        prefix_bonus = 0.12 if (
+            candidate.startswith(query)
+            or query.startswith(candidate)
+            or canonical_candidate.startswith(canonical_query)
+            or canonical_query.startswith(canonical_candidate)
+        ) else 0.0
+        subset_bonus = 0.08 if canonical_query_tokens and canonical_query_tokens <= canonical_candidate_tokens else 0.0
+        query_numbers = {token for token in canonical_query_tokens if token.isdigit()}
+        candidate_numbers = {token for token in canonical_candidate_tokens if token.isdigit()}
+        number_bonus = 0.0
+        if query_numbers:
+            if query_numbers <= candidate_numbers:
+                number_bonus += 0.24
+            else:
+                number_bonus -= 0.32
+        elif candidate_numbers and canonical_query_tokens and canonical_query_tokens <= canonical_candidate_tokens:
+            number_bonus -= 0.03
+        score = ratio * 0.56 + overlap * 0.44 + prefix_bonus + subset_bonus + number_bonus
+        return max(0.0, min(1.18, score))
 
     def _application_mention_score(
         self,
@@ -2094,11 +2390,15 @@ try {
         best_alias: str | None = None
         aliases = entry.aliases or (entry.normalized_name,)
         haystack = f" {normalized_text} "
+        canonical_haystack = f" {self._canonical_application_numeric_text(normalized_text)} "
         for alias in aliases:
             if not alias:
                 continue
             if f" {alias} " in haystack:
                 return 1.08, alias
+            canonical_alias = self._canonical_application_numeric_text(alias)
+            if canonical_alias and f" {canonical_alias} " in canonical_haystack:
+                return 1.10, alias
 
             alias_tokens = alias.split()
             window_sizes = {
@@ -2114,7 +2414,10 @@ try {
                     if score > best_score:
                         best_score = score
                         best_alias = alias
-        if entry.normalized_name and entry.normalized_name in normalized_text:
+        if entry.normalized_name and (
+            entry.normalized_name in normalized_text
+            or self._canonical_application_numeric_text(entry.normalized_name) in self._canonical_application_numeric_text(normalized_text)
+        ):
             best_score = max(best_score, 0.96)
             best_alias = best_alias or entry.normalized_name
         return best_score, best_alias

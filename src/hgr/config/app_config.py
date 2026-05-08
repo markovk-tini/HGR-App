@@ -141,10 +141,26 @@ class AppConfig:
     preferred_camera_index: Optional[int] = None
     preferred_microphone_name: Optional[str] = None
     tutorial_prompt_version: int = CURRENT_TUTORIAL_PROMPT_VERSION
-    mouse_control_box_center_x: float = 0.50
+    # Mouse-pad-style control box: small, right-shifted area in the
+    # camera frame that maps to the entire monitor — the user only
+    # has to move the cursor-driving hand within a forearm-sized
+    # patch instead of sweeping across the whole frame. Right-shifted
+    # because mouse mode runs off the right hand (left hand is the
+    # toggle pose), so a center-right placement matches where the
+    # right hand naturally rests in the mirrored camera view.
+    mouse_control_box_center_x: float = 0.62
     mouse_control_box_center_y: float = 0.55
-    mouse_control_box_area: float = 0.36
+    mouse_control_box_area: float = 0.18
     mouse_control_box_aspect_power: float = 0.40
+    # Which monitor mouse-mode controls. None = all monitors (the
+    # full virtual desktop, the historical default). 0..N-1 = a
+    # specific monitor's index in QGuiApplication.screens(). The
+    # mouse-mode activation popup writes this on user choice; the
+    # Save Locations -> Mouse Control panel lets users preset it.
+    # Cursor mapping in mouse_controller respects this — the red
+    # mouse-box on the camera frame still spans the same area but
+    # the cursor output gets clamped to the chosen monitor's region.
+    mouse_active_monitor_index: Optional[int] = None
     drawings_save_dir: str = field(default_factory=lambda: str(default_save_directory("drawings")))
     screenshots_save_dir: str = field(default_factory=lambda: str(default_save_directory("screenshots")))
     screen_recordings_save_dir: str = field(default_factory=lambda: str(default_save_directory("screen_recordings")))
@@ -214,6 +230,39 @@ class AppConfig:
     # main_window.py). Only stores user-changed entries to keep the file
     # tidy; defaults are resolved on read.
     gesture_bindings: Dict[str, str] = field(default_factory=dict)
+    # Set True once the Touchless app has shown the first-time
+    # "Allow Touchless to connect to Spotify?" prompt — fires the
+    # first time Spotify is observed running while the engine is
+    # active and the user has no saved Spotify tokens. Latches True
+    # whether the user picks Allow or Don't Allow so the prompt
+    # never repeats; the user can still connect later via the
+    # button at the bottom of the Instructions panel.
+    spotify_first_active_prompt_shown: bool = False
+    # General-tab overlay toggles. Default On for the visible
+    # surfaces (camera view + popups) so first-time users see the
+    # full app; Off for the gaming auto-disable knobs since they're
+    # opt-in.
+    #   overlay_camera_view_enabled: when False, the mini live
+    #     viewer is suppressed (engine still runs; no thumbnail
+    #     window). Useful for users who only want the action label
+    #     without an extra window on screen.
+    #   overlay_text_popups_enabled: when False, transient text
+    #     popups (TouchlessNotice, gesture-binds pill, Spotify
+    #     decline pill, post-action save prompts) are silently
+    #     suppressed — only critical/blocking dialogs still appear.
+    #   overlay_gaming_mode_enabled: when True, text popups are
+    #     auto-suppressed WHILE a known game process is running.
+    #     Distinct from overlay_text_popups_enabled (full off) so
+    #     popups still work when not gaming.
+    #   overlay_gaming_live_view_disabled: when True, the mini live
+    #     viewer is auto-hidden WHILE a known game process is
+    #     running. Pairs with the gaming-mode toggle but is
+    #     separately controllable so users can keep the live view
+    #     during streaming-style sessions.
+    overlay_camera_view_enabled: bool = True
+    overlay_text_popups_enabled: bool = True
+    overlay_gaming_mode_enabled: bool = False
+    overlay_gaming_live_view_disabled: bool = False
 
 
 DEFAULT_CONFIG = AppConfig()
@@ -244,11 +293,17 @@ def load_config() -> AppConfig:
                 values[field_name] = SAVE_NAME_DEFAULTS[output_kind]
 
         # Migrate the mouse control box only when the user still has the old defaults.
+        # Each `if` chain rewrites a previous default to the current default; if
+        # the user changed the value via settings, the change is preserved.
         if abs(float(values.get("mouse_control_box_center_x", 0.0)) - 0.44) < 1e-6:
+            values["mouse_control_box_center_x"] = DEFAULT_CONFIG.mouse_control_box_center_x
+        if abs(float(values.get("mouse_control_box_center_x", 0.0)) - 0.50) < 1e-6:
             values["mouse_control_box_center_x"] = DEFAULT_CONFIG.mouse_control_box_center_x
         if abs(float(values.get("mouse_control_box_center_y", 0.0)) - 0.56) < 1e-6:
             values["mouse_control_box_center_y"] = DEFAULT_CONFIG.mouse_control_box_center_y
         if abs(float(values.get("mouse_control_box_area", 0.0)) - 0.31) < 1e-6:
+            values["mouse_control_box_area"] = DEFAULT_CONFIG.mouse_control_box_area
+        if abs(float(values.get("mouse_control_box_area", 0.0)) - 0.36) < 1e-6:
             values["mouse_control_box_area"] = DEFAULT_CONFIG.mouse_control_box_area
 
         return AppConfig(**values)

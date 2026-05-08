@@ -7,6 +7,6 @@ release tag, and the installer writes the same string into the
 Add/Remove Programs entry.
 """
 
-__version__ = "1.1.0b5"
+__version__ = "1.1.0b6"
 
 # Author: Konstantin Markov

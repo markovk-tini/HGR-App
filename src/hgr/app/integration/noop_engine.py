@@ -64,7 +64,7 @@ _DICTATION_HALLUCINATION_STOPWORDS = {
 
 # Voice commands recognized only when the committed utterance is EXACTLY one
 # of these phrases (after punctuation strip + whitespace collapse + lowercase).
-# The whole-utterance match is the safety — saying "I need a new line of code"
+# The whole-utterance match is the safety â€” saying "I need a new line of code"
 # in a sentence won't trigger because the commit contains more than just the
 # command phrase. The user has to pause, say just the command, then pause.
 _DICTATION_NEWLINE_COMMANDS = frozenset({
@@ -117,7 +117,7 @@ _WHISPER_STOCK_PATTERNS = tuple(
     # Windows / MS Office ProgID hallucinations whisper pulls from training
     # data on low-signal trailing audio (e.g., mic bumps, keyboard noise).
     # The ProgID-like suffix ("MSWordDoc Word.Document.8" or similar) is the
-    # distinguishing signal — legitimate phrases like "I opened a word
+    # distinguishing signal â€” legitimate phrases like "I opened a word
     # document" never include it, so the suffix is required.
     re.compile(
         r"\b(?:microsoft\s+)?(?:word|excel|powerpoint)\s+document"
@@ -166,9 +166,9 @@ def _redecode_overlap(prev_text: str, new_text: str) -> bool:
             if prev_tail[start:start + k] == new_head:
                 return True
 
-    # Pattern 2: prefix re-decode — new and prev share a long common prefix
+    # Pattern 2: prefix re-decode â€” new and prev share a long common prefix
     # (whisper-stream re-emitting the same utterance with refined decoding,
-    # e.g. "fox jumps over the laser" → "fox jumps over the lazy dog").
+    # e.g. "fox jumps over the laser" â†’ "fox jumps over the lazy dog").
     prefix = 0
     for a, b in zip(prev_toks, new_toks):
         if a == b:
@@ -178,7 +178,7 @@ def _redecode_overlap(prev_text: str, new_text: str) -> bool:
     if prefix >= 3 and prefix >= int(min(len(prev_toks), len(new_toks)) * 0.5):
         return True
 
-    # Pattern 3: suffix re-decode — new is mostly contained at the end of prev
+    # Pattern 3: suffix re-decode â€” new is mostly contained at the end of prev
     # (e.g. prev "The quick brown fox jumps over the lazy dog",
     #       new  "The fox jumps over the lazy dog").
     # Require first-token match so we don't wipe out glued prefixes like
@@ -291,7 +291,7 @@ _UNDO_LABEL_PAIRS = {
 # delta-from-1.0 by this multiplier before applying it to the
 # overlay scale. With the velocity-adaptive palm smoother heavily
 # damping slow motion to kill jitter (alpha=0.10 below 1.5% screen
-# / frame), slow stretches felt sluggish without the gain. 1.6×
+# / frame), slow stretches felt sluggish without the gain. 1.6Ã—
 # means a 10% palm-spread becomes ~16% canvas-stretch, which the
 # user reported as the right responsiveness in testing.
 _PINCH_SCALE_SENSITIVITY = 1.6
@@ -314,7 +314,7 @@ class _EngineRunner:
     # holds an external "in-flight" view by reading `busy` and
     # treating True as back-pressure (skip this tick). When inference
     # finishes, the runner invokes `result_callback(frame, result)` on
-    # the runner thread — the callback is responsible for getting back
+    # the runner thread â€” the callback is responsible for getting back
     # to the GUI thread (typically by emitting a Qt signal connected
     # via auto/queued connection).
     #
@@ -394,7 +394,7 @@ class _EngineRunner:
             inference_start = time.perf_counter()
             try:
                 # Hold the engine lock for the entire process_frame
-                # call — main-thread mode-swap callers acquire the
+                # call â€” main-thread mode-swap callers acquire the
                 # same lock via set_engine(), so they will block until
                 # this in-flight inference returns. That guarantees
                 # the engine the swap is closing isn't being touched
@@ -447,6 +447,12 @@ class GestureWorker(QObject):
     save_prompt_completed = Signal(object)
     action_history_changed = Signal(object)
     dictation_stream_ready = Signal(str)
+    # Fired on every off->on transition of mouse mode so the main
+    # window can pop a "choose which monitor to control" picker
+    # before the user starts moving the cursor. Receivers can skip
+    # the popup based on config.mouse_active_monitor_index already
+    # being set — engine doesn't make that decision; UI does.
+    mouse_mode_activated = Signal()
     # Decoupled display path. Emitted from `_tick` immediately after
     # the camera read + flip + prepare step, BEFORE the engine
     # dispatch. Receivers connect to this for the live-view paint
@@ -458,24 +464,24 @@ class GestureWorker(QObject):
     # its payload for text widgets / state.
     # Carries (frame_bgr, capture_monotonic_ts). The timestamp is the
     # `time.monotonic()` value at the moment the reader thread
-    # finished decoding this frame — receivers subtract it from
+    # finished decoding this frame â€” receivers subtract it from
     # `time.monotonic()` at paint time to get end-to-end pipeline
-    # latency (camera → display).
+    # latency (camera â†’ display).
     raw_frame_ready = Signal(object, float)
     # Engine-extracted landmark coordinates per hand. Each hand is a
-    # list of (x, y) tuples in [0, 1] normalized image space — same
+    # list of (x, y) tuples in [0, 1] normalized image space â€” same
     # space the cv2 overlay code used. Receivers feed these into
     # GpuVideoWidget.update_landmarks for GPU-side overlay rendering;
     # we no longer draw landmarks on the BGR frame on the CPU.
     engine_landmarks_ready = Signal(object)
-    # Internal: runner-thread → main-thread bridge for engine results.
+    # Internal: runner-thread â†’ main-thread bridge for engine results.
     # Emitted from the _EngineRunner thread when inference completes;
     # the Auto/Queued connection delivers the slot call on the
-    # GestureWorker's owning (main) thread, so all post-processing —
-    # including overlay widget mutations — stays on the GUI thread.
+    # GestureWorker's owning (main) thread, so all post-processing â€”
+    # including overlay widget mutations â€” stays on the GUI thread.
     _engine_result_ready = Signal(object, object)
     # Pipeline freeze state. Receivers (live-view widgets) use this
-    # to render a "Paused — recording custom gesture" overlay with
+    # to render a "Paused â€” recording custom gesture" overlay with
     # a light blur so the user knows the main app intentionally
     # stopped reacting while a recording window is open.
     frozen_state_changed = Signal(bool)
@@ -486,8 +492,8 @@ class GestureWorker(QObject):
     drawing_overlay_toggle_requested = Signal(str)
     # Pinch-grab transform updates for the visible drawing overlay.
     # Carries absolute (cumulative-since-overlay-shown) values
-    # — dx_norm, dy_norm in normalised screen units, and scale as a
-    # multiplier on the auto-fit base — so the main window forwards
+    # â€” dx_norm, dy_norm in normalised screen units, and scale as a
+    # multiplier on the auto-fit base â€” so the main window forwards
     # them straight to DrawingOverlayWindow.set_grab_transform with
     # no further state.
     drawing_overlay_grab_transform = Signal(float, float, float)
@@ -505,7 +511,7 @@ class GestureWorker(QObject):
     # Lite Mode runs the lite landmark model on a downsampled
     # inference frame. MediaPipe's palm detector internally rescales
     # to a 192-px square ROI for landmark inference, so dropping the
-    # input from 960 → 384 px gives the palm detector ~6x less
+    # input from 960 â†’ 384 px gives the palm detector ~6x less
     # pixels to scan without harming landmark accuracy. Same width
     # Low-FPS mode uses, with the difference that Lite keeps
     # Normal-mode confidence thresholds + stable-frame requirement
@@ -532,7 +538,7 @@ class GestureWorker(QObject):
         self._running = False
         # Pipeline freeze: when True, _tick still emits raw_frame_ready
         # so subscribers (custom-gesture recorder) keep receiving
-        # camera frames, but skips the entire engine pipeline —
+        # camera frames, but skips the entire engine pipeline â€”
         # MediaPipe inference, gesture-action dispatch, all of it.
         # Set via set_pipeline_frozen() while a modal recording window
         # is open so we don't double-run MediaPipe (the recorder runs
@@ -565,7 +571,7 @@ class GestureWorker(QObject):
         # foreshortened pinch can flicker stable_label between
         # 'pinch' and a competing label for one or two frames at
         # a time, which dropped the grab mode to 'none' and forced
-        # an anchor reset every flicker — the user-visible result
+        # an anchor reset every flicker â€” the user-visible result
         # was the drawing snapping back to its baked offset on
         # every dropped frame. We now record the last time we saw
         # the pinch label and treat the user as still pinching for
@@ -578,7 +584,7 @@ class GestureWorker(QObject):
         # this many seconds CONTINUOUSLY (within grace tolerance)
         # before grab mode actually engages. Stops the drawing
         # from jumping the moment a transient frame stabilises to
-        # 'pinch' — the user reported feeling like the grab kicked
+        # 'pinch' â€” the user reported feeling like the grab kicked
         # in 'before I'm actually in pinch'. _pinch_streak_start_*
         # records when the current pinch streak began (0.0 when no
         # streak is in progress).
@@ -593,7 +599,7 @@ class GestureWorker(QObject):
         # so neutral motion isn't artificially laggy.
         self._pinch_smoothed_primary: Optional[tuple[float, float]] = None
         self._pinch_smoothed_secondary: Optional[tuple[float, float]] = None
-        # 0.0 → output never changes (full damping); 1.0 → no
+        # 0.0 â†’ output never changes (full damping); 1.0 â†’ no
         # damping. 0.35 keeps the response feel-snappy while
         # killing single-frame jitter.
         self._pinch_smooth_alpha: float = 0.35
@@ -642,7 +648,7 @@ class GestureWorker(QObject):
         self._volume_level: float | None = self.volume_controller.get_level()
         self._volume_status_text = "idle"
         # Mute cache must be initialised before the first call to
-        # _read_system_mute() — that helper reads these fields and
+        # _read_system_mute() â€” that helper reads these fields and
         # sets the cache, and gets called as part of constructing
         # _volume_muted on the very next line.
         self._mute_cache_value: bool = False
@@ -907,8 +913,8 @@ class GestureWorker(QObject):
         self._gestures_enabled = True
         self._selection_prompt_active = False
         self._selection_prompt_title = "Which file/folder?"
-        self._selection_prompt_items: list[tuple[int, str, str]] = []
-        self._selection_prompt_instruction = "Say the corresponding number."
+        self._selection_prompt_items: list[tuple[str, str, str]] = []
+        self._selection_prompt_instruction = "Say the corresponding letter."
         self._save_prompt_active = False
         self._save_prompt_text = "Where would you like to save this file?"
 
@@ -919,7 +925,7 @@ class GestureWorker(QObject):
         # singleShot scheduled at the end of every _on_engine_result.
         # That path lets the next tick fire as soon as the previous
         # cycle ends, instead of waiting for a 15-ms-aligned timer
-        # event — which we were observing get missed whenever a
+        # event â€” which we were observing get missed whenever a
         # cycle's work ran past its slot, capping FPS at 27 even
         # when per-cycle work measured under 12 ms.
         self._timer = QTimer(self)
@@ -931,7 +937,7 @@ class GestureWorker(QObject):
         # dispatches a frame here and returns immediately; inference
         # runs in parallel, and `_engine_result_ready` fires the
         # post-engine handler back on the main thread when done. See
-        # `_EngineRunner` docstring for the full rationale — short
+        # `_EngineRunner` docstring for the full rationale â€” short
         # version: per-frame inference is the single heaviest CPU
         # step (12-25 ms MP / 2-7 ms GPU) and was the dominant chunk
         # of main-thread work, capping `actual self._fps` at 16-26
@@ -940,7 +946,7 @@ class GestureWorker(QObject):
         self._engine_runner = _EngineRunner()
         self._engine_result_ready.connect(self._on_engine_result)
 
-        # Custom-gesture live runner — owns its own classifier + hold/
+        # Custom-gesture live runner â€” owns its own classifier + hold/
         # cooldown state and fires actions when the user holds a
         # registered custom pose. Initializes from disk so any gesture
         # the user previously saved is live immediately.
@@ -955,7 +961,7 @@ class GestureWorker(QObject):
             self._custom_gesture_runner = None
 
         # Per-tick timing markers shared between _tick and
-        # _on_engine_result — needed because the engine call now
+        # _on_engine_result â€” needed because the engine call now
         # returns asynchronously, so the post-engine handler can't
         # see _tick's local `t0`, `t_read`, `t_prep`. Format:
         # (debug_timing_enabled, t0, t_read, t_prep).
@@ -979,12 +985,12 @@ class GestureWorker(QObject):
 
         # Skip-frame inference state. When Lite Mode is on AND no
         # hand was visible in the previous frame, we skip MediaPipe
-        # on every other tick — the detector is the single biggest
+        # on every other tick â€” the detector is the single biggest
         # CPU cost (12-25 ms), and there's nothing it could surface
         # on an empty frame that the next-tick inference won't catch
         # one frame (~16 ms) later. As soon as a hand appears we go
         # back to full-rate inference so dynamic gestures (swipe,
-        # repeat-circle) — which depend on frame-by-frame motion —
+        # repeat-circle) â€” which depend on frame-by-frame motion â€”
         # are never sampled at half-rate. `_inference_skipped_last`
         # guarantees we never skip two ticks in a row, so we always
         # re-sample to detect a new hand entering the frame.
@@ -1190,7 +1196,7 @@ class GestureWorker(QObject):
             return
         # Sanity guard against llama hallucinations / paraphrasing.
         # Allow legitimate de-duplication (corrections that strip stuttered
-        # repeats) — those can drop ~half the chars/words and still be right.
+        # repeats) â€” those can drop ~half the chars/words and still be right.
         # Reject only if the result is obviously broken: empty, drastically
         # truncated, or wildly expanded.
         if not corrected.strip("\n\r\t .,;:!?'\""):
@@ -1250,7 +1256,7 @@ class GestureWorker(QObject):
             if not prev_text or state.get("last_final_refined"):
                 return
             if state.get("committed"):
-                # streaming hypothesis already typing the next utterance — skip
+                # streaming hypothesis already typing the next utterance â€” skip
                 return
             if state.get("stream_hyp_chars", 0):
                 return
@@ -1264,7 +1270,7 @@ class GestureWorker(QObject):
                 state["last_final_refined"] = True
                 return
             # safety: don't apply if the refined text is wildly larger than what
-            # was streamed — usually means VAD captured multiple utterances and
+            # was streamed â€” usually means VAD captured multiple utterances and
             # we'd duplicate text in the editor.
             if len(refined_text) > max(60, int(len(prev_text) * 2.0)):
                 print(f"[refiner] skipping: refined too large ({len(refined_text)} vs streamed {len(prev_text)})")
@@ -1365,7 +1371,7 @@ class GestureWorker(QObject):
         # starts on plain freehand, the most common state) and it
         # doesn't survive an app restart (the field is re-initialized
         # to False in __init__; nothing persists it to config). The
-        # tools that DO persist — color, thickness, eraser kind —
+        # tools that DO persist â€” color, thickness, eraser kind â€”
         # are owned by AppConfig, not the engine runtime, so they
         # are unaffected by this reset.
         if self._drawing_shape_mode:
@@ -1385,7 +1391,7 @@ class GestureWorker(QObject):
         # It also can never survive an app restart (the field is
         # initialised to False in __init__ and not persisted to
         # config). Color, thickness, and eraser kind ARE persisted
-        # via AppConfig — they're not touched here.
+        # via AppConfig â€” they're not touched here.
         if not self._drawing_mode_enabled and self._drawing_shape_mode:
             self._drawing_shape_mode = False
             self._queue_drawing_request("shape_off")
@@ -1470,9 +1476,9 @@ class GestureWorker(QObject):
         if finger.state in {"closed", "mostly_curled", "partially_curled"}:
             return True
         # Rotation-invariant tucked-thumb detection. MediaPipe's
-        # `openness` and `state` are derived from the wrist→tip
+        # `openness` and `state` are derived from the wristâ†’tip
         # extension distance, which grows when the hand tilts even
-        # slightly — so a thumb that's still physically tucked
+        # slightly â€” so a thumb that's still physically tucked
         # against the palm starts reading as 'fully_open' the
         # moment the user rotates their wrist. Two more stable
         # signals exist on the finger object: `palm_distance`
@@ -1504,7 +1510,7 @@ class GestureWorker(QObject):
         if index is None or middle is None or ring is None or pinky is None:
             return False
 
-        # Base geometry — required by EITHER path below. Index has
+        # Base geometry â€” required by EITHER path below. Index has
         # to be extended-ish, the other three folded-ish, middle
         # not visibly spread away from the palm. These are loose
         # enough that any honest 'one' shape passes them, but
@@ -1524,7 +1530,7 @@ class GestureWorker(QObject):
         if not base_geometry:
             return False
 
-        # Path 1 — recogniser confirms 'one'. Either via the
+        # Path 1 â€” recogniser confirms 'one'. Either via the
         # stabilised label or via a moderate-confidence raw
         # match (lowered the threshold to 0.40 because the user
         # reported pinch-shaped tightening that left 'one'
@@ -1536,19 +1542,19 @@ class GestureWorker(QObject):
         if stable == "one" or (raw == "one" and confidence >= 0.40):
             return True
 
-        # Path 2 — recogniser hasn't labelled this as 'one' (could
+        # Path 2 â€” recogniser hasn't labelled this as 'one' (could
         # be wrist rotation / occlusion / borderline confidence)
         # but the geometry is unambiguous. Tighter than Path 1's
         # base check so 'two' / 'three' / 'pinch' / 'mute' don't
         # leak through:
         #   - index must be `fully_open` (not partially_curled),
         #     which excludes pinch and mid-transition shapes;
-        #   - openness on the index ≥ 0.65 — a real one;
+        #   - openness on the index â‰¥ 0.65 â€” a real one;
         #   - middle / ring / pinky must each be in
-        #     {closed, mostly_curled} — excludes any 'two' or
+        #     {closed, mostly_curled} â€” excludes any 'two' or
         #     'three' frame where one of them is still
         #     partially_curled;
-        #   - middle openness ≤ 0.30 — even tighter than the
+        #   - middle openness â‰¤ 0.30 â€” even tighter than the
         #     base 0.60, so a recogniser glitch that briefly
         #     reads middle as half-open can't slip through.
         strict_one = (
@@ -1664,10 +1670,10 @@ class GestureWorker(QObject):
         # user holds their finger still while drawing. Apply a
         # second per-cursor EMA with a velocity-adaptive alpha:
         #   - slow motion (< 0.005 normalized, ~3 px on 640-wide)
-        #     → alpha 0.30 (heavy smoothing, suppresses jitter)
+        #     â†’ alpha 0.30 (heavy smoothing, suppresses jitter)
         #   - fast motion (> 0.030 normalized, ~19 px / fast stroke)
-        #     → alpha 0.85 (near-passthrough, preserves response)
-        #   - between → linear ramp
+        #     â†’ alpha 0.85 (near-passthrough, preserves response)
+        #   - between â†’ linear ramp
         # First frame after the cursor was None (drawing mode just
         # entered or hand just re-acquired) snaps to the current
         # value with no smoothing so the cursor doesn't visibly
@@ -1709,7 +1715,7 @@ class GestureWorker(QObject):
         #      of what the classifier thinks)
         #
         # User screenshot showed the failing case: state=fully_open,
-        # openness=0.54, curl=0.46, spread=0.46 — all four signals
+        # openness=0.54, curl=0.46, spread=0.46 â€” all four signals
         # in the borderline band. The new AND-of-four rejects it.
         thumb = hand_reading.fingers.get("thumb")
         thumb_state = getattr(thumb, "state", None) if thumb is not None else None
@@ -1737,7 +1743,7 @@ class GestureWorker(QObject):
         # Track sustained draw-pose intent. Single-frame draw_active
         # blips (e.g. dropping an open hand briefly reads as draw
         # pose for one frame as the wrist swings down) increment
-        # the counter to 1 only — and we require 2 to actually
+        # the counter to 1 only â€” and we require 2 to actually
         # start a new stroke. Once the user is mid-stroke (grace
         # window is active) we extend per-frame as before so tilt
         # / rotation wobble doesn't break the stroke.
@@ -1754,7 +1760,7 @@ class GestureWorker(QObject):
         already_drawing = now < self._drawing_draw_grace_until
         if draw_active and (already_drawing or self._drawing_draw_active_streak >= 2):
             # Either continuing an active stroke (already in grace)
-            # or sustained draw pose for >=2 frames (new stroke) —
+            # or sustained draw pose for >=2 frames (new stroke) â€”
             # both extend grace by 0.40 s. Anti-misfire: a single
             # frame draw_active blip never extends grace, so a
             # passing hand-drop can't start an unintended stroke.
@@ -1971,7 +1977,7 @@ class GestureWorker(QObject):
             height, width = snapshot.shape[:2]
             alpha = snapshot[:, :, 3:4].astype(np.float32) / 255.0
             fg = snapshot[:, :, :3].astype(np.float32)
-            # Pick a background that contrasts with the average stroke color —
+            # Pick a background that contrasts with the average stroke color â€”
             # mirrors the screen-overlay save so dark pens on dark bg stay readable.
             mean_stroke_bgr = fg.sum(axis=(0, 1)) / max(float(alpha.sum()) * 3.0, 1.0)
             bg_color = (255.0, 255.0, 255.0) if float(mean_stroke_bgr.mean()) < 60.0 else (0.0, 0.0, 0.0)
@@ -2444,7 +2450,7 @@ class GestureWorker(QObject):
         thickness = int(max(2, self._drawing_brush_thickness))
         # Live drawing left the canvas ending at mid(P_{N-1}, P_N).
         # Add the trailing stub mid -> P_N here so the canvas matches
-        # what _camera_draw_rerender_from_strokes would produce —
+        # what _camera_draw_rerender_from_strokes would produce â€”
         # otherwise an erase / undo pass would visibly nudge the
         # stroke endpoint.
         if (
@@ -2666,7 +2672,7 @@ class GestureWorker(QObject):
         if self._drawing_tool == "draw":
             self._camera_draw_erasing = False
             if self._camera_draw_last_point is None:
-                # First sample of stroke — record only, no draw yet.
+                # First sample of stroke â€” record only, no draw yet.
                 # The Bezier-through-midpoints scheme below needs at
                 # least two samples to produce its first segment.
                 self._camera_draw_push_history()
@@ -2677,7 +2683,7 @@ class GestureWorker(QObject):
             p_prev = self._camera_draw_last_point
             stroke_points = self._camera_draw_active_stroke_points
             if len(stroke_points) < 2:
-                # Second sample — straight line from P_prev to
+                # Second sample â€” straight line from P_prev to
                 # mid(P_prev, P_new). Re-render produces the same
                 # leading stub so canvas matches across redraws.
                 mid = (
@@ -2686,7 +2692,7 @@ class GestureWorker(QObject):
                 )
                 cv2.line(self._camera_draw_canvas, p_prev, mid, color_bgra, thickness, cv2.LINE_AA)
             else:
-                # Third+ sample — quadratic Bezier from
+                # Third+ sample â€” quadratic Bezier from
                 # mid(P_prev_prev, P_prev) to mid(P_prev, P_new) with
                 # P_prev as the control point. This is the standard
                 # whiteboard-app smoothing: the curve passes through
@@ -2959,6 +2965,33 @@ class GestureWorker(QObject):
         return chosen, True
 
     @staticmethod
+    def _filter_banner_label_by_handedness(
+        label: str,
+        active: bool,
+        handedness: Optional[str],
+    ) -> tuple[str, bool]:
+        # Suppress labels that the static-pose binding registry only
+        # recognises on the *other* hand. Without this, the static
+        # recognizer happily fires the same shape-based label
+        # regardless of which physical hand is in frame, so the user
+        # sees confusing banners like "left | mute" on a left hand
+        # even though mute is wired exclusively to the right hand
+        # (and the action-fire path is already handedness-gated, so
+        # the banner is the only visible artifact). Applied to BOTH
+        # primary and secondary hands at draw time.
+        if not label or label == "neutral":
+            return label, active
+        if not handedness or handedness not in {"Left", "Right"}:
+            return label, active
+        own_pose = pose_id_for_static_label(handedness, label)
+        if own_pose is not None:
+            return label, active
+        other = "Right" if handedness == "Left" else "Left"
+        if pose_id_for_static_label(other, label) is not None:
+            return "", False
+        return label, active
+
+    @staticmethod
     def _build_hand_overlay_info(
         tracked_hand,
         *,
@@ -2966,7 +2999,7 @@ class GestureWorker(QObject):
         active: bool,
     ) -> dict:
         # Pack a per-hand display payload for GpuVideoWidget. Tuples
-        # / floats only — the dict crosses the Qt signal queue so we
+        # / floats only â€” the dict crosses the Qt signal queue so we
         # keep it free of any object that the receiver thread can't
         # safely consume. bbox is normalized [0, 1] image coords.
         landmarks_arr = getattr(tracked_hand, "landmarks", None)
@@ -3046,6 +3079,51 @@ class GestureWorker(QObject):
             self.chrome_router.reset()
             self.spotify_router.reset()
 
+    def _cursor_to_active_monitor(self, x: float, y: float) -> tuple[float, float]:
+        """Remap a normalized cursor position [0,1] from "covers the
+        full virtual desktop" (the historical meaning of move_normalized)
+        to "covers only the user's chosen monitor" when
+        config.mouse_active_monitor_index is set. Falls through to
+        the input untouched when:
+          - The user picked "All Monitors" (index None).
+          - QGuiApplication isn't ready yet (very-early-startup edge).
+          - The picked monitor index points outside the current
+            screens list (display unplugged after Save Locations was
+            set).
+        Cached cheaply per-call: monitor geometry only changes on
+        physical re-plug, but the lookup is microsecond-scale so we
+        don't bother with explicit cache invalidation."""
+        idx = getattr(self.config, "mouse_active_monitor_index", None)
+        if not isinstance(idx, int):
+            return (x, y)
+        try:
+            from PySide6.QtGui import QGuiApplication
+            screens = list(QGuiApplication.screens() or [])
+            if not (0 <= idx < len(screens)):
+                return (x, y)
+            mon = screens[idx].geometry()
+            # Virtual desktop bounds — fetched from the mouse
+            # controller because it goes through the same Win32
+            # SM_*VIRTUALSCREEN metrics the actual SetCursorPos
+            # call uses, so the rectangles match exactly.
+            bounds = self.mouse_controller.virtual_bounds()
+            if bounds is None:
+                return (x, y)
+            vleft, vtop, vw, vh = bounds
+            if vw <= 0 or vh <= 0:
+                return (x, y)
+            # Monitor's region in virtual-desktop normalized coords.
+            rel_x = (mon.left() - vleft) / float(vw)
+            rel_y = (mon.top() - vtop) / float(vh)
+            rel_w = mon.width() / float(vw)
+            rel_h = mon.height() / float(vh)
+            # User's [0,1] cursor scales into the monitor's slice.
+            new_x = rel_x + max(0.0, min(1.0, x)) * rel_w
+            new_y = rel_y + max(0.0, min(1.0, y)) * rel_h
+            return (max(0.0, min(1.0, new_x)), max(0.0, min(1.0, new_y)))
+        except Exception:
+            return (x, y)
+
     def _build_mouse_tracker(self) -> MouseGestureTracker:
         return MouseGestureTracker(
             control_box_center_x=self.config.mouse_control_box_center_x,
@@ -3099,7 +3177,7 @@ class GestureWorker(QObject):
         # Build the new engine first, then hand it to the runner; the
         # runner's set_engine call acquires the engine lock, blocking
         # briefly until any in-flight inference returns. ONLY THEN is
-        # it safe to close() the old engine — closing while the runner
+        # it safe to close() the old engine â€” closing while the runner
         # thread is mid-call would crash the MediaPipe / ONNX session.
         # All mid-session engine rebuilds (Lite Mode toggle, GPU Mode
         # toggle, auto-low-fps engage/disengage, set_low_fps_mode) go
@@ -3196,7 +3274,7 @@ class GestureWorker(QObject):
             pass
 
     def _handle_low_fps_suggestion_activate(self) -> None:
-        # User clicked "Low FPS Mode" on the toast — flip the persistent
+        # User clicked "Low FPS Mode" on the toast â€” flip the persistent
         # setting and apply it live. Mirror the path the Settings button uses.
         try:
             self.set_low_fps_mode(True)
@@ -3223,7 +3301,7 @@ class GestureWorker(QObject):
 
     def _perf_optimisations_enabled(self) -> bool:
         # Lite Mode and GPU Mode are independent toggles, but both
-        # imply "the user opted into the performance pipeline" —
+        # imply "the user opted into the performance pipeline" â€”
         # ffmpeg-MJPG capture, skip-frame inference, throttled
         # debug-frame emit, and the per-frame timing diagnostic.
         # Without this, a user who enables only GPU Mode keeps the
@@ -3242,11 +3320,11 @@ class GestureWorker(QObject):
         # GPU Mode threads through to every detector flavour. The
         # runtime loader honours it best-effort and falls back to
         # CPU MediaPipe when no GPU path is reachable, so toggling
-        # it on can never break gesture recognition — it just won't
+        # it on can never break gesture recognition â€” it just won't
         # speed anything up if the GPU path can't engage.
         prefer_gpu = bool(getattr(self.config, "gpu_mode", False))
         if self._low_fps_active:
-            # Low-FPS already implies lite landmark model — keep its
+            # Low-FPS already implies lite landmark model â€” keep its
             # tuned thresholds; lite_mode would be redundant here.
             detector = HandDetector(
                 min_detection_confidence=0.34,
@@ -3336,7 +3414,7 @@ class GestureWorker(QObject):
                 return
             # Release the OpenCV cap before launching ffmpeg so the
             # camera isn't held open by two processes (Windows
-            # serialises capture access — the second open would
+            # serialises capture access â€” the second open would
             # fail).
             old_cap = self._cap
             self._cap = None
@@ -3350,7 +3428,7 @@ class GestureWorker(QObject):
             if ffmpeg_cap is not None and ffmpeg_cap.isOpened():
                 self._cap = ffmpeg_cap
                 return
-            # ffmpeg failed — fall back to a fresh OpenCV cap so the
+            # ffmpeg failed â€” fall back to a fresh OpenCV cap so the
             # live view doesn't die on us.
             try:
                 ffmpeg_cap.release()
@@ -3387,7 +3465,7 @@ class GestureWorker(QObject):
             return
         self._swap_engine_safely()
         self._fps = 0.0
-        # Don't re-swap the camera if Lite Mode is also on — set_lite
+        # Don't re-swap the camera if Lite Mode is also on â€” set_lite
         # _mode already manages the ffmpeg cap and we'd just thrash
         # the device. Only fire when GPU Mode flips and Lite Mode
         # isn't itself driving the same camera path.
@@ -3584,7 +3662,7 @@ class GestureWorker(QObject):
         but skips MediaPipe inference, gesture-action dispatch, and
         the debug-payload emit. Live-view widgets observe
         frozen_state_changed to render their paused/blurred overlay.
-        Idempotent — repeated set_pipeline_frozen(True) calls don't
+        Idempotent â€” repeated set_pipeline_frozen(True) calls don't
         re-emit, so the receiver doesn't churn its overlay state."""
         new_state = bool(frozen)
         if new_state == self._frozen:
@@ -3616,7 +3694,7 @@ class GestureWorker(QObject):
         self._async_result_pending = False
         self._tick_timing_state = None
         if self._cap is not None:
-            # Don't release the phone-camera-QR capture — it's owned by the
+            # Don't release the phone-camera-QR capture â€” it's owned by the
             # MainWindow/PhoneCameraServer and must survive engine restarts
             # (e.g. toggling Low FPS Mode re-opens the camera via start()).
             if self._cap is not self._phone_camera_capture:
@@ -3704,7 +3782,7 @@ class GestureWorker(QObject):
             # rejects it now, etc.) fall back to whatever the preferred
             # / first-available helper finds. Without this, a user
             # whose saved camera fails to open hits a black "no camera"
-            # screen even though other cameras are present — exactly
+            # screen even though other cameras are present â€” exactly
             # the start-button-does-nothing report from the field.
             if result is None or result[1] is None:
                 result = open_preferred_or_first_available(
@@ -3722,7 +3800,7 @@ class GestureWorker(QObject):
         elif use_phone_url:
             result = open_phone_camera_url(phone_url)
             if result[1] is None:
-                # Phone camera unreachable at startup — fall back to the last
+                # Phone camera unreachable at startup â€” fall back to the last
                 # preferred local camera so the app can still run. The UI will
                 # reflect this via the live-status path (status_changed signal).
                 result = open_preferred_or_first_available(self.config.preferred_camera_index, max_index=self.config.camera_scan_limit)
@@ -3755,7 +3833,7 @@ class GestureWorker(QObject):
             _log("skipped: low_fps_mode is active")
             return open_result
         # Camera-side ffmpeg/MJPG swap fires for either Lite Mode
-        # or GPU Mode — without this, a user who enabled only GPU
+        # or GPU Mode â€” without this, a user who enabled only GPU
         # Mode would keep OpenCV's YUY2 30 fps camera ceiling and
         # the GPU inference speedup couldn't materialize as more
         # live FPS. See _perf_optimisations_enabled.
@@ -3799,7 +3877,7 @@ class GestureWorker(QObject):
         _log(f"opening ffmpeg cap: device={device_name!r} 1280x720 @ 60 fps MJPG")
         # Release the OpenCV cap BEFORE starting ffmpeg. Windows
         # DirectShow gives exclusive capture access to one process at
-        # a time on most consumer webcams — if OpenCV still holds the
+        # a time on most consumer webcams â€” if OpenCV still holds the
         # device, ffmpeg's open will fail with "device busy" and we
         # silently fall through to OpenCV's slow path. So we let go
         # of the camera first, attempt ffmpeg, and if ffmpeg can't
@@ -3816,7 +3894,7 @@ class GestureWorker(QObject):
         if ffmpeg_cap is not None and ffmpeg_cap.isOpened():
             _log("ffmpeg cap engaged")
             return (info, ffmpeg_cap)
-        _log("ffmpeg cap startup failed — falling back to a fresh OpenCV cap")
+        _log("ffmpeg cap startup failed â€” falling back to a fresh OpenCV cap")
         if ffmpeg_cap is not None:
             try:
                 ffmpeg_cap.release()
@@ -3830,7 +3908,7 @@ class GestureWorker(QObject):
         # observed because by the time ffmpeg gave up the driver had
         # long since freed the device. The new 2.5 s timeout opens
         # the race on slow-release webcams (Razer Kiyo Pro is the
-        # one we observed in user logs — it can take 1.5-2 s to
+        # one we observed in user logs â€” it can take 1.5-2 s to
         # finish releasing). Retry up to 8 times with 250 ms gaps:
         # total worst-case added latency 2 s, which is still half
         # of the 4 s saved by dropping the per-attempt ffmpeg
@@ -3849,7 +3927,7 @@ class GestureWorker(QObject):
                 return recovered
             time.sleep(0.25)
         # Last-ditch: open with Media Foundation so we have *some*
-        # camera object — even default-format YUY2 is better than
+        # camera object â€” even default-format YUY2 is better than
         # leaving the engine with self._cap = None. Explicit MSMF
         # (rather than CAP_ANY whose Windows resolution varies by
         # OpenCV build) keeps this path consistent with the
@@ -3865,7 +3943,7 @@ class GestureWorker(QObject):
         except Exception:
             pass
         _log(
-            f"all OpenCV reopens failed after ffmpeg startup miss — "
+            f"all OpenCV reopens failed after ffmpeg startup miss â€” "
             f"engine will report no-camera and tutorial/UI will show 'runtime stopped'"
         )
         return open_result
@@ -3965,7 +4043,7 @@ class GestureWorker(QObject):
     def _tick(self) -> None:
         if not self._running or self._cap is None or self.engine is None:
             return
-        # Per-frame timing diagnostic — sampled when Lite Mode is on
+        # Per-frame timing diagnostic â€” sampled when Lite Mode is on
         # so we can attribute fps drops to camera vs MediaPipe vs
         # downstream work. Lazy so non-debug callers pay no
         # clock-syscall cost.
@@ -3975,7 +4053,7 @@ class GestureWorker(QObject):
         t_read = time.perf_counter() if debug_timing else 0.0
         if not ok:
             # Camera stalled briefly (ffmpeg pipe between frames,
-            # No fresh frame this poll — let the periodic 15 ms
+            # No fresh frame this poll â€” let the periodic 15 ms
             # QTimer drive the next attempt. Tight singleShot(0)
             # rescheduling here previously starved Qt's paint
             # event dispatcher on the main thread (paint rate
@@ -3991,17 +4069,18 @@ class GestureWorker(QObject):
         # toggled it on for unrelated reasons and ended up with the
         # main app showing camera-perspective with no obvious cause.
         # The flag is kept on AppConfig for backwards compatibility
-        # but ignored here so every Touchless surface — engine,
-        # tutorial, recorder, sandbox, preview — shows the same
+        # but ignored here so every Touchless surface â€” engine,
+        # tutorial, recorder, sandbox, preview â€” shows the same
         # selfie view consistently.
-        frame = cv2.flip(frame, 1)
+        if not bool(getattr(self.config, "camera_source_is_mirrored", False)):
+            frame = cv2.flip(frame, 1)
         frame = self._prepare_runtime_frame(frame)
         t_prep = time.perf_counter() if debug_timing else 0.0
         # Camera-target drawing composite. The drawing canvas
         # accumulates strokes in _update_camera_drawing_canvas
         # (called per tick), but the GPU-decoupled-display rewrite
         # accidentally dropped the call site that BLITS that canvas
-        # onto the displayed frame — so strokes were going into the
+        # onto the displayed frame â€” so strokes were going into the
         # canvas correctly but never reached the live view, which
         # is why 'switch view' to camera mode showed nothing as the
         # user drew. Blend before the raw_frame_ready emit so the
@@ -4020,7 +4099,7 @@ class GestureWorker(QObject):
         # inference is slow (Valorant or screen capture loading the
         # GPU pushes ONNX inference latency from ~30 ms to ~500 ms).
         # If we ran the back-pressure check first and returned early,
-        # the display would only refresh when inference finishes —
+        # the display would only refresh when inference finishes â€”
         # collapsing visible fps to 2-5 and producing the multi-
         # second perceived lag users reported during gaming.
         try:
@@ -4043,7 +4122,7 @@ class GestureWorker(QObject):
         tick_now = time.time()
         if self._should_skip_forced_fps_tick(tick_now):
             return
-        # Pipeline freeze: the recorder dialog is open. Stop here —
+        # Pipeline freeze: the recorder dialog is open. Stop here â€”
         # the recorder runs its OWN MediaPipe pass on the raw frame
         # we just emitted, so a second pass in this worker would be
         # pure duplicate cost (and was the cause of the user-reported
@@ -4056,11 +4135,11 @@ class GestureWorker(QObject):
         # Smart skip-frame inference: when Lite Mode is on AND we
         # know the previous frame was empty (no hand), skip MediaPipe
         # this tick and synthesise a "no hand" result. Never skip two
-        # ticks in a row — that guarantees we'll always detect a new
+        # ticks in a row â€” that guarantees we'll always detect a new
         # hand within one camera frame (~16 ms). When a hand was
         # visible last tick we always run inference, so dynamic
-        # gestures (swipes, repeat-circle) — which feed every frame's
-        # landmark velocity to the dynamic recognizer — never lose
+        # gestures (swipes, repeat-circle) â€” which feed every frame's
+        # landmark velocity to the dynamic recognizer â€” never lose
         # any frames during a gesture. Net: ~50% of MediaPipe's cost
         # disappears during empty-frame periods (idle / between
         # gestures), no impact during active gesturing.
@@ -4077,7 +4156,7 @@ class GestureWorker(QObject):
         self._tick_timing_state = (debug_timing, t0, t_read, t_prep)
         if skip_inference:
             # neutral_result_for_frame is a cheap helper (no detector
-            # call) — keep it inline so we don't pay a thread hop for
+            # call) â€” keep it inline so we don't pay a thread hop for
             # what would otherwise be a sub-millisecond operation.
             result = self.engine.neutral_result_for_frame(frame)
             self._inference_skipped_last = True
@@ -4114,7 +4193,7 @@ class GestureWorker(QObject):
         #   2. Direct call from _tick when the runner couldn't accept
         #      a submission and we fell back to inline inference.
         #   3. Queued signal from the _EngineRunner thread when async
-        #      inference completes — Qt's auto-connection routes the
+        #      inference completes â€” Qt's auto-connection routes the
         #      cross-thread emit through the GUI thread's event loop,
         #      so widget mutations below are safe.
         # Clear the async-pending guard up front so the next _tick is
@@ -4124,7 +4203,7 @@ class GestureWorker(QObject):
         self._async_result_pending = False
         # If the worker stopped between dispatch and result delivery
         # (Stop button hit while a frame was in flight), drop the
-        # result silently — the receivers have already detached.
+        # result silently â€” the receivers have already detached.
         if not self._running or result is None:
             return
         debug_timing, t0, t_read, t_prep = self._tick_timing_state or (False, 0.0, 0.0, 0.0)
@@ -4160,7 +4239,7 @@ class GestureWorker(QObject):
         # Both hands are treated equally: each hand's box is red by
         # default and turns green when THAT hand's own prediction
         # is non-neutral. There is no primary/secondary distinction
-        # in the display — _normalize_result_right_primary above
+        # in the display â€” _normalize_result_right_primary above
         # only re-routes which hand the existing right-hand-specific
         # internal logic operates on; the engine produces a
         # prediction for each hand independently (result.prediction
@@ -4169,7 +4248,7 @@ class GestureWorker(QObject):
         try:
             # Pull the runner's currently-held custom gesture (if any)
             # so we can paint its name as the banner over the matching
-            # hand — same affordance built-in gestures get. Resolved
+            # hand â€” same affordance built-in gestures get. Resolved
             # ONCE per frame; applied to whichever hand's handedness
             # matches the gesture's stored hand. None when no match.
             custom_match: Optional[tuple[str, Optional[str]]] = None
@@ -4186,7 +4265,7 @@ class GestureWorker(QObject):
                     return default_label, default_active
                 cm_name, cm_hand = custom_match
                 # cm_hand=None means the gesture is bound to either
-                # hand — show on whichever hand is matched. Otherwise
+                # hand â€” show on whichever hand is matched. Otherwise
                 # only show on the matching hand.
                 if cm_hand is not None and cm_hand != hand_handedness:
                     return default_label, default_active
@@ -4196,6 +4275,9 @@ class GestureWorker(QObject):
             if result.found and result.tracked_hand is not None:
                 label, active = self._gesture_banner_label(result.prediction)
                 primary_handedness = getattr(result.tracked_hand, "handedness", None)
+                label, active = self._filter_banner_label_by_handedness(
+                    label, active, primary_handedness
+                )
                 label, active = _apply_custom_label(label, active, primary_handedness)
                 hands_info.append(
                     self._build_hand_overlay_info(
@@ -4209,6 +4291,9 @@ class GestureWorker(QObject):
                 sec_pred = getattr(result, "secondary_prediction", None)
                 label, active = self._gesture_banner_label(sec_pred)
                 sec_handedness = getattr(secondary_hand, "handedness", None)
+                label, active = self._filter_banner_label_by_handedness(
+                    label, active, sec_handedness
+                )
                 label, active = _apply_custom_label(label, active, sec_handedness)
                 hands_info.append(
                     self._build_hand_overlay_info(
@@ -4224,6 +4309,7 @@ class GestureWorker(QObject):
                 except Exception:
                     debug = None
                 if debug is not None and debug.camera_control_bounds is not None:
+                    raw_active = getattr(self.config, "mouse_active_monitor_index", None)
                     mouse_overlay = {
                         "bounds": tuple(float(v) for v in debug.camera_control_bounds),
                         "anchor": (
@@ -4242,6 +4328,17 @@ class GestureWorker(QObject):
                             tuple(float(v) for v in debug.cursor_position)
                             if debug.cursor_position is not None
                             else None
+                        ),
+                        # Which monitor the cursor is currently
+                        # constrained to (None = all monitors). The
+                        # gpu_video_widget overlay paints the chosen
+                        # screen highlighted and dims the rest so the
+                        # user can confirm at a glance which display
+                        # they're driving — fixes the "I picked
+                        # Monitor 1 but the live view still shows
+                        # both highlighted" report.
+                        "active_monitor_index": (
+                            int(raw_active) if isinstance(raw_active, int) else None
                         ),
                     }
             if mouse_overlay is not None:
@@ -4271,13 +4368,13 @@ class GestureWorker(QObject):
                 # MediaPipe-compatible AND configured the same way the
                 # recorder uses (model_complexity=1), reuse the engine's
                 # already-extracted landmarks. Skips a redundant private
-                # MediaPipe pass and saves ~5–10 ms/frame.
+                # MediaPipe pass and saves ~5â€“10 ms/frame.
                 #
                 # Slow path: when the runtime differs from the recorder
                 # (ONNX/DirectML GPU, or lite mode with model_complexity=0),
                 # fall back to the runner's private MediaPipe pass so the
                 # landmark distribution matches what the user trained
-                # against. Without this, classifier scores drop ~0.10–0.15
+                # against. Without this, classifier scores drop ~0.10â€“0.15
                 # below the trained baseline and gestures get missed.
                 use_engine_landmarks = self._custom_runner_can_use_engine_landmarks()
                 fired = None
@@ -4311,7 +4408,7 @@ class GestureWorker(QObject):
                     )
             except Exception as exc:
                 # A bad sample / classifier hiccup must not break the
-                # main pipeline — log once and continue.
+                # main pipeline â€” log once and continue.
                 print(f"[custom-gestures] process error: {exc}")
 
         hand_handedness = result.tracked_hand.handedness if result.found and result.tracked_hand is not None else None
@@ -4319,7 +4416,7 @@ class GestureWorker(QObject):
         # as "Left" when only one hand is in frame and the silhouette
         # could go either way. Two protections layered here:
         #   - When both hands are visible (one Left, one Right),
-        #     trust the labels immediately — that's unambiguous.
+        #     trust the labels immediately â€” that's unambiguous.
         #   - For single-hand-Left, require ~0.3s of stable Left
         #     labeling before treating it as the user's actual left
         #     hand. A glitchy single-frame misidentification during
@@ -4371,7 +4468,7 @@ class GestureWorker(QObject):
             self._window_pair_pose_metrics(result.hand_reading if hand_handedness == "Right" else None, now=monotonic_now)
             t_volume = time.perf_counter() if debug_timing else 0.0
             t_appctrl = t_volume
-        # Pinch grab runs regardless of mode-specific gating above —
+        # Pinch grab runs regardless of mode-specific gating above â€”
         # it doesn't compete with mouse / drawing / volume because
         # main_window only forwards its transform when a drawing
         # overlay is actually showing. Cheap when no pinch is held.
@@ -4388,13 +4485,13 @@ class GestureWorker(QObject):
         # camera frame on the GPU and overlay landmarks via
         # QPainter on top of the texture. We no longer draw
         # landmarks / wheels / mouse monitor / low-fps badge into
-        # the BGR frame on the CPU — that pipeline was the single
+        # the BGR frame on the CPU â€” that pipeline was the single
         # biggest CPU cost in the post-engine path (~10-15 ms per
         # frame in heavy modes). `display_frame` is still emitted
         # as a fallback for any consumer that wants the annotated
         # version, but we skip the cv2 mutations to save the cost.
         # Camera-drawing canvas state still has to track frame
-        # shape so brush strokes line up — that's cheap (no
+        # shape so brush strokes line up â€” that's cheap (no
         # drawing), just a shape lookup.
         display_frame = result.annotated_frame
         self._update_camera_drawing_canvas(display_frame.shape)
@@ -4466,7 +4563,7 @@ class GestureWorker(QObject):
         # Loop pacing comes from the periodic 15 ms QTimer. We
         # used to chain singleShot(0, self._tick) here for tighter
         # cadence, but in practice that starved Qt's paint event
-        # dispatcher — the on-screen update rate collapsed to
+        # dispatcher â€” the on-screen update rate collapsed to
         # ~2 fps while the worker kept firing at 30+ fps because
         # the event loop never got enough idle time between ticks
         # for paint events to be processed. The 15 ms periodic
@@ -4690,14 +4787,14 @@ class GestureWorker(QObject):
         self._record_action(f"volume_{direction}", f"volume {direction} to {pct}%")
 
     # ----- Gesture Binds dispatch / remap helpers -----------------------
-    # The user's per-action pose remap (Settings → Gesture Binds) is
+    # The user's per-action pose remap (Settings â†’ Gesture Binds) is
     # applied in two places:
     #   (1) Right-hand prediction at the top of _handle_app_controls.
     #   (2) Left-hand prediction at the top of _handle_left_hand_voice.
     # Both sites pass the prediction through _apply_gesture_binding_remap,
     # which either rewrites stable_label/raw_label so the existing
-    # downstream handlers fire the bound static action, OR — when the
-    # bound action is custom — calls _dispatch_action which fires the
+    # downstream handlers fire the bound static action, OR â€” when the
+    # bound action is custom â€” calls _dispatch_action which fires the
     # custom gesture's action via fire_once and returns a neutral
     # prediction so no static handler runs.
     #
@@ -4706,6 +4803,27 @@ class GestureWorker(QObject):
     # user has remapped that custom gesture to a static action, the
     # resolver dispatches the bound action and returns True, telling
     # the runner to skip its own fire_once.
+    # Tutorial → allowed-action whitelist. Each tutorial step
+    # exposes ONLY the action it's actively teaching; every other
+    # bound action is suppressed in _dispatch_action so the user
+    # can't accidentally trigger unrelated functionality (Spotify,
+    # mute, dictation, etc.) while learning a specific gesture.
+    # Steps with no _dispatch_action-driven action (swipes,
+    # gesture_wheel) get an empty set — they're driven by other
+    # paths (swipe controller, wheel state machine) that the
+    # tutorial code allows directly.
+    _TUTORIAL_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
+        "swipes": frozenset(),
+        "spotify_open": frozenset({"open_spotify"}),
+        "play_pause": frozenset({"play_pause"}),
+        "gesture_wheel": frozenset(),
+        "mouse_mode": frozenset({"mouse_mode_toggle"}),
+        "voice_command": frozenset({"voice_command_listen"}),
+    }
+
+    def _tutorial_allowed_actions_for_step(self, step_key: str) -> frozenset[str]:
+        return self._TUTORIAL_ALLOWED_ACTIONS.get(step_key, frozenset())
+
     def _dispatch_action(self, action_id: str, now: float) -> bool:
         """Fire a bound action by id, with a per-action_id cooldown so a
         held pose doesn't spam the action every frame. Returns True if
@@ -4721,6 +4839,21 @@ class GestureWorker(QObject):
         remap; it just won't take effect for those two actions."""
         if not action_id:
             return False
+        # Tutorial isolation: while the tutorial window is driving
+        # the engine, only the action the current step is teaching
+        # is allowed to fire. Any other bound action (e.g., user
+        # accidentally does right-hand-two during the swipes step
+        # and we'd otherwise launch Spotify in real life) is
+        # suppressed so the tutorial flow stays focused. Each step
+        # whitelists exactly the action(s) it expects; steps with
+        # no static-binding action (swipes, gesture_wheel) get an
+        # empty set so EVERYTHING is suppressed.
+        if getattr(self, "_tutorial_mode_enabled", False):
+            allowed = self._tutorial_allowed_actions_for_step(
+                getattr(self, "_tutorial_step_key", "") or ""
+            )
+            if action_id not in allowed:
+                return False
         cooldown_state = getattr(self, "_action_dispatch_last_fire", None)
         if cooldown_state is None:
             cooldown_state = {}
@@ -4728,7 +4861,7 @@ class GestureWorker(QObject):
         # Two-tier gating: a 1.5s "successful fire" window plus a tight
         # 50ms "any attempt" window. The latter prevents disk reads /
         # native API calls from happening every frame while a static
-        # pose is held but the action is in cooldown — without it,
+        # pose is held but the action is in cooldown â€” without it,
         # holding a mute-bound-to-custom-action pose for 5 s does up to
         # 150 registry.load() calls and tanks the frame rate.
         last = cooldown_state.get(action_id, 0.0)
@@ -4780,9 +4913,31 @@ class GestureWorker(QObject):
                         fired = False
             elif action_id == "open_spotify":
                 try:
-                    if not self.spotify_controller.is_window_active():
-                        self.spotify_controller.focus_or_open_window()
-                    fired = True
+                    # Tutorial spotify_open step: launch Spotify in the
+                    # BACKGROUND so it doesn't steal focus from the
+                    # tutorial window. The user just needs the engine
+                    # to confirm "yes, Spotify opened" — we don't
+                    # need to bring it to the foreground while the
+                    # tutorial walks them through the next step.
+                    in_tutorial_spotify = (
+                        self._tutorial_mode_enabled
+                        and self._tutorial_step_key == "spotify_open"
+                    )
+                    if in_tutorial_spotify:
+                        # Only spawn the launcher when there's no
+                        # real Spotify process yet — otherwise leave
+                        # the existing window alone (don't focus).
+                        if not self.spotify_controller._has_real_spotify_process():
+                            threading.Thread(
+                                target=lambda: self.spotify_controller.launch_spotify(hidden=True),
+                                name="spotify-tutorial-bg",
+                                daemon=True,
+                            ).start()
+                        fired = True
+                    else:
+                        if not self.spotify_controller.is_window_active():
+                            self.spotify_controller.focus_or_open_window()
+                        fired = True
                 except Exception:
                     fired = False
             elif action_id == "play_pause":
@@ -4803,7 +4958,7 @@ class GestureWorker(QObject):
                 except Exception:
                     fired = False
             elif action_id in ("open_gesture_wheel", "open_screen_wheel"):
-                # Wheel overlays are stateful. Skipping for now — see
+                # Wheel overlays are stateful. Skipping for now â€” see
                 # docstring above.
                 fired = False
             elif action_id.startswith("custom_action:"):
@@ -4811,7 +4966,7 @@ class GestureWorker(QObject):
                 # Reuse the runner's already-loaded registry instead of
                 # opening + parsing the JSON file on every dispatch.
                 # Falls back to a fresh load only when the runner isn't
-                # available (shouldn't happen in practice — the runner
+                # available (shouldn't happen in practice â€” the runner
                 # is constructed at engine init).
                 try:
                     from ...custom_gestures.action import fire_once
@@ -4879,7 +5034,7 @@ class GestureWorker(QObject):
             return prediction
         target_handedness, target_raw_label = target_label
         if target_handedness != hand_handedness:
-            # Cross-handedness — skip remap (see docstring).
+            # Cross-handedness â€” skip remap (see docstring).
             return prediction
         return self._rewrite_prediction_labels(prediction, target_raw_label)
 
@@ -4931,7 +5086,7 @@ class GestureWorker(QObject):
 
         Three live backends today:
           - `mediapipe-cpu`: MediaPipe Hands on CPU, model_complexity=1
-            by default — identical landmarks to the recorder. Safe to
+            by default â€” identical landmarks to the recorder. Safe to
             reuse.
           - `mediapipe-tasks-gpu`: MediaPipe Tasks API HandLandmarker on
             GPU. Same models as solutions.hands per the runtime
@@ -4943,16 +5098,16 @@ class GestureWorker(QObject):
             mediapipe.solutions.hands so accuracy is identical'. Pre-
             and post-processing differ slightly so coordinates can
             drift a couple of pixels, but the alternative is paying
-            5–10 ms/frame on a private MediaPipe CPU pass on the main
-            thread — which on phone-camera setups is exactly what
-            drops the live FPS to 14–22. Reusing engine landmarks here
+            5â€“10 ms/frame on a private MediaPipe CPU pass on the main
+            thread â€” which on phone-camera setups is exactly what
+            drops the live FPS to 14â€“22. Reusing engine landmarks here
             is a clear win for fluidity; if a user notices a custom
             gesture missing in GPU mode they can re-record it from the
             same mode.
 
         Lite mode (model_complexity=0) is excluded regardless of
-        backend — the lite landmark model produces visibly different
-        coordinates that drop classifier scores ~0.05–0.10 below the
+        backend â€” the lite landmark model produces visibly different
+        coordinates that drop classifier scores ~0.05â€“0.10 below the
         recorder's baseline."""
         try:
             engine = getattr(self, "engine", None)
@@ -5006,7 +5161,7 @@ class GestureWorker(QObject):
         if bound_action_id is None:
             return False
         if bound_action_id == f"custom_action:{gesture_name}":
-            return False  # default — runner fires stored action
+            return False  # default â€” runner fires stored action
         try:
             return bool(self._dispatch_action(bound_action_id, time.monotonic()))
         except Exception:
@@ -5014,9 +5169,9 @@ class GestureWorker(QObject):
 
     def _custom_runner_image_overlay_handler(self, filename: str) -> None:
         """Bridge from the custom-gesture runner (worker thread) to
-        the main window (GUI thread). Just emits a Qt signal — the
+        the main window (GUI thread). Just emits a Qt signal â€” the
         receiver runs on the GUI thread because Qt picks a queued
-        connection across threads — and main_window does the actual
+        connection across threads â€” and main_window does the actual
         path resolution and overlay-widget mutation there.
         Logs to recent-actions so the user can see the fire in the
         same activity feed as built-in gestures."""
@@ -5058,7 +5213,7 @@ class GestureWorker(QObject):
         pinch-grab math. The fixed-alpha EMA we shipped first felt
         bouncy on foreshortened pinches because MediaPipe's
         per-frame landmark jitter is 3-10 px even when the user is
-        holding still — a fixed alpha had to choose between 'too
+        holding still â€” a fixed alpha had to choose between 'too
         laggy on real motion' and 'too jittery when held' and both
         were bad. Adaptive alpha solves it: tiny per-frame deltas
         (= jitter while holding) get heavy damping; medium deltas
@@ -5066,7 +5221,7 @@ class GestureWorker(QObject):
         user actually moving) react fast.
 
         Also clamps single-frame jumps > 10% of normalised screen
-        width to that 10% maximum — that catches the case where
+        width to that 10% maximum â€” that catches the case where
         MediaPipe completely loses the hand and re-detects it at
         a far-away position, which would otherwise teleport the
         grabbed drawing on the next emit.
@@ -5094,8 +5249,8 @@ class GestureWorker(QObject):
             # Adaptive alpha. Tiers calibrated against typical
             # MediaPipe foreshortened-pinch jitter (~0.005-0.015
             # normalised units) vs. genuine slow / fast hand
-            # motion. Holding still → alpha 0.10 (smoother barely
-            # moves, killing jitter). Real motion → alpha 0.55
+            # motion. Holding still â†’ alpha 0.10 (smoother barely
+            # moves, killing jitter). Real motion â†’ alpha 0.55
             # (snaps to current position).
             if dist < 0.015:
                 alpha = 0.10
@@ -5130,7 +5285,7 @@ class GestureWorker(QObject):
         is active (none / one-hand / two-hand) and emits an
         absolute (cumulative-since-overlay-shown) transform when a
         pinch is held. Stays silent when no overlay is visible
-        anyway — main_window only forwards the signal when
+        anyway â€” main_window only forwards the signal when
         DrawingOverlayWindow is showing.
 
         Includes a sticky-active grace window so brief recogniser
@@ -5160,7 +5315,7 @@ class GestureWorker(QObject):
         #   began. Continuous = label seen within grace; an
         #   uninterrupted >= grace_seconds gap clears the streak.
         # The streak only counts as 'active' once it has lasted
-        # _pinch_activation_delay seconds — that's the pre-roll
+        # _pinch_activation_delay seconds â€” that's the pre-roll
         # the user asked for so the drawing doesn't jump the
         # instant a transient pinch label stabilises.
         if primary_pinch:
@@ -5198,7 +5353,7 @@ class GestureWorker(QObject):
 
         # Mode + slot decision. Two-hand stretch needs both slots
         # active; otherwise EITHER slot pinching alone is a
-        # one-hand grab — works with the user's left, right, or
+        # one-hand grab â€” works with the user's left, right, or
         # whichever single hand is in frame after the right-as-
         # primary normalisation.
         if primary_active and secondary_active and primary_palm and secondary_palm:
@@ -5217,7 +5372,7 @@ class GestureWorker(QObject):
         # ALWAYS run the smoother when there's a raw reading,
         # regardless of the mode we're transitioning to. The
         # previous version nulled primary_palm_s / secondary_palm_s
-        # the moment new_mode == 'none' — but that ran BEFORE the
+        # the moment new_mode == 'none' â€” but that ran BEFORE the
         # lock-in below, so the release frame's smoothed palm was
         # gone before the lock-in could read it. Result: the
         # cumulative offset never absorbed the user's drag, and
@@ -5237,7 +5392,7 @@ class GestureWorker(QObject):
             return None
 
         # --- mode transitions. Trigger on string-mode change OR
-        # one-hand slot change (left↔right swap mid-grab). Lock
+        # one-hand slot change (leftâ†”right swap mid-grab). Lock
         # the live delta of the OUTGOING configuration into the
         # cumulative state, then capture anchors for the INCOMING
         # configuration. Uses smoothed palm coords throughout so
@@ -5279,7 +5434,7 @@ class GestureWorker(QObject):
                     # a more decisive stretch / squish. The
                     # palm-position smoother heavily damps slow
                     # motion (alpha 0.10 below 1.5% screen / frame)
-                    # to kill jitter — that damping was making slow
+                    # to kill jitter â€” that damping was making slow
                     # stretches feel sluggish. Amplifying the scale
                     # delta here recovers responsiveness without
                     # weakening the smoother. Linear amplification
@@ -5361,7 +5516,7 @@ class GestureWorker(QObject):
         # smoothed palm values, we can safely null the smoother
         # state if we ended the frame in 'none' mode. Doing this
         # earlier (the previous version did) skipped the lock-in
-        # on the release frame and lost the user's drag — the
+        # on the release frame and lost the user's drag â€” the
         # next pinch then snapped back to the pre-drag offset.
         if self._pinch_mode == "none":
             self._pinch_smoothed_primary = None
@@ -5371,7 +5526,7 @@ class GestureWorker(QObject):
         # Palm coords are in user-perspective normalised image space
         # (cv2.flip is applied before MediaPipe), so a swipe to the
         # right increases palm-x. The displayed overlay should move
-        # in the same direction → no axis inversion.
+        # in the same direction â†’ no axis inversion.
         try:
             self.drawing_overlay_grab_transform.emit(float(dx), float(dy), float(scale))
         except Exception:
@@ -5783,6 +5938,23 @@ class GestureWorker(QObject):
                 self._record_action(snapshot.last_action, snapshot.control_text)
 
     def _handle_mouse_control(self, prediction, hand_reading, hand_handedness: str | None, now: float) -> bool:
+        # Tutorial isolation: in tutorial mode, only the mouse_mode
+        # step is allowed to engage the mouse pipeline at all. On
+        # every other step we reset the tracker + bail so the
+        # user's left-three hold (or any other gesture) can't
+        # silently toggle mouse mode while they're learning a
+        # different gesture. The mouse_mode step itself runs the
+        # full pipeline but suppresses OS-level cursor / clicks
+        # via tutorial_demo_only further down.
+        if (
+            self._tutorial_mode_enabled
+            and self._tutorial_step_key != "mouse_mode"
+        ):
+            self.mouse_tracker.reset()
+            self._last_mouse_update = self._blank_mouse_update()
+            self._mouse_mode_enabled = False
+            return False
+
         if not self.mouse_controller.available:
             self.mouse_tracker.reset()
             self._last_mouse_update = self._blank_mouse_update()
@@ -5791,7 +5963,29 @@ class GestureWorker(QObject):
             self._mouse_control_text = self.mouse_controller.message
             return False
 
-        self.mouse_tracker.set_desktop_bounds(self.mouse_controller.virtual_bounds())
+        # When the user has constrained mouse mode to a single
+        # monitor, the camera-frame red box should reflect THAT
+        # monitor's aspect, not the full virtual desktop's. Without
+        # this, picking Monitor 1 on a side-by-side dual setup
+        # leaves the box at the desktop's 32:9 aspect (super-wide,
+        # mostly empty padding around a single hand) — looks weird
+        # because the visualization shows a single monitor but the
+        # box is sized for two. Honor the saved index here so the
+        # tracker computes a tighter, monitor-sized box.
+        active_monitor_idx = getattr(self.config, "mouse_active_monitor_index", None)
+        chosen_bounds = None
+        if isinstance(active_monitor_idx, int):
+            try:
+                from PySide6.QtGui import QGuiApplication
+                screens = list(QGuiApplication.screens() or [])
+                if 0 <= active_monitor_idx < len(screens):
+                    geo = screens[active_monitor_idx].geometry()
+                    chosen_bounds = (geo.x(), geo.y(), geo.width(), geo.height())
+            except Exception:
+                chosen_bounds = None
+        self.mouse_tracker.set_desktop_bounds(
+            chosen_bounds if chosen_bounds is not None else self.mouse_controller.virtual_bounds()
+        )
         update = self.mouse_tracker.update(
             hand_reading=hand_reading,
             prediction=prediction,
@@ -5801,10 +5995,24 @@ class GestureWorker(QObject):
         )
         self._last_mouse_update = update
 
-        tutorial_demo_only = self._tutorial_mode_enabled and self._tutorial_step_key == "mouse_mode"
+        # During the tutorial's mouse_mode step, suppress every
+        # OS-level mouse output (cursor move + click + scroll). The
+        # tutorial overlay still shows the cursor dot driven by
+        # update.cursor_position, so the user gets the visual
+        # feedback for free without the OS cursor flying around
+        # while they're trying to interact with the tutorial UI.
+        # Outside the tutorial, mouse control fires normally on
+        # whatever app the user is focused on (including Touchless
+        # itself — Win32 SetCursorPos is global and not gated by
+        # focus).
+        tutorial_demo_only = (
+            self._tutorial_mode_enabled
+            and self._tutorial_step_key == "mouse_mode"
+        )
         if not tutorial_demo_only:
             if update.cursor_position is not None:
-                self.mouse_controller.move_normalized(*update.cursor_position)
+                cx, cy = self._cursor_to_active_monitor(*update.cursor_position)
+                self.mouse_controller.move_normalized(cx, cy)
             if update.left_press:
                 self.mouse_controller.left_down()
             if update.left_release:
@@ -5820,7 +6028,7 @@ class GestureWorker(QObject):
         self._mouse_mode_enabled = update.mode_enabled
         self._mouse_status_text = update.status
         # Toggle pill: matches the Drawing-mode pattern at
-        # _toggle_drawing_mode — same VoiceStatusOverlay info hint
+        # _toggle_drawing_mode â€” same VoiceStatusOverlay info hint
         # so the user gets identical visual feedback when they
         # flip mouse mode on or off via the gesture.
         if update.mode_enabled != prior_mode_enabled:
@@ -5831,6 +6039,16 @@ class GestureWorker(QObject):
                 )
             except Exception:
                 pass
+            # On the off->on transition only, emit the activation
+            # signal so the main window can show the "which monitor
+            # to control" picker. The signal is queued (Qt
+            # auto-queues across threads) so the dialog construction
+            # happens cleanly on the GUI thread.
+            if update.mode_enabled:
+                try:
+                    self.mouse_mode_activated.emit()
+                except Exception:
+                    pass
             # Log to recent-actions so the user sees gesture-driven
             # mode toggles in the action history (was previously
             # only logging media + volume actions).
@@ -5891,7 +6109,7 @@ class GestureWorker(QObject):
 
     def _read_system_mute(self) -> bool:
         # Cache the COM IAudioEndpointVolume.GetMute call for ~120 ms
-        # — was firing every frame (1-3 ms each) inside _handle_volume
+        # â€” was firing every frame (1-3 ms each) inside _handle_volume
         # _control's hot path. The mute state can't change between
         # gesture frames in any meaningful way (the user can't
         # press the mute key during a swipe), so refresh-rate is
@@ -6118,7 +6336,7 @@ class GestureWorker(QObject):
             "low_fps_auto_engaged": bool(self._low_fps_auto_engaged),
             "force_ten_fps_test_mode": bool(getattr(self.config, "force_ten_fps_test_mode", False)),
             # Was: is_window_active() or is_running(). is_running()
-            # walks psutil.process_iter() with NO cache — per camera
+            # walks psutil.process_iter() with NO cache â€” per camera
             # frame that's a full Windows process-list scan, and the
             # walk gets heavier when Spotify is open (Spotify spawns
             # 5-10 helper processes), which matched the user-reported
@@ -6157,6 +6375,7 @@ class GestureWorker(QObject):
                 else None
             ),
             "mouse_left_click": bool(getattr(self._last_mouse_update, "left_click", False)),
+            "mouse_left_press": bool(getattr(self._last_mouse_update, "left_press", False)),
             "gestures_enabled": bool(self._gestures_enabled),
             "drawing_mode_enabled": bool(self._drawing_mode_enabled),
             "drawing_tool": self._drawing_tool,
@@ -6510,7 +6729,7 @@ class GestureWorker(QObject):
         if now < self._spotify_active_cache_until:
             return self._spotify_active_cache
         # Cache miss. is_active_for_wheel() may HTTP-probe the
-        # Spotify Web API when no desktop window is visible — that
+        # Spotify Web API when no desktop window is visible â€” that
         # call blocks for up to 5 s while Spotify is still launching.
         # Run the refresh on a background thread and return the
         # previous cached value; the bg thread updates the cache and
@@ -6842,7 +7061,7 @@ class GestureWorker(QObject):
 
     def _handle_left_hand_voice(self, prediction, now: float) -> None:
         # Apply Gesture Binds remap for the left hand. Same semantics
-        # as the right-hand call site in _handle_app_controls — see the
+        # as the right-hand call site in _handle_app_controls â€” see the
         # helper docstring for why this is the chokepoint.
         prediction = self._apply_gesture_binding_remap(prediction, "Left", now)
         stable_label = prediction.stable_label
@@ -6948,7 +7167,7 @@ class GestureWorker(QObject):
     }
     # Pretty-display map for known app keys. Anything not in here
     # falls through to a Title-Cased version of the key (e.g.
-    # "spotify" → "Spotify"). Keep these keys aligned with the
+    # "spotify" â†’ "Spotify"). Keep these keys aligned with the
     # APP_ALIASES dict in voice/command_processor.py.
     _LAUNCH_APP_FRIENDLY = {
         "spotify": "Spotify",
@@ -7059,7 +7278,7 @@ class GestureWorker(QObject):
         except Exception:
             pass
         self._dictation_state = None
-        # Hide the mic indicator silently — no result popup.
+        # Hide the mic indicator silently â€” no result popup.
         try:
             self.voice_status_overlay.hide_overlay()
         except Exception:
@@ -7256,7 +7475,7 @@ class GestureWorker(QObject):
                         # committed chunk. With commit-only decoding the
                         # streamer cannot replay old audio, so "re-emission"
                         # collapses to "two identical commits within a short
-                        # window" — anything past that is a legitimate user
+                        # window" â€” anything past that is a legitimate user
                         # repeat.
                         last_final_time = state.get("last_final_time", 0.0)
                         now_m = time.monotonic()
@@ -7457,7 +7676,7 @@ class GestureWorker(QObject):
                     transcript_mode = "playlist" if mode in {"add_playlist", "remove_playlist", "create_playlist"} else "command"
                     # Budget = start-wait (5s) + utterance headroom (~4s)
                     # + end-silence (3s) for commands. The old 5.0s was
-                    # a total cap too tight for any of those — the loop
+                    # a total cap too tight for any of those â€” the loop
                     # ran out of blocks before the silence check could
                     # fire, so recordings cut after ~2s of voice audio.
                     listen_seconds = 8.5 if transcript_mode == "playlist" else 12.0
@@ -7499,6 +7718,22 @@ class GestureWorker(QObject):
                         except Exception:
                             intent_app_name = ""
                             intent_action = ""
+                        # Voice "clip that" — fire the same utility
+                        # request the gesture path uses, but tag it
+                        # with the _voice suffix so the UI knows to
+                        # skip the save-location prompt and the
+                        # multi-monitor picker (the user just said
+                        # "clip that"; nagging them with a follow-up
+                        # would defeat the point).
+                        if (
+                            execution.success
+                            and intent_app_name == "touchless"
+                            and intent_action in {"clip_1m", "clip_30s"}
+                        ):
+                            try:
+                                self._queue_utility_request(f"{intent_action}_voice")
+                            except Exception:
+                                pass
                         payload = {
                             "event": "result",
                             "mode": mode,
@@ -7709,7 +7944,7 @@ class GestureWorker(QObject):
                     # controller's actual message (e.g. "spotify
                     # window not found", "spotify launch path not
                     # found") instead of the misleading generic
-                    # "Command not understood" — which conflated a
+                    # "Command not understood" â€” which conflated a
                     # transcription failure with an execution
                     # failure on a perfectly-recognized command.
                     intent_app = str(payload.get("intent_app_name") or "").strip()
@@ -7808,20 +8043,23 @@ class GestureWorker(QObject):
                 duration=2.0,
             )
 
-    def _parse_voice_selection_text(self, text: str) -> tuple[str, list[tuple[int, str, str]], str]:
+    def _parse_voice_selection_text(self, text: str) -> tuple[str, list[tuple[str, str, str]], str]:
         lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
         title = "Choose a file or folder"
-        if lines and "apps" in lines[0].lower():
+        if lines and "app" in lines[0].lower():
             title = "Choose a file or app"
-        instruction = "Say the corresponding number"
-        items: list[tuple[int, str, str]] = []
+        instruction = "Say the corresponding letter"
+        items: list[tuple[str, str, str]] = []
         for line in lines:
-            match = re.match(r"^(\d+)\.\s+(.*?)(?:\s+[—-]\s+(.*))?$", line)
+            match = re.match(r"^([A-Za-z]|\d+)\.\s+(.*?)(?:\s+[—-]\s+(.*))?$", line)
             if match:
-                number = int(match.group(1))
+                selection_key = str(match.group(1) or "").strip().upper()
                 label = str(match.group(2) or "").strip()
                 path_text = str(match.group(3) or "").strip()
-                items.append((number, label, path_text))
+                items.append((selection_key, label, path_text))
+                continue
+            if line.lower().startswith("say "):
+                instruction = line
             elif line.lower().startswith("which "):
                 instruction = line
         return title, items, instruction
@@ -7832,9 +8070,9 @@ class GestureWorker(QObject):
         except Exception:
             pass
 
-    def _handle_voice_overlay_selection(self, number: int) -> None:
+    def _handle_voice_overlay_selection(self, selection_key: str) -> None:
         try:
-            result = self.voice_processor.execute(str(number))
+            result = self.voice_processor.execute(str(selection_key or "").strip())
         except Exception:
             return
         self._voice_queue.put((self._voice_request_id, {
@@ -8015,7 +8253,7 @@ class GestureWorker(QObject):
         self._selection_prompt_active = False
         self._selection_prompt_title = "Which file/folder?"
         self._selection_prompt_items = []
-        self._selection_prompt_instruction = "Say the corresponding number."
+        self._selection_prompt_instruction = "Say the corresponding letter."
         self._save_prompt_active = False
         self.voice_status_overlay.hide_overlay()
         while True:
@@ -8034,3 +8272,4 @@ class GestureWorker(QObject):
         return True
 
 # Author: Konstantin Markov
+

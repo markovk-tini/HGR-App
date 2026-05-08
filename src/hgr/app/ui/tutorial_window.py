@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import queue
 import random
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -10,14 +11,15 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -26,8 +28,11 @@ from PySide6.QtWidgets import (
 
 from ...config.app_config import AppConfig
 from ...debug.chrome_controller import ChromeController
-from ...debug.mouse_gesture import MouseGestureTracker
-from ...debug.mouse_overlay import draw_mouse_control_box_overlay
+from ...debug.mouse_gesture import MouseDebugState, MouseGestureTracker
+from ...debug.mouse_overlay import (
+    draw_mouse_control_box_overlay,
+    draw_mouse_monitor_overlay,
+)
 from ...debug.voice_command_listener import VoiceCommandListener
 from ...gesture.recognition.engine import GestureRecognitionEngine
 from ...gesture.rendering.overlay import HAND_CONNECTIONS
@@ -227,6 +232,15 @@ class MousePracticeWidget(QWidget):
     def completed(self) -> bool:
         return self._active_index >= len(self._targets)
 
+    @property
+    def completed_targets(self) -> int:
+        return int(self._active_index)
+
+    def mark_all_targets_completed(self) -> None:
+        self._active_index = len(self._targets)
+        self._status_text = "Nice work!"
+        self.update()
+
     def set_mode_enabled(self, enabled: bool) -> None:
         self._mode_enabled = bool(enabled)
         if self.completed:
@@ -341,6 +355,216 @@ class MousePracticeWidget(QWidget):
             )
 
 
+class _VoiceMicArrow(QWidget):
+    """Bouncing arrow rendered as a click-through overlay on the
+    tutorial window during the voice-command practice step. Points
+    from a fixed anchor inside the tutorial window toward the
+    absolute screen position where the VoiceStatusOverlay appears
+    (bottom-center of the tutorial window's screen).
+
+    Geometry tracking: TutorialWindow.moveEvent / resizeEvent call
+    update_target_from_screen() so dragging the window keeps the
+    arrow on-target. The arrow direction is recomputed every paint
+    from the current global anchor position vs the cached target,
+    so even cross-monitor drags re-aim correctly.
+
+    The bounce is a sine-wave displacement along the arrow's own
+    direction vector — gives a "look this way" pulse without the
+    distracting wobble of a perpendicular bob.
+    """
+
+    def __init__(self, parent: QWidget, accent: QColor) -> None:
+        super().__init__(parent)
+        self._accent = QColor(accent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._target_global = QPoint(0, 0)
+        self._bounce_phase = 0.0
+        # ~30 FPS animation tick. Cheap; only runs while the arrow
+        # is visible (started in show_pointing, stopped in hide_arrow).
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(33)
+        self._tick_timer.timeout.connect(self._on_tick)
+        self.hide()
+
+    def _on_tick(self) -> None:
+        # Increment phase so a full sine cycle takes ~600 ms.
+        self._bounce_phase += 0.18
+        if self._bounce_phase > 6.283185:
+            self._bounce_phase -= 6.283185
+        self.update()
+
+    def update_target_from_screen(self) -> None:
+        """Cache the global pixel coordinate the arrow should point
+        at. Mirrors VoiceStatusOverlay._place_on_screen — bottom-
+        center of the available screen geometry, ~50 px up from the
+        bottom edge to land in the middle of the overlay's body
+        rather than its bottom edge."""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        screen = parent.screen() if hasattr(parent, "screen") else None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        geo = screen.availableGeometry()
+        self._target_global = QPoint(geo.center().x(), geo.bottom() - 50)
+        self.update()
+
+    @staticmethod
+    def _styled_pen(color: QColor, width: float) -> QPen:
+        pen = QPen(color)
+        pen.setWidthF(float(width))
+        pen.setStyle(Qt.SolidLine)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        return pen
+
+    @staticmethod
+    def _draw_arrow_segments(
+        painter: QPainter,
+        start: QPointF,
+        tip: QPointF,
+        head_a: QPointF,
+        head_b: QPointF,
+    ) -> None:
+        painter.drawLine(start, tip)
+        painter.drawLine(tip, head_a)
+        painter.drawLine(tip, head_b)
+
+    @staticmethod
+    def _arrow_path(
+        start: QPointF,
+        tip: QPointF,
+        head_a: QPointF,
+        head_b: QPointF,
+    ) -> QPainterPath:
+        path = QPainterPath(start)
+        path.lineTo(tip)
+        path.lineTo(head_a)
+        path.moveTo(tip)
+        path.lineTo(head_b)
+        return path
+
+    def paintEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        # Anchor: bottom-center of this overlay (which is sized to
+        # cover the tutorial window). Leave 90 px margin above the
+        # bottom edge so the shaft + arrowhead doesn't run off.
+        anchor_x = self.width() // 2
+        anchor_y = max(60, self.height() - 90)
+        anchor_global = self.mapToGlobal(QPoint(anchor_x, anchor_y))
+        dx = self._target_global.x() - anchor_global.x()
+        dy = self._target_global.y() - anchor_global.y()
+        length = math.hypot(dx, dy)
+        if length < 1.0:
+            return
+        ux = dx / length
+        uy = dy / length
+
+        # Bounce along arrow direction plus a slightly slower breathing
+        # glow that fattens the halo. The glow is intentionally a cool
+        # blue-white so it reads as a separate pulse layer around the
+        # mint arrow instead of the whole arrow just getting brighter.
+        bounce = math.sin(self._bounce_phase) * 12.0
+        glow_pulse = 0.5 + 0.5 * math.sin(self._bounce_phase * 0.82 - 0.7)
+        ax = anchor_x + ux * bounce
+        ay = anchor_y + uy * bounce
+
+        SHAFT_LEN = 132.0
+        HEAD_LEN = 34.0
+        HEAD_HALFWIDTH = 22.0
+
+        sx = ax - ux * SHAFT_LEN * 0.5
+        sy = ay - uy * SHAFT_LEN * 0.5
+        ex = ax + ux * SHAFT_LEN * 0.5
+        ey = ay + uy * SHAFT_LEN * 0.5
+
+        # Perpendicular for arrowhead barbs
+        px, py = -uy, ux
+        h1x = ex - ux * HEAD_LEN + px * HEAD_HALFWIDTH
+        h1y = ey - uy * HEAD_LEN + py * HEAD_HALFWIDTH
+        h2x = ex - ux * HEAD_LEN - px * HEAD_HALFWIDTH
+        h2y = ey - uy * HEAD_LEN - py * HEAD_HALFWIDTH
+
+        start = QPointF(sx, sy)
+        tip = QPointF(ex, ey)
+        head_a = QPointF(h1x, h1y)
+        head_b = QPointF(h2x, h2y)
+        path = self._arrow_path(start, tip, head_a, head_b)
+        shadow_path = self._arrow_path(
+            QPointF(sx + 3.0, sy + 3.0),
+            QPointF(ex + 3.0, ey + 3.0),
+            QPointF(h1x + 3.0, h1y + 3.0),
+            QPointF(h2x + 3.0, h2y + 3.0),
+        )
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        # Drop shadow first, then accent-colored shaft/head on top —
+        # gives the arrow enough contrast to stay readable over the
+        # camera view's dark background AND the lighter side panels.
+        shadow = QColor(0, 0, 0, 145)
+        painter.setPen(self._styled_pen(shadow, 15.0))
+        painter.drawPath(shadow_path)
+
+        outer_glow = QColor(92, 184, 255)
+        outer_glow.setAlpha(int(54 + 44 * glow_pulse))
+        painter.setPen(self._styled_pen(outer_glow, 24.0 + 7.0 * glow_pulse))
+        painter.drawPath(path)
+
+        inner_glow = QColor(64, 156, 255)
+        inner_glow.setAlpha(int(88 + 48 * glow_pulse))
+        painter.setPen(self._styled_pen(inner_glow, 15.0 + 4.0 * glow_pulse))
+        painter.drawPath(path)
+
+        core = QColor(self._accent)
+        core.setAlpha(245)
+        painter.setPen(self._styled_pen(core, 8.8))
+        painter.drawPath(path)
+
+        # Small callout badge that rides next to the arrow so the user
+        # immediately understands what the cue is pointing at.
+        label_text = "Look this way for mic!"
+        label_font = QFont("Segoe UI", 11)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        metrics = painter.fontMetrics()
+        text_rect = metrics.boundingRect(label_text)
+        box_w = float(text_rect.width() + 26)
+        box_h = float(text_rect.height() + 18)
+        mid_x = (sx + ex) * 0.5
+        mid_y = (sy + ey) * 0.5
+        label_cx = mid_x - px * 98.0
+        label_cy = mid_y - py * 98.0
+        box_x = max(8.0, min(float(self.width()) - box_w - 8.0, label_cx - box_w * 0.5))
+        box_y = max(8.0, min(float(self.height()) - box_h - 8.0, label_cy - box_h * 0.5))
+        bubble_rect = QRectF(box_x, box_y, box_w, box_h)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 120))
+        painter.drawRoundedRect(bubble_rect.adjusted(2.0, 2.0, 2.0, 2.0), 12.0, 12.0)
+        painter.setBrush(QColor(10, 22, 34, 230))
+        painter.setPen(QPen(QColor(92, 184, 255, 190), 1.4))
+        painter.drawRoundedRect(bubble_rect, 12.0, 12.0)
+        painter.setPen(QColor(229, 246, 255))
+        painter.drawText(bubble_rect, int(Qt.AlignCenter), label_text)
+
+
+    def show_pointing(self) -> None:
+        self.update_target_from_screen()
+        self.raise_()
+        self.show()
+        self._bounce_phase = 0.0
+        self._tick_timer.start()
+
+    def hide_arrow(self) -> None:
+        self._tick_timer.stop()
+        self.hide()
+
+
 class TutorialWindow(QDialog):
     tutorial_closed = Signal(bool, bool, bool)
     gesture_guide_requested = Signal(bool)
@@ -434,6 +658,7 @@ class TutorialWindow(QDialog):
         self._nav_swipe_cooldown_until = 0.0
         self._spotify_toggle_count = 0
         self._mouse_stage = "enable"
+        self._mouse_cursor_seen = False
         self._tutorial_wheel_anchor = None
         self._tutorial_wheel_selected_key: str | None = None
         self._tutorial_wheel_selected_since = 0.0
@@ -566,6 +791,12 @@ class TutorialWindow(QDialog):
         # rather than overlapping it with a Qt widget so it reads as
         # part of the video, not a chrome-on-top decoration.
         self._encouragement_text = ""
+        # Lazy RGBA sprite cache. Sprites are loaded on first
+        # request via _sprite_for(name) and reused for the rest of
+        # the session. "missing" sentinel distinguishes "not yet
+        # tried" from "tried and failed" to avoid repeated disk
+        # lookups.
+        self._sprites: dict = {}
 
         info_card = QFrame()
         info_card.setObjectName("tutorialCard")
@@ -587,6 +818,15 @@ class TutorialWindow(QDialog):
         self.instruction_box.setWordWrap(True)
         self.instruction_box.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         info_layout.addWidget(self.instruction_box)
+
+        example_row = QHBoxLayout()
+        example_row.setContentsMargins(0, 0, 0, 0)
+        example_row.setSpacing(8)
+        self.example_button = QPushButton("Show Example")
+        self.example_button.clicked.connect(self._open_step_example)
+        example_row.addWidget(self.example_button, 0, Qt.AlignLeft)
+        example_row.addStretch(1)
+        info_layout.addLayout(example_row)
 
         self.practice_stack = QStackedWidget()
         self.swipe_widget = SwipeInstructionWidget()
@@ -701,6 +941,290 @@ class TutorialWindow(QDialog):
         footer_layout.addWidget(self.prev_button)
         footer_layout.addWidget(self.next_button)
         root.addWidget(footer)
+
+        # Click-through overlay that draws the bouncing arrow toward
+        # the mic during the voice-command practice step. Created
+        # last so it lands on top of every other child by default;
+        # show_pointing also calls raise_() to be safe across late
+        # widget additions. Initial geometry is set by the first
+        # resizeEvent that fires after show() — we don't size it
+        # here because the dialog hasn't been laid out yet.
+        accent = QColor(self.config.accent_color or "#1DE9B6")
+        if not accent.isValid():
+            accent = QColor("#1DE9B6")
+        self._voice_mic_arrow = _VoiceMicArrow(self, accent)
+        self._step_example_dialog: QDialog | None = None
+
+    def _apply_example_dialog_theme(self, dialog: QDialog) -> None:
+        dialog.setStyleSheet(
+            self.styleSheet()
+            + f"""
+            QScrollArea#tutorialExampleScroll,
+            QScrollArea#tutorialExampleScroll > QWidget,
+            QScrollArea#tutorialExampleScroll QWidget#qt_scrollarea_viewport,
+            QWidget#tutorialExampleContent {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#innerCard {{
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(29,233,182,0.22);
+                border-radius: 18px;
+            }}
+            QFrame#innerCard QLabel {{
+                color: {self.config.text_color};
+                background: transparent;
+            }}
+            QLabel#gestureCardTitle {{
+                color: {self.config.accent_color};
+                font-size: 18px;
+                font-weight: 900;
+            }}
+            QLabel#gestureCardSubtitle {{
+                color: {self.config.text_color};
+                font-size: 13px;
+                font-weight: 800;
+            }}
+            QLabel#gestureCardBody {{
+                color: {self.config.text_color};
+                font-size: 13px;
+            }}
+            QScrollBar:vertical {{
+                background: rgba(255,255,255,0.06);
+                width: 14px;
+                border-radius: 7px;
+                margin: 2px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {self.config.accent_color};
+                min-height: 36px;
+                border-radius: 7px;
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            """
+        )
+
+    @staticmethod
+    def _guide_card_title(card: QWidget) -> str:
+        title_label = card.findChild(QLabel, "gestureCardTitle")
+        if title_label is None:
+            return ""
+        return str(title_label.text() or "").strip()
+
+    def _close_step_example_dialog(self) -> None:
+        dialog = getattr(self, "_step_example_dialog", None)
+        if dialog is None:
+            return
+        self._step_example_dialog = None
+        try:
+            dialog.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _voice_command_hold_warning_text() -> str:
+        return (
+            "You can drop your hand now. If you keep Left Hand One up you will "
+            "trigger voice listening when current command is processed."
+        )
+
+    @staticmethod
+    def _voice_command_intro_header_text() -> str:
+        return (
+            "Hold left-hand one until the microphone appears at the "
+            "bottom middle of your monitor, then say: \"Open "
+            "YouTube on Google Chrome\"."
+        )
+
+    def _voice_command_header_text(self, hold_active: bool) -> str:
+        if hold_active and not self._step_completed:
+            return self._voice_command_hold_warning_text()
+        return self._voice_command_intro_header_text()
+
+    def _voice_command_progress_text(self, *, left_one_active: bool, voice_listening: bool) -> str:
+        if self._step_completed:
+            return "Completed! Swipe right to move on!"
+        if voice_listening:
+            return "Listening for your voice command..."
+        if left_one_active:
+            return "Detected left-hand one!"
+        return "Waiting for left-hand one and the voice command."
+
+    def _mouse_mode_header_text(
+        self,
+        *,
+        mode_enabled: bool,
+        cursor_seen: bool | None = None,
+        completed_targets: int | None = None,
+    ) -> str:
+        seen = self._mouse_cursor_seen if cursor_seen is None else bool(cursor_seen)
+        done = self.mouse_widget.completed_targets if completed_targets is None else int(completed_targets)
+        if done >= 4 or self._mouse_stage == "disable":
+            return "Now toggle mouse mode off with left hand 3 again"
+        if done >= 3:
+            return "One more left, click on dot 4"
+        if done >= 2:
+            return "Now dot 3"
+        if done >= 1:
+            return "Move cursor to dot 2 then pinch thumb-to-index to click again"
+        if mode_enabled:
+            if seen:
+                return (
+                    "Hover over dot one. Then PINCH your thumb tip to your "
+                    "index tip (and release) to left-click"
+                )
+            return (
+                "Now with your right hand opened and palm facing towards the "
+                "monitor control the cursor with your movements"
+            )
+        return "Toggle mouse mode with left hand three"
+
+    def _step_example_spec(self, step_key: str) -> tuple[str, tuple[str, ...]]:
+        specs = {
+            "swipes": (
+                "These are the Control Guide examples for the two swipe directions used in this part.",
+                ("Swipe Right", "Swipe Left"),
+            ),
+            "spotify_open": (
+                "This is the Control Guide example for the pose that opens or focuses Spotify.",
+                ("Right Hand Two",),
+            ),
+            "play_pause": (
+                "This is the Control Guide example for the play or pause pose used in this part.",
+                ("Right Hand Fist",),
+            ),
+            "gesture_wheel": (
+                "This is the Control Guide example for the gesture wheel pose used in this part.",
+                ("Gesture Wheel",),
+            ),
+            "mouse_mode": (
+                "These Control Guide examples cover the left-hand toggle pose and the right-hand mouse actions "
+                "(pinch clicks, scroll, full demo) used in this part.",
+                ("Left Hand Three", "Mouse Clicks", "Mouse Scroll", "Mouse Demo"),
+            ),
+            "voice_command": (
+                "These Control Guide examples show the trigger pose and the voice-listening behavior used in this part.",
+                ("Left Hand One", "Triggering a voice command"),
+            ),
+        }
+        return specs.get(
+            step_key,
+            ("Relevant Control Guide examples for this tutorial part.", tuple()),
+        )
+
+    def _build_step_example_cards(self, step_key: str) -> tuple[str, list[QWidget]]:
+        from .main_window import (
+            _build_gesture_guide_dynamic_cards,
+            _build_gesture_guide_static_cards,
+            _build_voice_command_cards,
+        )
+
+        intro_text, wanted_titles = self._step_example_spec(step_key)
+        all_cards = [
+            *_build_gesture_guide_static_cards(),
+            *_build_gesture_guide_dynamic_cards(),
+            *_build_voice_command_cards(),
+        ]
+        cards_by_title: dict[str, QWidget] = {}
+        for card in all_cards:
+            card_title = self._guide_card_title(card)
+            if card_title and card_title not in cards_by_title:
+                cards_by_title[card_title] = card
+
+        selected_cards = [cards_by_title[title] for title in wanted_titles if title in cards_by_title]
+        if not selected_cards:
+            selected_cards = all_cards
+
+        for card in all_cards:
+            if card not in selected_cards:
+                card.setParent(None)
+                card.deleteLater()
+
+        return intro_text, selected_cards
+
+    def _open_step_example(self) -> None:
+        if self._show_completion_page:
+            return
+
+        step = self._practice_steps[self._step_index]
+        existing = getattr(self, "_step_example_dialog", None)
+        if existing is not None and existing.isVisible() and existing.property("tutorialStepKey") == step.key:
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        self._close_step_example_dialog()
+        intro_text, cards = self._build_step_example_cards(step.key)
+
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setProperty("tutorialStepKey", step.key)
+        dialog.setWindowTitle(f"{step.title} Example")
+        dialog.resize(960, 740)
+        self._apply_example_dialog_theme(dialog)
+
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(12)
+
+        card = QFrame()
+        card.setObjectName("tutorialCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 18, 18, 18)
+        card_layout.setSpacing(12)
+
+        title_label = QLabel(f"{step.title} Examples")
+        title_label.setObjectName("tutorialStepTitle")
+        title_label.setWordWrap(True)
+        card_layout.addWidget(title_label)
+
+        intro_label = QLabel(intro_text)
+        intro_label.setObjectName("tutorialInstructionBox")
+        intro_label.setWordWrap(True)
+        intro_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        card_layout.addWidget(intro_label)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("tutorialExampleScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QWidget()
+        content.setObjectName("tutorialExampleContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        for guide_card in cards:
+            content_layout.addWidget(guide_card)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        card_layout.addWidget(scroll, 1)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        button_row.addWidget(close_button)
+        card_layout.addLayout(button_row)
+
+        outer.addWidget(card, 1)
+
+        dialog.destroyed.connect(lambda *_: setattr(self, "_step_example_dialog", None))
+        self._step_example_dialog = dialog
+        dialog.move(self.x() + 36, self.y() + 36)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _build_completion_guide_page(self) -> QWidget:
         from .main_window import build_gesture_guide_scroll_area
@@ -847,6 +1371,9 @@ class TutorialWindow(QDialog):
             }}
             """
         )
+        dialog = getattr(self, "_step_example_dialog", None)
+        if dialog is not None:
+            self._apply_example_dialog_theme(dialog)
 
     def _reset_tutorial_progress(self) -> None:
         self._completed_steps.clear()
@@ -861,18 +1388,33 @@ class TutorialWindow(QDialog):
         self._completion_feedback_step = -1
         self._play_pause_ready_for_next = True
 
+    def _seed_prior_step_completion_state(self, start_step_index: int) -> None:
+        clamped = max(0, min(int(start_step_index), len(self._practice_steps) - 1))
+        self._completed_steps = set(range(clamped))
+        if clamped > 0:
+            self._swipe_counts = {"swipe_left": 3, "swipe_right": 3}
+            self._swipe_goal_index = 6
+        if clamped > 2:
+            self._spotify_toggle_count = 2
+        if clamped > 4:
+            self._mouse_stage = "disable"
+            self._mouse_cursor_seen = True
+
     def configure_session(
         self,
         *,
         camera_index: Optional[int],
         launched_from_settings: bool,
         auto_start_on_done: bool,
+        start_step_index: int = 0,
     ) -> None:
         self._camera_index = camera_index
         self._launched_from_settings = bool(launched_from_settings)
         self._auto_start_on_done = bool(auto_start_on_done)
-        self._step_index = 0
         self._reset_tutorial_progress()
+        clamped_step_index = max(0, min(int(start_step_index), len(self._practice_steps) - 1))
+        self._step_index = clamped_step_index
+        self._seed_prior_step_completion_state(clamped_step_index)
         self._close_emitted = False
         self._closing_programmatically = False
         self._reset_for_step()
@@ -958,6 +1500,20 @@ class TutorialWindow(QDialog):
             return
 
         self._owns_worker = True
+        # NOTE: a previous attempt at this line wrapped self.config with
+        # `dataclasses.replace(..., gpu_mode=False, lite_mode=False,
+        # low_fps_mode=False)` to skip the perf-mode init paths during
+        # tutorial cold-start. That broke the tutorial outright on
+        # configs where any of those modes were actually relied on at
+        # the engine layer (the worker would init, then immediately
+        # report running_state=False with a "Tutorial runtime stopped"
+        # banner). Reverted until we have a safer way to get the same
+        # speed-up — most likely either pre-spawning the worker before
+        # the user clicks Tutorial, or wiring `set_tutorial_context`
+        # to suppress the perf-mode paths from inside the engine where
+        # we can guarantee state consistency. The ffmpeg-startup
+        # timeout drop in ffmpeg_capture.py still applies and saves
+        # ~11 s on the dead-camera path the user originally reported.
         owned_worker = GestureWorker(self.config, camera_index_override=self._camera_index, parent=self)
         # Plumb the parent app's phone-camera QR capture into the
         # owned worker BEFORE start() so phone-only users can still
@@ -1053,6 +1609,15 @@ class TutorialWindow(QDialog):
         self._voice_listening = False
         self._voice_status = "ready"
         self._voice_heard_text = ""
+        self._mouse_cursor_seen = False
+        # Always hide the voice-mic arrow when entering a new step:
+        # if the previous step left it visible (rare race during a
+        # forced advance) we don't want it bleeding into the next
+        # screen. show_pointing on the next voice step re-shows.
+        arrow = getattr(self, "_voice_mic_arrow", None)
+        if arrow is not None:
+            arrow.hide_arrow()
+        self._close_step_example_dialog()
         self._last_spotify_tutorial_action = "-"
         self._last_tutorial_play_pause_text = ""
         self._last_voice_success_text = ""
@@ -1080,6 +1645,7 @@ class TutorialWindow(QDialog):
             self.body_stack.setCurrentIndex(1)
             self.progress_badge.setText("Tutorial Completed")
             self.guide_button.hide()
+            self.example_button.hide()
             self.prev_button.setEnabled(True)
             self.prev_button.setText("Previous")
             self.next_button.setEnabled(True)
@@ -1090,6 +1656,7 @@ class TutorialWindow(QDialog):
 
         self.body_stack.setCurrentIndex(0)
         self.guide_button.show()
+        self.example_button.show()
         self.progress_badge.setText(f"Step {self._step_index + 1} of {len(self._practice_steps)}")
         self.step_title.setText(step.title)
 
@@ -1135,16 +1702,17 @@ class TutorialWindow(QDialog):
             "mouse_mode": (
                 "How to do it:\n"
                 "\u2022 Turn ON / OFF \u2014 LEFT hand, three fingers up (index + middle + ring), thumb across, pinky curled. Hold until the \u2018Mouse Mode\u2019 pill appears.\n"
-                "\u2022 Move cursor \u2014 RIGHT hand, open palm. Move within the red box; the dot mirrors your real cursor.\n"
-                "\u2022 Left-click \u2014 RIGHT hand: bend index down then up.\n"
-                "\u2022 Right-click \u2014 RIGHT hand: bend middle down then up.\n"
-                "\u2022 Scroll \u2014 RIGHT hand: index + middle together. Move hand UP to scroll up, DOWN to scroll down.\n\n"
+                "\u2022 Move cursor \u2014 RIGHT hand, open palm. Move within the small red box; the dot mirrors your real cursor.\n"
+                "\u2022 Left-click \u2014 RIGHT hand: PINCH thumb tip to index tip, then release. Hold the pinch to click-and-drag.\n"
+                "\u2022 Right-click \u2014 RIGHT hand: PINCH thumb tip to middle tip, then release.\n"
+                "\u2022 Keep the other 3 fingers relaxed (open or partial curl) \u2014 a fist won\u2019t register as a pinch.\n"
+                "\u2022 Scroll \u2014 RIGHT hand: index + middle extended and TOUCHING together (ring + pinky curled). Hold briefly, then move hand UP to scroll up, DOWN to scroll down.\n\n"
                 "To complete: turn on, click every tutorial target, turn off."
             ),
             "voice_command": (
                 "How to do it:\n"
                 "\u2022 LEFT hand, only the index finger up (others curled, thumb tucked).\n"
-                "\u2022 Hold until the listening pill appears.\n"
+                "\u2022 Hold until the microphone appears at the bottom middle of your monitor — that shows Touchless is listening.\n"
                 "\u2022 Speak clearly: \u201cOpen YouTube on Google Chrome\u201d.\n\n"
                 "To complete: trigger the listener and open YouTube on Chrome."
             ),
@@ -1184,6 +1752,8 @@ class TutorialWindow(QDialog):
             self.practice_stack.show()
             self.practice_stack.setCurrentWidget(self.mouse_widget)
             if self._step_completed:
+                self.mouse_widget.mark_all_targets_completed()
+            if self._step_completed:
                 footer_text = "Completed! Swipe right to move on!"
             elif self._mouse_stage == "enable":
                 footer_text = "Mouse mode off. Turn it on to begin."
@@ -1192,7 +1762,7 @@ class TutorialWindow(QDialog):
             else:
                 footer_text = "Targets cleared. Turn mouse mode off to finish."
             self._set_camera_step_labels(
-                header="Toggle mouse mode and clear the targets.",
+                header=self._mouse_mode_header_text(mode_enabled=False),
                 footer=footer_text,
             )
             self.progress_label.clear()
@@ -1201,7 +1771,7 @@ class TutorialWindow(QDialog):
             header_map = {
                 "spotify_open": "Open Spotify with right-hand two!",
                 "play_pause": "Play/pause with right-hand fist!",
-                "voice_command": "Hold left-hand one to activate voice listening, then say: “Open YouTube on Google Chrome”.",
+                "voice_command": self._voice_command_header_text(False),
             }
             self._set_camera_step_labels(
                 header=header_map.get(step.key, step.description),
@@ -1257,10 +1827,10 @@ class TutorialWindow(QDialog):
         self._encouragement_until = now + 1.5
 
     def _draw_encouragement_overlay(self, frame, now: float) -> None:
-        """Render the active encouragement message centered along the
-        bottom of the camera frame (in pixel space, baked into the
-        image so it scales with the video). Fades over the last 0.5 s
-        of the 1.5 s lifetime via alpha-blended overlay."""
+        """Render the active encouragement message centered in the
+        MIDDLE of the camera frame in big bold accent-green text.
+        Fades over the last 0.5 s of the 1.5 s lifetime via alpha-
+        blended overlay."""
         if self._encouragement_until <= 0.0 or not self._encouragement_text:
             return
         remaining = self._encouragement_until - now
@@ -1273,35 +1843,39 @@ class TutorialWindow(QDialog):
             h, w = frame.shape[:2]
         except Exception:
             return
-        # Scale font with frame size so the message reads at any video
-        # height. Tune for ~720p as the reference point.
-        font = cv2.FONT_HERSHEY_DUPLEX
-        scale = max(1.0, h / 360.0)
-        thickness = max(2, int(round(scale * 1.4)))
-        (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+        # FONT_HERSHEY_TRIPLEX has the cleanest serifed look of the
+        # built-in cv2 fonts — pairs well with the heavy stroke we
+        # paint below to fake a 'bold' weight (cv2 has no separate
+        # bold variant; we layer two passes with different thickness
+        # to get the same visual heft).
+        font = cv2.FONT_HERSHEY_TRIPLEX
+        scale = max(1.4, h / 280.0)
+        thickness = max(3, int(round(scale * 1.8)))
+        (tw, th), _baseline = cv2.getTextSize(text, font, scale, thickness)
         cx = w // 2
-        # Position near (but not at) the bottom of the camera frame.
-        margin = max(24, int(round(h * 0.06)))
-        baseline_y = h - margin
+        cy = h // 2
         text_x = cx - tw // 2
-        text_y = baseline_y
+        text_y = cy + th // 2
         # Fade: full opacity until the last 0.5 s, then linearly down
-        # to zero. Implemented as alpha-blended draw on top of the
-        # frame so the existing camera content remains crisp.
+        # to zero.
         fade_window = 0.5
         alpha = 1.0 if remaining >= fade_window else max(0.0, remaining / fade_window)
         if alpha <= 0.01:
             return
-        # Accent green (BGR) for fill, dark outline for legibility on
-        # busy camera content.
         accent_bgr = (182, 233, 29)  # = #1DE9B6 → BGR
         outline_bgr = (10, 25, 35)
         overlay = frame.copy()
-        # Black outline first (multiple offsets for stroke effect).
-        outline_thickness = max(thickness + 2, 4)
+        # Heavier outline + double fill pass to fake bold.
+        outline_thickness = max(thickness + 4, 7)
         cv2.putText(
             overlay, text, (text_x, text_y), font, scale,
             outline_bgr, outline_thickness, cv2.LINE_AA,
+        )
+        # Two passes of the fill at slightly different thickness give
+        # the strokes a bolder look than a single pass would.
+        cv2.putText(
+            overlay, text, (text_x, text_y), font, scale,
+            accent_bgr, thickness + 1, cv2.LINE_AA,
         )
         cv2.putText(
             overlay, text, (text_x, text_y), font, scale,
@@ -1342,18 +1916,21 @@ class TutorialWindow(QDialog):
         """Show / clear the big-bold accent-coloured header and footer
         that frame the camera view. Empty strings hide the widget so
         the layout doesn't reserve space for a blank line."""
-        if header:
-            self.tutorial_camera_header.setText(header)
-            self.tutorial_camera_header.show()
-        else:
-            self.tutorial_camera_header.clear()
-            self.tutorial_camera_header.hide()
+        self._set_camera_header_text(header)
         if footer:
             self.tutorial_camera_footer.setText(footer)
             self.tutorial_camera_footer.show()
         else:
             self.tutorial_camera_footer.clear()
             self.tutorial_camera_footer.hide()
+
+    def _set_camera_header_text(self, text: str) -> None:
+        if text:
+            self.tutorial_camera_header.setText(text)
+            self.tutorial_camera_header.show()
+        else:
+            self.tutorial_camera_header.clear()
+            self.tutorial_camera_header.hide()
 
     def _step_progress_footer(self, step) -> str:
         """Compose the footer line shown under the camera view for a
@@ -1362,7 +1939,7 @@ class TutorialWindow(QDialog):
         if self._step_completed:
             return "Completed! Swipe right to move on!"
         if step.key == "play_pause":
-            return f"Fist detections {self._spotify_toggle_count}/2"
+            return self._fist_progress_html()
         if step.key == "spotify_open":
             return "Waiting for right-hand two…"
         if step.key == "voice_command":
@@ -1370,15 +1947,33 @@ class TutorialWindow(QDialog):
         return step.progress_template or ""
 
     @staticmethod
-    def _swipe_count_color(n: int) -> str:
-        """Color tiers for the 'Completed N/3 ... swipes' footer.
-        0/3 = red (haven't started), 1-2/3 = orange (in progress),
-        3/3 = green (done)."""
+    def _progress_color(n: int, target: int) -> str:
+        """Color tiers for any "N/target" progress counter:
+        0 = red (haven't started), 1..target-1 = orange (in progress),
+        target = green (done). Used by both the swipes footer (target=3)
+        and the play/pause-fist footer (target=2). Same palette so the
+        visual feedback feels consistent across steps."""
         if n <= 0:
             return "#FF5252"
-        if n < 3:
+        if n < target:
             return "#FFA726"
         return "#1DE9B6"
+
+    @staticmethod
+    def _swipe_count_color(n: int) -> str:
+        """Back-compat wrapper kept so any older code paths still
+        compile. Forwards to the generic _progress_color with the
+        swipes step's target of 3."""
+        return TutorialWindow._progress_color(n, 3)
+
+    def _fist_progress_html(self) -> str:
+        """Footer text for the play/pause-fist step with the count
+        colored on the same red/orange/green tier the swipes step
+        uses. Same visual style across both steps so the user gets
+        the same "where am I" cue everywhere it shows up."""
+        n = int(self._spotify_toggle_count)
+        color = self._progress_color(n, 2)
+        return f'Fist detections <span style="color:{color};">{n}/2</span>'
 
     def _refresh_swipe_camera_labels(self) -> None:
         """Drive the big-bold accent-green header above the camera and
@@ -1590,136 +2185,264 @@ class TutorialWindow(QDialog):
             py = int(pts[index][1] * height)
             cv2.circle(frame, (px, py), 5, color, -1, cv2.LINE_AA)
 
-    def _draw_demo_hand(self, frame, center, pose, *, scale=1.0, tilt_deg=0.0, color=(255,255,255), mirror=False) -> None:
-        cx, cy = center
-        theta = math.radians(tilt_deg)
-        rot = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]], dtype=np.float32)
-        # mirror=True flips the hand horizontally so a "right hand"
-        # template renders as a left hand (thumb on the right side
-        # instead of the left). Used by left-hand poses like the
-        # voice-command 'one' so the skeleton matches the hand the
-        # user is actually supposed to use.
-        mirror_sign = -1.0 if mirror else 1.0
-
-        def tr(pt):
-            x, y = float(pt[0]) * mirror_sign, float(pt[1])
-            xy = (rot @ (np.array([x, y], dtype=np.float32) * float(scale))).astype(np.float32)
-            return int(round(cx + xy[0])), int(round(cy + xy[1]))
-
-        open_map = {
-            "open_hand": (1.0, 1.0, 1.0, 1.0, 1.0),
-            "one": (0.25, 1.0, 0.2, 0.2, 0.2),
-            "two": (0.25, 1.0, 1.0, 0.2, 0.2),
-            "fist": (0.2, 0.2, 0.2, 0.2, 0.2),
-            "wheel_pose": (1.0, 1.0, 0.2, 0.2, 1.0),
-            "left_three": (0.25, 1.0, 1.0, 1.0, 0.2),
-        }
-        openness = open_map.get(pose, open_map["open_hand"])
-
-        pts = np.zeros((21, 2), dtype=np.float32)
-        pts[0] = np.array([0.0, 56.0])
-        pts[5] = np.array([-30.0, 10.0])
-        pts[9] = np.array([-8.0, 4.0])
-        pts[13] = np.array([16.0, 6.0])
-        pts[17] = np.array([38.0, 12.0])
-
-        pts[1] = np.array([-18.0, 36.0])
-        pts[2] = np.array([-32.0, 26.0])
-        thumb_len = 24.0 * openness[0]
-        pts[3] = np.array([-42.0 - 6.0 * openness[0], 20.0 - 7.0 * openness[0]])
-        pts[4] = np.array([-48.0 - thumb_len, 20.0 - 9.0 * openness[0]]) if openness[0] >= 0.6 else np.array([-26.0, 34.0])
-
-        finger_specs = [
-            (5, 6, 7, 8, -30.0, 40.0, 32.0, 24.0, openness[1]),
-            (9, 10, 11, 12, -8.0, 46.0, 36.0, 26.0, openness[2]),
-            (13, 14, 15, 16, 16.0, 42.0, 32.0, 24.0, openness[3]),
-            (17, 18, 19, 20, 38.0, 36.0, 28.0, 20.0, openness[4]),
-        ]
-        for mcp, pip, dip, tip, x, l1, l2, l3, op in finger_specs:
-            pts[pip] = np.array([x, pts[mcp][1] - max(18.0, l1 * max(op, 0.32))])
-            if op >= 0.65:
-                pts[dip] = np.array([x, pts[pip][1] - l2])
-                pts[tip] = np.array([x, pts[dip][1] - l3])
-            else:
-                pts[dip] = np.array([x + 8.0, pts[pip][1] + 8.0])
-                pts[tip] = np.array([x + 18.0, pts[dip][1] + 10.0])
-
-        pts_px = [tr(pt) for pt in pts]
-        palm_outline_idx = (0, 5, 9, 13, 17, 0)
-        palm_outline = np.array([pts_px[i] for i in palm_outline_idx], dtype=np.int32).reshape((-1, 1, 2))
-        cv2.polylines(frame, [palm_outline], True, color, 2, cv2.LINE_AA)
-        for a, b in HAND_CONNECTIONS:
-            cv2.line(frame, pts_px[a], pts_px[b], color, 2, cv2.LINE_AA)
-        for px, py in pts_px:
-            cv2.circle(frame, (px, py), max(2, int(round(3.0 * scale / 1.6))), color, -1, cv2.LINE_AA)
-    def _draw_tutorial_mouse_box(self, frame, state: dict) -> None:
-        """Render the red mouse-control box on the tutorial frame
-        directly from a payload state dict. Mirrors the look of
-        draw_mouse_control_box_overlay (red border + faint fill +
-        label + cursor dot) but doesn't require a full MouseDebugState
-        object — the tutorial gets only the minimal fields it needs
-        through the engine debug payload."""
-        bounds = state.get("camera_control_bounds")
-        if bounds is None:
+    def _draw_top_label(self, frame, text: str, color_bgr: tuple) -> None:
+        """Render a bold label horizontally centred near the TOP of the
+        camera frame. Used by the swipes demo so the directional cue
+        ('Swipe right' / 'Swipe left') sits above the demo hands instead
+        of crowding the centre of the live view."""
+        try:
+            h, w = frame.shape[:2]
+        except Exception:
             return
-        frame_h, frame_w = frame.shape[:2]
-        x1 = int(round(bounds[0] * frame_w))
-        y1 = int(round(bounds[1] * frame_h))
-        x2 = int(round(bounds[2] * frame_w))
-        y2 = int(round(bounds[3] * frame_h))
-        if x2 <= x1 + 12 or y2 <= y1 + 12:
+        font = cv2.FONT_HERSHEY_DUPLEX
+        scale = max(0.85, min(1.25, h / 540.0))
+        thickness = max(2, int(round(scale * 2.0)))
+        (tw, th), _baseline = cv2.getTextSize(text, font, scale, thickness)
+        x = (w - tw) // 2
+        y = max(int(h * 0.10), th + 12)
+        # Dark outline first for legibility on busy camera content.
+        cv2.putText(frame, text, (x, y), font, scale, (10, 25, 35),
+                    thickness + 3, cv2.LINE_AA)
+        cv2.putText(frame, text, (x, y), font, scale, color_bgr,
+                    thickness, cv2.LINE_AA)
+
+    def _sprite_for(self, name: str):
+        """Lazy-load and cache the RGBA sprite for `name`. Returns
+        a StaticSprite, SequenceSprite, or None when no asset
+        exists (in which case the demo overlay simply skips drawing
+        a hand for that step)."""
+        cached = self._sprites.get(name, "missing")
+        if cached != "missing":
+            return cached
+        try:
+            from .tutorial_demo_sprite import resolve_sprite
+            sprite = resolve_sprite(name)
+        except Exception:
+            sprite = None
+        self._sprites[name] = sprite
+        return sprite
+
+    def _static_demo_alpha(self, now: float) -> float:
+        """Fade-in / hold / fade-out / hide cycle for static demos.
+        Replaces the previous geometric morph (which produced
+        anatomically nonsensical intermediate poses when
+        interpolating MediaPipe landmarks). Now the recorded snapshot
+        renders directly; the only animation is overall opacity."""
+        cycle = 3.0
+        ct = now % cycle
+        if ct < 0.35:
+            p = ct / 0.35
+            return p * p * (3.0 - 2.0 * p)
+        if ct < 2.0:
+            return 1.0
+        if ct < 2.45:
+            p = 1.0 - (ct - 2.0) / 0.45
+            return p * p * (3.0 - 2.0 * p)
+        return 0.0
+
+    def _draw_tutorial_mouse_overlays(self, frame, payload_state: dict) -> None:
+        """Use the SAME mouse overlays the live view uses, fed from
+        the engine's per-frame payload (no engine objects to share
+        across processes — we reconstruct the small dataclass +
+        adapter the overlays need from the payload's primitive
+        fields).
+
+        Renders both:
+            - draw_mouse_control_box_overlay → the red control-area
+              box + cursor dot in camera space.
+            - draw_mouse_monitor_overlay → the corner Desktop Map
+              panel with each monitor + the actual cursor position.
+
+        This replaces the older bespoke `_draw_tutorial_mouse_box`
+        so the tutorial's visualization stays in sync with whatever
+        the live view evolves to."""
+        bounds = payload_state.get("camera_control_bounds")
+        cursor_norm = payload_state.get("cursor_position")
+        virtual_bounds = payload_state.get("virtual_bounds")
+
+        debug_state = MouseDebugState(
+            mode_enabled=True,
+            status="active",
+            cursor_position=tuple(cursor_norm) if cursor_norm is not None else None,
+            cursor_anchor_position=None,
+            cursor_reach_bounds=None,
+            camera_control_bounds=(
+                tuple(float(v) for v in bounds) if bounds is not None else None
+            ),
+            camera_anchor_position=None,
+            dragging=False,
+            scrolling=False,
+        )
+        adapter = self._PayloadMouseControllerAdapter(virtual_bounds, cursor_norm)
+        active_monitor = getattr(self.config, "mouse_active_monitor_index", None)
+        try:
+            draw_mouse_control_box_overlay(
+                frame,
+                debug_state=debug_state,
+                mode_enabled=True,
+                active_monitor_index=active_monitor,
+            )
+        except Exception:
+            pass
+        try:
+            draw_mouse_monitor_overlay(
+                frame,
+                mouse_controller=adapter,
+                debug_state=debug_state,
+                mode_enabled=True,
+            )
+        except Exception:
+            pass
+
+    class _PayloadMouseControllerAdapter:
+        """Minimal stand-in for MouseController, fed from the engine
+        payload's `mouse_virtual_bounds` + normalized cursor pos.
+        draw_mouse_monitor_overlay only needs `available`,
+        `virtual_bounds()`, and `current_position()` — the rest of
+        MouseController's interface (clicks, scrolling, etc.) isn't
+        used by the overlay."""
+
+        __slots__ = ("_vb", "_cp_norm", "available")
+
+        def __init__(self, virtual_bounds, cursor_pos_norm) -> None:
+            self._vb = tuple(virtual_bounds) if virtual_bounds is not None else None
+            self._cp_norm = (
+                tuple(cursor_pos_norm) if cursor_pos_norm is not None else None
+            )
+            self.available = self._vb is not None
+
+        def virtual_bounds(self):
+            return self._vb
+
+        def current_position(self):
+            if self._vb is None or self._cp_norm is None:
+                return None
+            v_left, v_top, v_w, v_h = self._vb
+            x = float(v_left) + float(self._cp_norm[0]) * float(v_w)
+            y = float(v_top) + float(self._cp_norm[1]) * float(v_h)
+            return (x, y)
+
+    # Inset geometry: pinned to the top-right corner of the live
+    # view, sized to ~26 % of frame width with a tiny margin so
+    # the visible clip content's top-right edge sits hard against
+    # the frame's top-right edge.
+    _INSET_W_FRAC = 0.26
+    _INSET_MARGIN = 6
+    _INSET_MAX_H_FRAC = 0.55
+
+    def _inset_rect(self, frame_w: int, frame_h: int,
+                    clip_aspect: float = 0.75,
+                    scale: float = 1.0) -> tuple:
+        """Return (cx, cy, w, h) for the top-right inset, sized to
+        match the clip's natural aspect (height / width) so we don't
+        letterbox empty bars that visually pull the gesture away
+        from the corner. Caps height to _INSET_MAX_H_FRAC of the
+        frame so a tall portrait still doesn't dominate the live
+        view.
+
+        `scale` shrinks (or grows) the inset uniformly while
+        keeping it pinned to the top-right corner — used per-step
+        to size each gesture clip appropriately (e.g., the tall
+        Two pose at part 2 is rendered at 2/3 so it doesn't
+        dominate the live frame)."""
+        scale = max(0.2, float(scale))
+        w = max(80, int(round(frame_w * self._INSET_W_FRAC * scale)))
+        h = max(60, int(round(w * clip_aspect)))
+        max_h = int(frame_h * self._INSET_MAX_H_FRAC * scale)
+        if h > max_h:
+            h = max_h
+            w = max(80, int(round(h / max(0.1, clip_aspect))))
+        cx = frame_w - self._INSET_MARGIN - w // 2
+        cy = self._INSET_MARGIN + h // 2
+        return cx, cy, w, h
+
+    def _draw_static_demo(
+        self,
+        frame,
+        _main_center: tuple,
+        demo_name: str,
+        *,
+        fallback_scale: float = 1.0,
+        mirror: bool = False,
+        now: float,
+    ) -> None:
+        """Play the Control Guide clip for `demo_name` in a small
+        bordered inset at the top-right of the live frame. Static
+        gestures stay visible for the entire step (no fade cycle —
+        users were missing them during the off-phases). The
+        `fallback_scale` arg now controls the inset size so steps
+        with tall portrait clips (e.g. part 2's Two gesture) can
+        shrink without bothering the layout."""
+        clip = self._sprite_for(demo_name)
+        if clip is None:
             return
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (48, 56, 236), thickness=-1)
-        cv2.addWeighted(overlay, 0.08, frame, 0.92, 0.0, frame)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (28, 36, 255), thickness=4)
-        label = "Mouse control area"
-        label_origin = (x1 + 10, y1 - 10 if y1 >= 28 else y1 + 22)
-        cv2.putText(frame, label, label_origin, cv2.FONT_HERSHEY_SIMPLEX, 0.72, (28, 36, 255), 2, cv2.LINE_AA)
-        # Virtual cursor dot mapped through the box. cursor_position
-        # is normalized [0, 1] across the full virtual desktop.
-        cursor = state.get("cursor_position")
-        if cursor is not None:
-            box_w = max(1, x2 - x1)
-            box_h = max(1, y2 - y1)
-            cx = x1 + int(round(float(cursor[0]) * box_w))
-            cy = y1 + int(round(float(cursor[1]) * box_h))
-            cv2.circle(frame, (cx, cy), 6, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
-            cv2.circle(frame, (cx, cy), 10, (36, 220, 184), thickness=2, lineType=cv2.LINE_AA)
+        state = clip.at(now)
+        if not state.visible or state.frame is None:
+            return
+        height, width = frame.shape[:2]
+        ch, cw = state.frame.shape[:2]
+        clip_aspect = ch / max(1.0, float(cw))
+        cx, cy, rw, rh = self._inset_rect(width, height, clip_aspect,
+                                           scale=fallback_scale)
+        from .tutorial_demo_sprite import composite_sprite
+        composite_sprite(frame, state.frame, (cx, cy, rw, rh),
+                         alpha=1.0, mirror=mirror)
 
     def _draw_demo_overlay(self, frame, step_key: str) -> None:
         height, width = frame.shape[:2]
         accent = (182, 233, 29)
-        white = (245, 250, 255)
-        main_center = (int(width * 0.50), int(height * 0.30))
+        try:
+            now = time.monotonic()
+        except Exception:
+            now = 0.0
         if step_key == "swipes":
             right_phase = self._swipe_goal_index < 3
-            left_center = (int(width * 0.28), int(height * 0.30))
-            right_center = (int(width * 0.72), int(height * 0.30))
+            demo_name = "swipe_right" if right_phase else "swipe_left"
+            arrow_y = int(height * 0.46)
             if right_phase:
-                self._draw_demo_hand(frame, left_center, "open_hand", scale=0.82, tilt_deg=0.0, color=white)
-                self._draw_demo_hand(frame, right_center, "open_hand", scale=0.82, tilt_deg=10.0, color=white)
-                cv2.arrowedLine(frame, (left_center[0] + 54, left_center[1]), (right_center[0] - 54, right_center[1]), accent, 4, cv2.LINE_AA, tipLength=0.20)
-                cv2.putText(frame, "Swipe right", (int(width * 0.42), int(height * 0.50)), cv2.FONT_HERSHEY_SIMPLEX, 0.88, accent, 2, cv2.LINE_AA)
+                arrow_start = (int(width * 0.20), arrow_y)
+                arrow_end = (int(width * 0.80), arrow_y)
             else:
-                self._draw_demo_hand(frame, right_center, "open_hand", scale=0.82, tilt_deg=0.0, color=white)
-                self._draw_demo_hand(frame, left_center, "open_hand", scale=0.82, tilt_deg=-10.0, color=white)
-                cv2.arrowedLine(frame, (right_center[0] - 54, right_center[1]), (left_center[0] + 54, left_center[1]), accent, 4, cv2.LINE_AA, tipLength=0.20)
-                cv2.putText(frame, "Swipe left", (int(width * 0.43), int(height * 0.50)), cv2.FONT_HERSHEY_SIMPLEX, 0.88, accent, 2, cv2.LINE_AA)
+                arrow_start = (int(width * 0.80), arrow_y)
+                arrow_end = (int(width * 0.20), arrow_y)
+            cv2.arrowedLine(frame, arrow_start, arrow_end, accent, 4,
+                             cv2.LINE_AA, tipLength=0.20)
+            self._draw_top_label(frame,
+                                  "Swipe right" if right_phase else "Swipe left",
+                                  accent)
+            clip = self._sprite_for(demo_name)
+            if clip is not None:
+                state = clip.at(now)
+                if state.visible and state.frame is not None:
+                    ch, cw = state.frame.shape[:2]
+                    clip_aspect = ch / max(1.0, float(cw))
+                    cx, cy, rw, rh = self._inset_rect(width, height, clip_aspect)
+                    from .tutorial_demo_sprite import composite_sprite
+                    composite_sprite(frame, state.frame, (cx, cy, rw, rh))
         elif step_key == "spotify_open":
-            self._draw_demo_hand(frame, main_center, "two", scale=1.00, color=white)
+            # Two.png is portrait — at full inset width it dominates
+            # the corner, pushing past the edge-glow margins. 0.67
+            # scale shrinks it to ~2/3 so the gesture stays clearly
+            # visible without crowding the live frame.
+            self._draw_static_demo(frame, None, "right_two",
+                                    fallback_scale=0.67, now=now)
         elif step_key == "play_pause":
-            self._draw_demo_hand(frame, main_center, "fist", scale=1.00, color=white)
+            self._draw_static_demo(frame, None, "right_fist",
+                                    fallback_scale=1.00, now=now)
         elif step_key == "gesture_wheel":
-            self._draw_demo_hand(frame, main_center, "wheel_pose", scale=0.96, color=white)
+            self._draw_static_demo(frame, None, "wheel_pose",
+                                    fallback_scale=0.96, now=now)
         elif step_key == "mouse_mode":
-            # When mouse mode is OFF: show the demo hand so the user
-            # learns the activation pose. When ON: drop the demo hand
-            # and draw the same red control-area box the regular live
-            # view shows. The state lives in self._payload_mouse_state
-            # because the tutorial's local _mouse_tracker isn't the
-            # one tracking — the parent engine's tracker is, and we
-            # receive its state via the engine debug payload.
+            # Top-right helper inset:
+            #   Mouse mode OFF → static "Left Three.png" pose so the
+            #     user knows the activation gesture before they do
+            #     anything.
+            #   Mouse mode ON  → looped "Mouse Clicks.mp4" demo so
+            #     they see the new pinch click mechanic in action
+            #     while they practice it.
+            # Plus, when mouse mode is ON, we ALSO render the SAME
+            # mouse overlays the live view uses so the tutorial preview
+            # matches the real experience.
             mouse_state = getattr(self, "_payload_mouse_state", None) or (
                 {
                     "mode_enabled": True,
@@ -1732,17 +2455,24 @@ class TutorialWindow(QDialog):
                     "virtual_bounds": None,
                 } if self._mouse_tracker.mode_enabled else None
             )
-            if mouse_state is not None and mouse_state.get("camera_control_bounds") is not None:
-                self._draw_tutorial_mouse_box(frame, mouse_state)
+            mode_on = mouse_state is not None and bool(mouse_state.get("mode_enabled"))
+            if mode_on:
+                # Mouse mode ON: play the click-demo clip in the
+                # corner inset so the user can mirror the pinch
+                # mechanic. Border colour stays the standard accent.
+                self._draw_static_demo(frame, None, "mouse_clicks",
+                                        fallback_scale=1.00, now=now)
             else:
-                self._draw_demo_hand(frame, main_center, "left_three", scale=0.96, color=white)
+                # Mouse mode OFF: show the static activation pose so
+                # the user knows what gesture to hold first.
+                self._draw_static_demo(frame, None, "left_three",
+                                        fallback_scale=1.00, now=now)
+            if mouse_state is not None and mouse_state.get("camera_control_bounds") is not None:
+                self._draw_tutorial_mouse_overlays(frame, mouse_state)
         elif step_key == "voice_command":
-            # Voice listener is bound to LEFT-hand 'one'. Mirror the
-            # right-hand skeleton template so the demo hand visually
-            # matches the user's actual left hand (thumb on the right
-            # side of the silhouette, palm to camera).
-            self._draw_demo_hand(frame, main_center, "one", scale=1.00, color=white, mirror=True)
-            cv2.putText(frame, "Voice", (int(width * 0.46), int(height * 0.50)), cv2.FONT_HERSHEY_SIMPLEX, 0.88, accent, 2, cv2.LINE_AA)
+            self._draw_static_demo(frame, None, "left_one",
+                                    fallback_scale=1.00, now=now)
+            self._draw_top_label(frame, "Voice", accent)
     def _drain_voice_queue(self) -> None:
         while True:
             try:
@@ -1772,6 +2502,12 @@ class TutorialWindow(QDialog):
                 self._voice_heard_text = heard_text
                 self._voice_listening = False
                 self._voice_status = "ready"
+                # Voice round done — drop the arrow so the user
+                # isn't stuck staring at a "look at the mic" hint
+                # after the listening phase has already ended.
+                arrow = getattr(self, "_voice_mic_arrow", None)
+                if arrow is not None:
+                    arrow.hide_arrow()
                 if success:
                     self._voice_overlay_widget().show_result("Executing command", command_text=heard_text, duration=1.9)
                 else:
@@ -1849,6 +2585,26 @@ class TutorialWindow(QDialog):
         except Exception:
             pass
 
+    def _update_voice_arrow(self, currently_listening: bool) -> None:
+        """Show/hide the bouncing voice-mic arrow based on the current
+        voice-listening state. Driven from BOTH the owned-worker
+        voice path (which sets self._voice_listening directly) and
+        the shared-worker path (which reads voice_listening from the
+        worker's per-frame payload). Without this, the arrow only
+        showed on the owned-worker path because _start_voice_practice
+        is bypassed when the tutorial uses the parent app's worker
+        — exactly the case the field user reported ("started
+        tutorial with the app already running, never saw the arrow")."""
+        arrow = getattr(self, "_voice_mic_arrow", None)
+        if arrow is None:
+            return
+        prev = getattr(self, "_arrow_prev_voice_listening", False)
+        self._arrow_prev_voice_listening = bool(currently_listening)
+        if currently_listening and not prev:
+            arrow.show_pointing()
+        elif prev and not currently_listening:
+            arrow.hide_arrow()
+
     def _start_voice_practice(self) -> None:
         self._try_adopt_parent_voice_listener()
         if self._voice_listening:
@@ -1859,6 +2615,13 @@ class TutorialWindow(QDialog):
         self._voice_request_id += 1
         request_id = self._voice_request_id
         self._voice_overlay_widget().show_listening()
+        # Show the bouncing arrow on the tutorial window pointing to
+        # the mic overlay. Only meaningful during the part-6 voice
+        # step — the gesture that triggers _start_voice_practice
+        # only fires inside that step, so no extra guard needed.
+        arrow = getattr(self, "_voice_mic_arrow", None)
+        if arrow is not None:
+            arrow.show_pointing()
 
         def _status_callback(status: str) -> None:
             self._voice_queue.put((request_id, {"event": "status", "status": status}))
@@ -2004,6 +2767,13 @@ class TutorialWindow(QDialog):
             if hold_fired:
                 visual_ready = True
                 self._complete_step("Completed! Swipe right to move on!")
+                # The engine launches Spotify in the BACKGROUND
+                # (hidden=True) during this tutorial step so it
+                # doesn't steal focus. Belt-and-suspenders: poll
+                # the foreground window for the next ~3 s and
+                # re-focus the tutorial instantly if Spotify
+                # (or its splash) does pop to the front anyway.
+                self._start_tutorial_refocus_guard()
             if self._step_completed:
                 # Once Spotify opens, the user just needs to swipe to
                 # advance — no value in repeating "Detected right-hand
@@ -2032,7 +2802,7 @@ class TutorialWindow(QDialog):
                 self._play_pause_ready_for_next = False
                 self._trigger_encouragement(now)
                 visual_ready = True
-            self._set_step_progress(f"fist detections {self._spotify_toggle_count}/2")
+            self._set_step_progress(self._fist_progress_html())
             if self._spotify_toggle_count >= 2:
                 self._complete_step("Completed! Swipe right to move on!")
             return visual_ready
@@ -2060,7 +2830,11 @@ class TutorialWindow(QDialog):
         if step.key == "mouse_mode":
             mouse_mode_enabled = bool(payload.get("mouse_mode_enabled"))
             cursor_position = payload.get("mouse_cursor_position")
-            left_click = bool(payload.get("mouse_left_click"))
+            # The pinch redesign moved the canonical click signal: a
+            # pinch-down emits left_press (no synthetic left_click).
+            # We treat either as "register a click" in the practice
+            # arena so both pre- and post-redesign streamers work.
+            left_click = bool(payload.get("mouse_left_click")) or bool(payload.get("mouse_left_press"))
             # Mirror the engine's mouse-overlay state into a tutorial-
             # level field so _draw_demo_overlay can render the red
             # control-area box (same overlay the regular live view
@@ -2084,6 +2858,12 @@ class TutorialWindow(QDialog):
             self.mouse_widget.set_cursor_position(cursor_position)
             if left_click:
                 self.mouse_widget.register_click(cursor_position)
+            self._set_camera_header_text(
+                self._mouse_mode_header_text(
+                    mode_enabled=mouse_mode_enabled,
+                    completed_targets=self.mouse_widget.completed_targets,
+                )
+            )
             if self._mouse_stage == "enable":
                 self._set_step_progress(
                     "Detected left-hand three!" if left_three_active else "Mouse mode off. Turn it on to begin."
@@ -2121,6 +2901,8 @@ class TutorialWindow(QDialog):
                     visual_ready = True
                 if not mouse_mode_enabled and self.mouse_widget.completed:
                     self._complete_step("Completed! Swipe right to move on!")
+            if mouse_mode_enabled and cursor_position is not None:
+                self._mouse_cursor_seen = True
             return visual_ready
 
         if step.key == "voice_command":
@@ -2130,10 +2912,19 @@ class TutorialWindow(QDialog):
             voice_listening = bool(payload.get("voice_listening"))
             voice_heard = str(payload.get("voice_heard_text", "") or "").lower()
             voice_control = str(payload.get("voice_control_text", "") or "").lower()
+            # Drive the bouncing arrow from the worker's per-frame
+            # voice_listening flag so the cue appears even when the
+            # tutorial is running against the parent app's worker
+            # (the path that bypasses _start_voice_practice entirely).
+            self._update_voice_arrow(voice_listening)
             self._flash_on_edge("voice_command", left_one_active, now)
             visual_ready = now < self._visual_green_until.get("voice_command", 0.0)
+            self._set_camera_header_text(self._voice_command_header_text(left_one_active or voice_listening))
             self._set_step_progress(
-                "Detected left-hand one!" if left_one_active or voice_listening else "Waiting for left-hand one and the voice command."
+                self._voice_command_progress_text(
+                    left_one_active=left_one_active,
+                    voice_listening=voice_listening,
+                )
             )
             if (
                 left_one_active
@@ -2194,12 +2985,12 @@ class TutorialWindow(QDialog):
             if not active:
                 self._play_pause_ready_for_next = True
             visual_ready = now < self._visual_green_until.get("play_pause", 0.0)
-            self._set_step_progress("Detected right-hand fist!" if active else f"Fist detections: {self._spotify_toggle_count}/2.")
+            self._set_step_progress("Detected right-hand fist!" if active else self._fist_progress_html())
             if self._play_pause_ready_for_next and self._hold_ready("play_pause", active, self._spotify_play_pause_hold_seconds, now, cooldown=self._spotify_static_cooldown_seconds):
                 self._spotify_toggle_count = min(2, self._spotify_toggle_count + 1)
                 self._play_pause_ready_for_next = False
                 self._trigger_encouragement(now)
-                self._set_step_progress(f"Fist detections: {self._spotify_toggle_count}/2.")
+                self._set_step_progress(self._fist_progress_html())
                 if self._spotify_toggle_count >= 2:
                     self._complete_step("Completed! Swipe right to move on!")
                 visual_ready = True
@@ -2273,8 +3064,25 @@ class TutorialWindow(QDialog):
                 update = self._mouse_tracker.update(hand_reading=None, prediction=None, hand_handedness=None, cursor_seed=None, now=now)
             self.mouse_widget.set_mode_enabled(update.mode_enabled)
             self.mouse_widget.set_cursor_position(update.cursor_position)
-            if update.left_click:
+            # The pinch-redesign moved the canonical "click" signal
+            # from update.left_click to update.left_press: a pinch
+            # start now fires left_press immediately (so a real-app
+            # mouse-down lands cleanly), and a release fires
+            # left_release. left_click is no longer emitted on the
+            # release path — that was producing duplicate down+up
+            # cycles in the live engine. The tutorial's practice
+            # arena only cares about "click intent at this cursor",
+            # so we use left_press here. Falling back to left_click
+            # too keeps any stragglers (or future re-introduction of
+            # the event) working without a code change.
+            if update.left_press or update.left_click:
                 self.mouse_widget.register_click(update.cursor_position)
+            self._set_camera_header_text(
+                self._mouse_mode_header_text(
+                    mode_enabled=update.mode_enabled,
+                    completed_targets=self.mouse_widget.completed_targets,
+                )
+            )
             if self._mouse_stage == "enable":
                 mouse_enable_active = bool(result.found and result.tracked_hand is not None and str(result.tracked_hand.handedness or "").lower() == "left" and result.prediction.stable_label == "three")
                 self._set_step_progress("Detected left-hand three!" if mouse_enable_active else "Mouse mode off. Turn it on to begin.")
@@ -2292,6 +3100,8 @@ class TutorialWindow(QDialog):
                 visual_ready = self._visual_ready("mouse_disable", mouse_disable_active, now, self._mouse_tracker.toggle_hold_seconds)
                 if not update.mode_enabled and self.mouse_widget.completed:
                     self._complete_step(f"Mouse mode practice completed. Part {self._step_index + 1}/6 completed!")
+            if update.mode_enabled and update.cursor_position is not None:
+                self._mouse_cursor_seen = True
             return visual_ready
 
         if step.key == "voice_command":
@@ -2300,9 +3110,21 @@ class TutorialWindow(QDialog):
                 and str(result.tracked_hand.handedness or "").lower() == "left"
                 and result.prediction.stable_label == "one"
             )
+            # Same arrow wiring as the worker-driven step handler
+            # above — keeps the cue visible across both ownership
+            # modes. self._voice_listening is the owned-worker source
+            # of truth (set in _start_voice_practice and cleared in
+            # the result handler).
+            self._update_voice_arrow(self._voice_listening)
             self._flash_on_edge("voice_command", left_one_active, now)
             visual_ready = now < self._visual_green_until.get("voice_command", 0.0)
-            self._set_step_progress("Detected left-hand one!" if left_one_active or self._voice_listening else "Waiting for left-hand one and the voice command.")
+            self._set_camera_header_text(self._voice_command_header_text(left_one_active or self._voice_listening))
+            self._set_step_progress(
+                self._voice_command_progress_text(
+                    left_one_active=left_one_active,
+                    voice_listening=self._voice_listening,
+                )
+            )
             if self._hold_ready("voice_command", left_one_active and not self._voice_listening, 0.6, now, cooldown=1.5):
                 if self._worker is not None:
                     try:
@@ -2346,7 +3168,8 @@ class TutorialWindow(QDialog):
         # camera-perspective when the config flag was on, which felt
         # broken to users. Selfie view is what people expect across
         # every Touchless surface, so we flip unconditionally here.
-        frame = cv2.flip(frame, 1)
+        if not bool(getattr(self.config, "camera_source_is_mirrored", False)):
+            frame = cv2.flip(frame, 1)
         result = self._engine.process_frame(frame)
         monotonic_now = time.monotonic()
         self._drain_voice_queue()
@@ -2376,8 +3199,117 @@ class TutorialWindow(QDialog):
         self._update_encouragement_visual(monotonic_now)
         self._update_completion_feedback(monotonic_now)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().resizeEvent(event)
+        # Voice-mic arrow overlay covers the whole dialog so its
+        # bottom-center anchor lines up with the bottom-center of
+        # the tutorial window. Re-pin on every resize and refresh
+        # the absolute target coord (the screen we're on may have
+        # changed if we just got dragged across monitors).
+        arrow = getattr(self, "_voice_mic_arrow", None)
+        if arrow is not None:
+            arrow.setGeometry(0, 0, self.width(), self.height())
+            arrow.update_target_from_screen()
+
+    def moveEvent(self, event) -> None:  # noqa: N802 — Qt naming
+        super().moveEvent(event)
+        # Window dragged: the arrow's anchor moved, so its direction
+        # to the absolute mic position needs to be recomputed.
+        # Recompute the target too — a cross-monitor drag changes
+        # which screen the mic overlay will appear on.
+        arrow = getattr(self, "_voice_mic_arrow", None)
+        if arrow is not None and arrow.isVisible():
+            arrow.update_target_from_screen()
+
+    def showEvent(self, event):  # noqa: N802 (Qt API name)
+        super().showEvent(event)
+        # Paint the OS title bar in Touchless blue so the tutorial
+        # window matches the rest of the app's chrome (Custom
+        # Gestures dialogs etc. all use the same helper).
+        try:
+            from .custom_gestures_chrome import apply_touchless_titlebar
+            apply_touchless_titlebar(self)
+        except Exception:
+            pass
+
+    def _start_tutorial_refocus_guard(self) -> None:
+        """After triggering Spotify (or any other foreground-stealing
+        action) during the tutorial, run a short polling loop that
+        snaps focus back to the tutorial window if anything else
+        becomes the foreground window.
+
+        Polls every 120 ms for ~3 s. Spotify's launch sequence on
+        Windows briefly throws a splash/main window even when we
+        ask for hidden mode — this guarantees the user's keyboard
+        focus stays on the tutorial regardless."""
+        if sys.platform != "win32":
+            return
+        timer = getattr(self, "_tutorial_refocus_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(120)
+            timer.timeout.connect(self._tutorial_refocus_tick)
+            self._tutorial_refocus_timer = timer
+        # Reset the deadline so consecutive triggers extend, not
+        # overlap, the guard window.
+        self._tutorial_refocus_deadline = time.monotonic() + 3.0
+        # Snap focus immediately, then keep polling.
+        self._refocus_tutorial_window()
+        timer.start()
+
+    def _tutorial_refocus_tick(self) -> None:
+        deadline = getattr(self, "_tutorial_refocus_deadline", 0.0)
+        if time.monotonic() >= deadline:
+            timer = getattr(self, "_tutorial_refocus_timer", None)
+            if timer is not None:
+                timer.stop()
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            fg = int(user32.GetForegroundWindow() or 0)
+            try:
+                tutorial_hwnd = int(self.winId())
+            except Exception:
+                tutorial_hwnd = 0
+            if fg == tutorial_hwnd or fg == 0:
+                return
+            # Foreground is something else (Spotify splash, etc.).
+            # Pull the tutorial back to the front.
+            self._refocus_tutorial_window()
+        except Exception:
+            pass
+
+    def _refocus_tutorial_window(self) -> None:
+        """Snap the tutorial window back to the foreground. Uses
+        the standard Qt API plus a Win32 fallback because Windows
+        prevents apps from stealing focus from another process
+        unless they go through specific call sequences (the
+        AttachThreadInput / AllowSetForegroundWindow trick is
+        usually unnecessary because we're the parent process of
+        whatever just stole focus, but keeping the SetForegroundWindow
+        call is cheap defense)."""
+        try:
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            tutorial_hwnd = int(self.winId())
+            if tutorial_hwnd:
+                ctypes.windll.user32.SetForegroundWindow(tutorial_hwnd)
+        except Exception:
+            pass
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._stop_session()
+        self._close_step_example_dialog()
+        arrow = getattr(self, "_voice_mic_arrow", None)
+        if arrow is not None:
+            arrow.hide_arrow()
         if not self._closing_programmatically and not self._close_emitted:
             self._close_emitted = True
             self.tutorial_closed.emit(False, self._auto_start_on_done, self._launched_from_settings)

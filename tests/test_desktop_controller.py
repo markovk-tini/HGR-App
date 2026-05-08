@@ -6,12 +6,31 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hgr.debug.desktop_controller import DesktopController
+from hgr.debug.desktop_controller import DesktopAppEntry, DesktopController
 
 
 class DesktopControllerTest(unittest.TestCase):
     def _temp_dir(self) -> Path:
         return Path(tempfile.mkdtemp())
+
+    def _app_entry(
+        self,
+        controller: DesktopController,
+        display_name: str,
+        target: str,
+        *,
+        source: str = "start_apps",
+        aliases: tuple[str, ...] = (),
+        category: str = "gaming",
+    ) -> DesktopAppEntry:
+        return DesktopAppEntry(
+            display_name=display_name,
+            normalized_name=controller._normalize_application_name(display_name),
+            target=target,
+            source=source,
+            aliases=controller._build_entry_aliases(display_name, aliases),
+            category=category,
+        )
 
     def test_can_resolve_known_app_aliases(self) -> None:
         controller = DesktopController(outlook_paths=())
@@ -57,6 +76,49 @@ class DesktopControllerTest(unittest.TestCase):
 
         popen_mock.assert_called_once_with([str(classic_path), "/select", "outlook:Sent Items"], shell=False)
         self.assertEqual(controller.message, "opened outlook folder: Sent Items")
+
+    def test_resolve_named_application_options_prefers_exact_spoken_number_title(self) -> None:
+        controller = DesktopController(outlook_paths=())
+        sequel = self._app_entry(controller, "Slay the Spire 2", "C:/Games/SlayTheSpire2.exe")
+        original = self._app_entry(controller, "Slay the Spire", "C:/Games/SlayTheSpire.exe")
+
+        with patch.object(controller, "_quick_application_catalog", return_value=[sequel, original]):
+            with patch.object(controller, "_application_catalog", return_value=[sequel, original]):
+                resolved, ambiguous = controller.resolve_named_application_options("slay the spire two")
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.display_name, "Slay the Spire 2")
+        self.assertFalse(ambiguous)
+
+    def test_resolve_named_application_options_keeps_shared_family_queries_ambiguous(self) -> None:
+        controller = DesktopController(outlook_paths=())
+        new_vegas = self._app_entry(controller, "Fallout New Vegas", "C:/Games/FalloutNV.exe")
+        fallout_3 = self._app_entry(controller, "Fallout 3", "C:/Games/Fallout3.exe")
+
+        with patch.object(controller, "_quick_application_catalog", return_value=[new_vegas, fallout_3]):
+            with patch.object(controller, "_application_catalog", return_value=[new_vegas, fallout_3]):
+                resolved, ambiguous = controller.resolve_named_application_options("fallout")
+
+        self.assertIsNotNone(resolved)
+        self.assertGreaterEqual(len(ambiguous), 2)
+        self.assertEqual(
+            {entry.display_name for entry in ambiguous[:2]},
+            {"Fallout New Vegas", "Fallout 3"},
+        )
+
+    def test_open_named_application_prefers_exact_numbered_match(self) -> None:
+        controller = DesktopController(outlook_paths=())
+        new_vegas = self._app_entry(controller, "Fallout New Vegas", "C:/Games/FalloutNV.exe")
+        fallout_3 = self._app_entry(controller, "Fallout 3", "C:/Games/Fallout3.exe")
+
+        with patch.object(controller, "_quick_application_catalog", return_value=[new_vegas, fallout_3]):
+            with patch.object(controller, "_application_catalog", return_value=[new_vegas, fallout_3]):
+                with patch.object(controller, "_launch_path_or_command", return_value=True) as launch_mock:
+                    self.assertTrue(controller.open_named_application("fallout 3"))
+
+        launch_mock.assert_called_once_with("C:/Games/Fallout3.exe")
+        self.assertEqual(controller.message, "opened app: Fallout 3")
 
     def test_open_outlook_folder_reports_partial_fallback_when_only_opening_outlook(self) -> None:
         controller = DesktopController(outlook_paths=())

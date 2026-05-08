@@ -100,53 +100,54 @@ SECTION_SAVE_LOCATIONS = 6
 SECTION_COLORS = 7
 SECTION_TUTORIAL = 8
 SECTION_UPDATES = 9
+# General lives at stack index 10 (added last in
+# settings_content_stack), but visually the nav button is placed
+# right after Instructions. Decoupling stack-order from nav-order
+# means existing SECTION_X constants don't need renumbering.
+SECTION_GENERAL = 10
 
-# Ordered sequence the guided walkthrough visits. Stops at Save
-# Locations and then routes to the live gesture tutorial.
+# Ordered sequence the guided walkthrough visits. Click Next on
+# any page auto-navigates to the next entry — no "click on the X
+# tab" pointing phase. After the final regular entry (Microphone)
+# the walkthrough enters the FINALE phase: a big centered pill
+# tells the user there's more to explore in Settings, then the
+# Gesture Tutorial button bounces in. Custom Gestures + Save
+# Locations were dropped at the user's request to keep the tour
+# focused on the essentials.
 WALKTHROUGH_PAGES = (
+    SECTION_INSTRUCTIONS,
     SECTION_GESTURES,
-    SECTION_CUSTOM_GESTURE,
     SECTION_GESTURE_BINDS,
     SECTION_CAMERA,
     SECTION_MICROPHONE,
-    SECTION_SAVE_LOCATIONS,
 )
 
-# Pointing-phase hint shown above the settings page while the
-# walkthrough is waiting for the user to click the next tab.
-WALKTHROUGH_POINTING_HINTS = {
-    SECTION_GESTURES:
-        "Let's get started by clicking on the Control Guide tab!",
-    SECTION_CUSTOM_GESTURE:
-        "Ok, let's move on to Custom Gestures!",
-    SECTION_GESTURE_BINDS:
-        "Now let's check out Gesture Binds!",
-    SECTION_CAMERA:
-        "Next up — Camera settings!",
-    SECTION_MICROPHONE:
-        "Almost there — let's set up your Microphone!",
-    SECTION_SAVE_LOCATIONS:
-        "Last one — Save Locations!",
-}
-
-# On-page descriptive hint shown after the user lands on the target
-# tab. Three seconds later the Next button (or "Gesture Tutorial"
-# button on the final step) fades in.
+# On-page descriptive hint shown for each step. The Next button
+# bounces in 3 s after the page lands and auto-navigates to the
+# next entry when clicked.
 WALKTHROUGH_PAGE_HINTS = {
+    SECTION_INSTRUCTIONS:
+        "Use this page to learn more about how Touchless works.",
     SECTION_GESTURES:
-        "Use this page to view all preset gestures and example voice commands.",
-    SECTION_CUSTOM_GESTURE:
-        "Record your own hand poses here and bind them to keys, hotkeys, or commands.",
+        "View all preset gestures and example voice commands here.",
     SECTION_GESTURE_BINDS:
         "Reassign which gestures trigger which built-in actions.",
     SECTION_CAMERA:
-        "Pick which camera Touchless uses to see your gestures!",
+        "Pick which camera Touchless uses to see your gestures.",
     SECTION_MICROPHONE:
-        "Pick which microphone Touchless uses to listen for your voice commands!",
-    SECTION_SAVE_LOCATIONS:
-        "Choose where Touchless saves your drawings, screenshots, recordings, and clips! "
-        "When ready, let's try doing some Touchless controls!",
+        "Pick which microphone Touchless uses for voice commands.",
 }
+
+# Finale text shown in the big centered pill after the user clicks
+# Next on the Microphone page. Plain-language summary that there
+# are more options in Settings if they want to dig deeper, plus a
+# nudge to try the live Gesture Tutorial.
+WALKTHROUGH_FINALE_MESSAGE = (
+    "Nice work — that's the core tour!\n\n"
+    "There's more to explore in Settings (Custom Gestures, Save "
+    "Locations, themes, and more) whenever you're ready.\n\n"
+    "Now let's hop into the live Gesture Tutorial."
+)
 
 
 
@@ -551,16 +552,22 @@ class _WalkthroughEdgeGlowOverlay(QWidget):
 
 
 class _WalkthroughTargetGlow(QWidget):
-    """Soft accent-color halo painted around the currently-targeted
-    sidebar tab. Lives as a free-floating child of the settings page
-    (NOT the sidebar QFrame) so the halo can bleed past the sidebar's
-    left/right borders without being clipped. Mouse-transparent — the
-    target button still receives every click. Painted by stacking a
-    handful of progressively-fainter rounded rectangles outwards from
-    the target's bounding rect, which Qt has no built-in primitive
-    for but renders cheaply via repeated drawRoundedRect calls."""
+    """Thin accent-color border outline painted around the
+    currently-active walkthrough sidebar tab. Lives as a free-
+    floating child of the settings page so the border can sit
+    past the sidebar's edges without being clipped. Mouse-
+    transparent — the underlying button still receives every click.
 
-    _PADDING = 14  # px around the target on every side
+    Earlier versions painted a soft glowing halo + ran a vertical
+    bounce animation on the target tab as a "click here next!"
+    affordance. The walkthrough now auto-navigates between pages
+    on each Next click, so the indicator's job is just to mark
+    the current page in the sidebar — not to attract attention.
+    A 2 px border in the active-click-green accent reads as
+    'this is where you are' without dominating the panel."""
+
+    _PADDING = 4  # px around the target on every side
+    _BORDER_THICK = 2
 
     def __init__(self, parent: QWidget, target_button, accent_color: str):
         super().__init__(parent)
@@ -596,22 +603,13 @@ class _WalkthroughTargetGlow(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
-            painter.setPen(Qt.NoPen)
-            # Paint a series of concentric translucent rounded rects,
-            # each fainter than the last, to fake a soft outer glow
-            # without depending on a graphics-effect that would clip
-            # to the sidebar's bounds.
-            outer_rect = self.rect().adjusted(1, 1, -1, -1)
-            steps = 6
-            for i in range(steps, 0, -1):
-                inset = (steps - i) * 2
-                fill = QColor(self._accent)
-                fill.setAlpha(int(20 + (steps - i) * 18))
-                painter.setBrush(fill)
-                painter.drawRoundedRect(
-                    outer_rect.adjusted(inset, inset, -inset, -inset),
-                    18, 18,
-                )
+            painter.setBrush(Qt.NoBrush)
+            pen = QPen(self._accent)
+            pen.setWidth(self._BORDER_THICK)
+            painter.setPen(pen)
+            inset = self._BORDER_THICK // 2 + 1
+            border_rect = self.rect().adjusted(inset, inset, -inset, -inset)
+            painter.drawRoundedRect(border_rect, 14, 14)
         finally:
             painter.end()
 
@@ -1284,6 +1282,19 @@ class GestureSketchWidget(QWidget):
 
 
 class GestureMediaWidget(QFrame):
+    # Class-level counter used to stagger play() calls across the
+    # ~8 video cards inside the Dynamic Gestures section. When the
+    # user expands the dropdown, all 8 cards become visible at once
+    # and their showEvents fire on the same GUI-thread tick. Without
+    # the stagger, all 8 QMediaPlayer.play() calls land on the same
+    # tick too, and Windows' Media Foundation backend kicks off 8
+    # simultaneous decoders + GPU surface negotiations, freezing the
+    # GUI thread for 1-3 s (worst-case multi-second freeze when the
+    # walkthrough's edge-glow overlay is also painting). Spreading
+    # the plays over a short window lets each player negotiate its
+    # decoder cleanly.
+    _play_stagger_counter: int = 0
+
     def __init__(self, *, image_name: str | None = None, video_name: str | None = None, gesture_key: str = "open_hand", parent=None):
         super().__init__(parent)
         self._gesture_key = gesture_key
@@ -1348,7 +1359,10 @@ class GestureMediaWidget(QFrame):
             self._loop_timer = QTimer(self)
             self._loop_timer.setSingleShot(True)
             self._loop_timer.timeout.connect(self._restart_video)
-            self._player.play()
+            # Initial play deferred to the first showEvent below so
+            # we don't pay the decoder-setup cost during Control
+            # Guide page construction (when many cards build at once
+            # behind a hidden parent).
         else:
             self.setFixedSize(220, 220)
             fallback = GestureSketchWidget(gesture_key)
@@ -1410,7 +1424,45 @@ class GestureMediaWidget(QFrame):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         if self._player is not None:
+            # Skip play() entirely while the guided walkthrough is
+            # running. The Dynamic Gestures dropdown surfaces ~8
+            # of these widgets at once, and the simultaneous
+            # decoder negotiations + walkthrough edge-glow paint
+            # locked up the GUI thread previously. Letting the
+            # dropdown open with frozen video frames is a far
+            # better UX than the freeze. After walkthrough exits,
+            # subsequent dropdown re-expansions will fire showEvent
+            # again and the videos will play normally.
+            try:
+                top = self.window()
+                if getattr(top, "_walkthrough_active", False):
+                    return
+            except Exception:
+                pass
+            # Stagger play() to keep N simultaneous showEvents from
+            # collapsing into N simultaneous decoder setups. 70 ms
+            # per slot * 10 slot rotation = up to 630 ms total
+            # spread, which is imperceptible to the user but enough
+            # for each player to negotiate its decoder before the
+            # next one starts.
+            slot = GestureMediaWidget._play_stagger_counter % 10
+            GestureMediaWidget._play_stagger_counter += 1
+            QTimer.singleShot(slot * 70, self._safe_resume_play)
+
+    def _safe_resume_play(self) -> None:
+        """Guard against the deferred-play timer firing after the
+        widget was hidden / destroyed (the user collapsed the section
+        again before the staggered slot landed). Without this we'd
+        kick off video decode for an off-screen player and waste
+        cycles."""
+        if self._player is None:
+            return
+        if not self.isVisible():
+            return
+        try:
             self._player.play()
+        except Exception:
+            pass
 
 
 class GestureGuideCard(QFrame):
@@ -1434,6 +1486,10 @@ class GestureGuideCard(QFrame):
 
         media = GestureMediaWidget(image_name=image_name, video_name=video_name, gesture_key=gesture_key)
         layout.addWidget(media, 0, Qt.AlignTop)
+        # Flag used by GestureGuideSection to decide whether
+        # expanding it during walkthrough would trigger the multi-
+        # decoder freeze. Only video cards qualify.
+        self._card_uses_video = video_name is not None
 
         text_layout = QVBoxLayout()
         text_layout.setSpacing(8)
@@ -1623,11 +1679,28 @@ class GestureGuideSection(QFrame):
         content_layout = QVBoxLayout(self.content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(12)
+        # Track whether this section contains any video cards. Only
+        # video-bearing sections trigger the walkthrough freeze
+        # (8 simultaneous QMediaPlayer decoder negotiations + edge-
+        # glow paint = GUI-thread lock). Image-only / text-only
+        # sections (Static Gestures, Voice Commands) don't, so they
+        # stay expandable during walkthrough.
+        self._has_video_cards = any(
+            isinstance(card, GestureGuideCard)
+            and getattr(card, "_card_uses_video", False)
+            for card in cards
+        )
         for card in cards:
             content_layout.addWidget(card)
         outer.addWidget(self.content)
 
     def _toggle_expanded(self, checked: bool) -> None:
+        # Always allow expansion — including Dynamic Gestures during
+        # walkthrough. The freeze guard now lives in
+        # GestureMediaWidget.showEvent (skips play() during
+        # walkthrough), so the dropdown can open without kicking
+        # off the multi-decoder negotiation that locks the GUI
+        # thread.
         self.content.setVisible(bool(checked))
         self.header_button.setText(f"{'▼' if checked else '▶'}  {self.header_button.text()[3:]}")
 
@@ -1667,8 +1740,9 @@ def _build_gesture_guide_static_cards() -> list[GestureGuideCard]:
             how_to=(
                 "How To: Face your left palm toward the monitor. Extend the index, middle, and ring fingers and keep them "
                 "separated; fold the thumb and pinky. Hold the pose for about half a second to toggle mouse mode.\n\n"
-                "Requirements: None — mouse mode can be toggled at any time. When mouse mode is on, use your right hand "
-                "open-palm pose to move the cursor and bend the index or middle finger to click (see Mouse Controls)."
+                "Requirements: None — mouse mode can be toggled at any time. When mouse mode is on, use your right "
+                "hand open-palm to move the cursor and pinch thumb-to-index for left click or thumb-to-middle for "
+                "right click (see Mouse Clicks, Mouse Scroll, and Mouse Demo)."
             ),
             gesture_key="left_three",
             image_name="Left Three.png",
@@ -1825,25 +1899,70 @@ def _build_gesture_guide_dynamic_cards() -> list[GestureGuideCard]:
             video_name="Repeat.mp4",
         ),
         GestureGuideCard(
-            title="Mouse Controls",
-            action="Move the cursor, left click, right click, and scroll",
+            title="Mouse Clicks",
+            action="Pinch to left-click or right-click while in mouse mode",
             how_to=(
                 "How To:\n"
-                "\u2022 Turn mouse mode ON with your LEFT hand: face your palm to the monitor, extend only index, middle, "
-                "and ring fingers (thumb and pinky folded), and hold the pose briefly.\n"
-                "\u2022 Move the cursor with your RIGHT hand: hold it open-palm facing the monitor and move it inside the "
-                "camera frame. The cursor tracks your palm.\n"
-                "\u2022 Left-click: bend your right INDEX finger down and straighten it back up in one motion.\n"
-                "\u2022 Right-click: bend your right MIDDLE finger down and straighten it back up in one motion.\n"
-                "\u2022 Scroll: keep your right index and middle fingers extended together (ring and pinky folded) and "
-                "move your hand UP to scroll up or DOWN to scroll down.\n"
-                "\u2022 Turn mouse mode OFF: make the same left-hand three-finger pose again.\n\n"
-                "Requirements: Mouse mode must be turned on first — the right hand only controls the cursor while mouse "
-                "mode is active. Your right hand must be inside the calibrated control box (adjustable in Settings \u2192 "
-                "Mouse Control). Turn mouse mode off when you're done so your right hand is free for other gestures."
+                "• First turn mouse mode ON: LEFT hand, three fingers up (index + middle + ring), "
+                "thumb across the palm, pinky curled. Hold until the “Mouse Mode: On” pill appears.\n"
+                "• Move the cursor with your RIGHT hand: keep an open palm facing the monitor and "
+                "move it inside the small red control box on screen. The dot mirrors your palm.\n"
+                "• Left-click — RIGHT hand: bring your THUMB tip and INDEX tip together in a pinch, "
+                "then release. Keep the other three fingers relaxed (extended or partial curl). Holding the "
+                "pinch performs click-and-drag.\n"
+                "• Right-click — RIGHT hand: bring your THUMB tip and MIDDLE tip together in a pinch, "
+                "then release. Same relaxed-fingers rule as left-click.\n"
+                "• The cursor briefly steadies the moment a pinch starts so the click lands exactly "
+                "where you were aiming.\n"
+                "• Turn mouse mode OFF: make the same left-hand three-finger pose again.\n\n"
+                "Requirements: Mouse mode must be on — the right hand only drives the cursor while "
+                "mouse mode is active. Pinch with the other three fingers OPEN, not in a fist (a fist "
+                "won’t register). Tap-style pinches click; held pinches drag."
             ),
             gesture_key="open_hand",
-            video_name="MouseControl.mp4",
+            video_name="Mouse Clicks.mp4",
+        ),
+        GestureGuideCard(
+            title="Mouse Scroll",
+            action="Scroll the page up or down while in mouse mode",
+            how_to=(
+                "How To:\n"
+                "• With mouse mode ON, hold your RIGHT hand up and put your INDEX and MIDDLE "
+                "fingers extended and TOUCHING (like a closed peace sign), with ring + pinky curled and "
+                "thumb relaxed. Hold the pose briefly to enter scroll mode — the cursor stops tracking "
+                "and the status text changes to “mouse scroll active”.\n"
+                "• Once scroll mode is active: move the same hand UP to scroll up, DOWN to scroll "
+                "down. Bigger moves scroll faster; tiny moves are ignored as deadzone.\n"
+                "• To leave scroll mode and resume cursor control, simply break the "
+                "two-finger-together pose (open the fingers apart, or curl them).\n\n"
+                "Requirements: Mouse mode must already be ON. Don’t pinch — a thumb-pinch "
+                "will be read as a click, not a scroll. The wheel “horns” pose (thumb + "
+                "index + pinky out) also works as a scroll trigger when you’re already inside "
+                "mouse mode."
+            ),
+            gesture_key="volume_pose",
+            video_name="Mouse Demo.mp4",
+        ),
+        GestureGuideCard(
+            title="Mouse Demo",
+            action="Full demo of mouse mode: cursor, clicks, drags, and scrolling",
+            how_to=(
+                "How To:\n"
+                "• This is a complete walkthrough of mouse mode in one clip. Watch the demo to "
+                "see the toggle, cursor tracking, the small mouse-pad-style control area, pinch clicks, "
+                "click-and-drag, and the two-finger scroll all chained together.\n"
+                "• Toggle on with LEFT hand three. Cursor tracks your right palm inside the small "
+                "red box.\n"
+                "• Pinch thumb-to-index for left-click; thumb-to-middle for right-click. Hold the "
+                "pinch to drag.\n"
+                "• Two-finger together (peace closed) enters scroll mode — then move up/down.\n"
+                "• Toggle off with LEFT hand three again.\n\n"
+                "Requirements: A working webcam, both hands available, and mouse mode active for the "
+                "right-hand actions. Left hand stays free as the toggle while you’re using "
+                "the cursor."
+            ),
+            gesture_key="open_hand",
+            video_name="Mouse Demo.mp4",
         ),
         GestureGuideCard(
             title="Maximize Window",
@@ -4022,7 +4141,16 @@ class TouchlessNotice(QDialog):
     window in the taskbar. Word-wraps long messages.
     """
 
-    def __init__(self, parent, title: str, message: str, *, kind: str = "info") -> None:
+    def __init__(
+        self,
+        parent,
+        title: str,
+        message: str,
+        *,
+        kind: str = "info",
+        confirm_label: str | None = None,
+        cancel_label: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self._kind = kind
         self.setWindowTitle(title)
@@ -4057,6 +4185,18 @@ class TouchlessNotice(QDialog):
             "QPushButton#touchlessNoticeOk:hover {"
             "  background: #29f0c1;"
             "}"
+            "QPushButton#touchlessNoticeCancel {"
+            "  background: rgba(255,255,255,0.08);"
+            "  color: #E5F6FF;"
+            "  border: 1px solid rgba(229,246,255,0.25);"
+            "  border-radius: 8px;"
+            "  padding: 8px 18px;"
+            "  font-weight: 500;"
+            "  min-width: 90px;"
+            "}"
+            "QPushButton#touchlessNoticeCancel:hover {"
+            "  background: rgba(255,255,255,0.14);"
+            "}"
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
@@ -4074,12 +4214,28 @@ class TouchlessNotice(QDialog):
         layout.addWidget(body_label, 1)
 
         button_row = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        ok_button.setObjectName("touchlessNoticeOk")
-        ok_button.setDefault(True)
-        ok_button.clicked.connect(self.accept)
-        button_row.addWidget(ok_button)
-        button_row.addStretch(1)
+        if confirm_label is not None or cancel_label is not None:
+            # Two-button confirm variant. Cancel on the left, primary
+            # action (Allow / OK / etc.) on the right so it lines up
+            # with the "Don't Allow / Allow" arrangement on macOS-style
+            # OS confirms users are familiar with.
+            cancel_button = QPushButton(cancel_label or "Cancel")
+            cancel_button.setObjectName("touchlessNoticeCancel")
+            cancel_button.clicked.connect(self.reject)
+            confirm_button = QPushButton(confirm_label or "OK")
+            confirm_button.setObjectName("touchlessNoticeOk")
+            confirm_button.setDefault(True)
+            confirm_button.clicked.connect(self.accept)
+            button_row.addStretch(1)
+            button_row.addWidget(cancel_button)
+            button_row.addWidget(confirm_button)
+        else:
+            ok_button = QPushButton("OK")
+            ok_button.setObjectName("touchlessNoticeOk")
+            ok_button.setDefault(True)
+            ok_button.clicked.connect(self.accept)
+            button_row.addWidget(ok_button)
+            button_row.addStretch(1)
         layout.addLayout(button_row)
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API name)
@@ -4142,6 +4298,30 @@ class TouchlessNotice(QDialog):
     def show_warn(parent, title: str, message: str) -> None:
         dlg = TouchlessNotice(parent, title, message, kind="warn")
         dlg.exec()
+
+    @staticmethod
+    def show_confirm(
+        parent,
+        title: str,
+        message: str,
+        *,
+        confirm_label: str = "Allow",
+        cancel_label: str = "Don't Allow",
+    ) -> bool:
+        """Two-button confirm modal. Returns True when the user
+        clicks the primary button (default 'Allow'), False when they
+        click the secondary button or close the dialog. Same theme
+        as show_info / show_warn so the prompt matches the rest of
+        the app instead of the OS-native QMessageBox."""
+        dlg = TouchlessNotice(
+            parent,
+            title,
+            message,
+            kind="confirm",
+            confirm_label=confirm_label,
+            cancel_label=cancel_label,
+        )
+        return dlg.exec() == QDialog.Accepted
 
 
 # ---------------------------------------------------------------------------
@@ -4303,6 +4483,25 @@ class MainWindow(QMainWindow):
         self._drawing_render_target = "screen"
         self._last_drawing_request_token = 0
         self._last_utility_request_token = 0
+        # Spotify first-time-active prompt state. Latched on the
+        # first debug-frame where spotify_window_open=True so we
+        # don't fire the modal twice if the user opens / closes
+        # Spotify in quick succession before answering. Persistence
+        # across launches lives on self.config.spotify_first_active_prompt_shown.
+        self._spotify_first_prompt_in_flight = False
+        self._spotify_decline_pill: QFrame | None = None
+        self._spotify_decline_pill_fade_effect: QGraphicsOpacityEffect | None = None
+        self._spotify_decline_pill_fade_anim: QPropertyAnimation | None = None
+        self._spotify_decline_pill_hide_timer: QTimer | None = None
+        # Game-detection state. The detector polls psutil every 2 s
+        # while any gaming-mode toggle is on, and updates the cached
+        # bool used by `_should_show_camera_view` /
+        # `_should_show_text_popups`. Initialized lazily — the
+        # timer is only started by `_refresh_game_detector_state`
+        # when the user enables a gaming-mode flag, so users who
+        # never use gaming mode never pay the polling cost.
+        self._game_running_cached: bool = False
+        self._game_detector_timer: QTimer | None = None
         self._utility_screenshot_pending = False
         self._utility_countdown_active = False
         self._utility_countdown_token = 0
@@ -4480,6 +4679,14 @@ class MainWindow(QMainWindow):
         # _reposition_walkthrough_edge_glow().
         self._reposition_walkthrough_edge_glow()
 
+        # Game detector — only kicks in if the user already had a
+        # gaming-mode flag enabled from a previous session. Idle
+        # otherwise, so first-run users pay nothing.
+        try:
+            self._refresh_game_detector_state()
+        except Exception:
+            pass
+
     def _build_home_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("homePage")
@@ -4503,20 +4710,11 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("START")
         self.end_button = QPushButton("END")
         self.settings_button = QPushButton("SETTINGS")
-        # Connect Spotify — opens the OAuth browser flow for the
-        # current user. Stand-alone button (not gated on engine
-        # state) because authorising Spotify is a one-time per-user
-        # setup that should be doable from a cold launch. Persists
-        # tokens to %APPDATA%\Touchless\spotify_tokens.json so
-        # future launches stay silent.
-        self.connect_spotify_button = QPushButton("Connect Spotify")
-        self.connect_spotify_button.setObjectName("connectSpotifyButton")
-        self.connect_spotify_button.setCursor(Qt.PointingHandCursor)
-        self.connect_spotify_button.clicked.connect(self._on_connect_spotify_clicked)
-        # Initial state: app launches with the engine stopped, so END
-        # is the inactive button. start_engine / stop_engine swap the
-        # pair below; the QPushButton:disabled rule in the global
-        # stylesheet makes the inactive one visibly greyed out.
+        # Connect Spotify lives at the bottom of the Instructions
+        # panel (built in _build_instructions_panel). The button is
+        # constructed there so users can find it next to the rest of
+        # the onboarding copy; the first-time Spotify-active prompt
+        # also points users back to that location.
         self.end_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_engine)
         self.end_button.clicked.connect(self.stop_engine)
@@ -4525,7 +4723,6 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.end_button)
         button_row.addWidget(self.settings_button)
-        button_row.addWidget(self.connect_spotify_button)
         button_row.addStretch(1)
         body_layout.addLayout(button_row)
 
@@ -4633,7 +4830,7 @@ class MainWindow(QMainWindow):
         debug_log_header = QHBoxLayout()
         debug_log_header.setContentsMargins(0, 0, 0, 0)
         debug_log_header.setSpacing(8)
-        debug_log_label = QLabel("Debug Log")
+        debug_log_label = QLabel("Detailed Log")
         debug_log_label.setObjectName("cardSubtitle")
         debug_log_header.addWidget(debug_log_label)
         debug_log_header.addStretch(1)
@@ -4814,6 +5011,7 @@ class MainWindow(QMainWindow):
         self._settings_search_index: list = []
 
         instructions_button = SettingsNavButton("Instructions", SECTION_INSTRUCTIONS, self)
+        general_button = SettingsNavButton("General", SECTION_GENERAL, self)
         gestures_button = SettingsNavButton("Control Guide", SECTION_GESTURES, self)
         custom_gesture_button = SettingsNavButton("Custom Gesture", SECTION_CUSTOM_GESTURE, self)
         gesture_binds_button = SettingsNavButton("Gesture Binds", SECTION_GESTURE_BINDS, self)
@@ -4825,6 +5023,7 @@ class MainWindow(QMainWindow):
         updates_button = SettingsNavButton("Updates", SECTION_UPDATES, self)
         self._settings_nav_buttons = [
             instructions_button,
+            general_button,
             gestures_button,
             custom_gesture_button,
             gesture_binds_button,
@@ -4839,6 +5038,12 @@ class MainWindow(QMainWindow):
             instructions_button: (
                 "instructions quick start help guide overview getting started "
                 "intro readme"
+            ),
+            general_button: (
+                "general overlay popups popup pill mini live view camera view "
+                "gaming game mode windowed borderless fullscreen sensitivity "
+                "monitor mouse box system mode lite low fps gpu cpu spotify "
+                "connect"
             ),
             gestures_button: (
                 "control guide gesture voice command swipe wheel mouse volume "
@@ -4967,6 +5172,11 @@ class MainWindow(QMainWindow):
         self.settings_content_stack.addWidget(self._build_colors_panel())
         self.settings_content_stack.addWidget(self._build_tutorial_panel())
         self.settings_content_stack.addWidget(self._build_updates_panel())
+        # General lives at stack index 10 (SECTION_GENERAL). Built
+        # last so the existing SECTION_X constants stay valid; nav
+        # order in the sidebar is set separately to put General
+        # right under Instructions.
+        self.settings_content_stack.addWidget(self._build_general_panel())
 
         # Wrap the content stack in a scroll area so when the window
         # is too short the active panel scrolls instead of squashing
@@ -5012,10 +5222,16 @@ class MainWindow(QMainWindow):
         self._walkthrough_hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         # Blue pill, green text, thick rounded border. radius=28 gives
         # the pill the rounded-end look the user asked for.
+        # Font dropped from 20 px to 17 px so longer hints fit
+        # within the pill's height cap. The user reported the
+        # Save Locations and Microphone hints were getting clipped
+        # at the bottom because the 20 px font + 24 px vertical
+        # padding + 96 px height cap left only ~2 lines of room,
+        # and those hints wrap to 3-4 lines on most window widths.
         self._walkthrough_hint_label.setStyleSheet(
             "QLabel#walkthroughHint {"
             f"  color: {green_text};"
-            "  font-size: 20px;"
+            "  font-size: 17px;"
             "  font-weight: 900;"
             f"  background: {self.config.primary_color};"
             f"  border: 2px solid {self.config.accent_color};"
@@ -5502,6 +5718,15 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(title_label)
 
         if str(subtitle or "").strip():
+            # Targeted spacing between the page title and its
+            # description text — gives the walkthrough hint pill
+            # (which anchors above the title and grows downward when
+            # its text wraps) clearance from the description below.
+            # Layout-level setSpacing would push every subsequent
+            # widget down too; addSpacing only widens the title →
+            # description gap so the panel content otherwise stays
+            # exactly where it was.
+            panel_layout.addSpacing(20)
             subtitle_label = QLabel(subtitle)
             subtitle_label.setObjectName("settingsPanelSubtitle")
             subtitle_label.setWordWrap(True)
@@ -5785,10 +6010,772 @@ class MainWindow(QMainWindow):
             lbl.setWordWrap(True)
             info_layout.addWidget(lbl)
         inner_layout.addWidget(info_box)
+        # Connect Spotify lives in the General settings tab now —
+        # see _build_general_panel. The first-time Spotify-active
+        # prompt also points there.
         inner_layout.addStretch(1)
 
         layout.addWidget(scroll, 1)
         return panel
+
+    # ----- General panel ---------------------------------------------------
+    def _build_general_panel(self) -> QWidget:
+        """General settings: mouse sensitivity + monitor, overlay
+        toggles (camera view, popups, gaming auto-disable), system
+        modes (Lite / Low FPS / GPU), and the Connect Spotify
+        button. Unique to this tab: a Save Changes button that
+        lights up when any control is touched and only persists
+        edits when clicked. Other tabs save immediately.
+        """
+        panel, layout = self._make_content_panel(
+            "General",
+            "Tweak how Touchless behaves while you use it. Adjust mouse "
+            "control, choose what overlays appear on screen, switch "
+            "performance modes, and connect Spotify. Click Save Changes "
+            "(top-right or bottom of the page) when you're done.",
+        )
+
+        # Top-right Save Changes button — same behaviour as the
+        # bottom one. Built from the existing title-row layout
+        # (matches how the Microphone tab places its save button)
+        # so a user who's already at the top of the page doesn't
+        # have to scroll all the way down to commit edits. Both
+        # buttons share enabled-state + the [pendingSave="true"]
+        # styled-glow via _update_general_save_state.
+        title_item = layout.takeAt(0)
+        title_label_widget = title_item.widget() if title_item is not None else None
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        if title_label_widget is not None:
+            header_row.addWidget(title_label_widget)
+        header_row.addStretch(1)
+        self._general_save_button_top = QPushButton("Save Changes")
+        self._general_save_button_top.setObjectName("settingsSaveButton")
+        self._general_save_button_top.setEnabled(False)
+        self._general_save_button_top.setProperty("pendingSave", False)
+        self._general_save_button_top.setCursor(Qt.PointingHandCursor)
+        self._general_save_button_top.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._general_save_button_top.clicked.connect(self._save_general_changes)
+        header_row.addWidget(self._general_save_button_top, 0, Qt.AlignTop)
+        layout.insertLayout(0, header_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.viewport().setStyleSheet("background: transparent;")
+        accent = self.config.accent_color or "#1DE9B6"
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea, QScrollArea > QWidget {{
+                background: transparent; border: none;
+            }}
+            QScrollArea QScrollBar:vertical {{
+                background: rgba(255,255,255,0.04);
+                width: 10px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
+            }}
+            QScrollArea QScrollBar::handle:vertical {{
+                background: {accent};
+                border-radius: 5px;
+                min-height: 32px;
+            }}
+            QScrollArea QScrollBar::add-line:vertical,
+            QScrollArea QScrollBar::sub-line:vertical {{
+                height: 0px; background: transparent;
+            }}
+            """
+        )
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        scroll.setWidget(inner)
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 8, 0)
+        inner_layout.setSpacing(14)
+
+        # Deferred-save state. Each control's change handler writes
+        # into _general_pending instead of self.config; the Save
+        # Changes button reads + applies on click. _general_baseline
+        # captures the initial values at panel-build time so the
+        # "is dirty?" check is just `current != baseline`.
+        self._general_pending: dict[str, object] = {}
+        self._general_baseline: dict[str, object] = {}
+        self._general_controls: dict[str, "QWidget"] = {}
+
+        inner_layout.addWidget(self._build_general_mouse_section())
+        inner_layout.addWidget(self._build_general_overlay_section())
+        inner_layout.addWidget(self._build_general_system_modes_section())
+        inner_layout.addWidget(self._build_general_spotify_section())
+
+        # Save Changes button — disabled until any control is
+        # touched. Property `pendingSave` drives the styled "lit"
+        # look; we just toggle it from `_update_general_save_state`
+        # whenever a control changes.
+        save_row = QHBoxLayout()
+        save_row.setContentsMargins(0, 6, 0, 0)
+        save_row.addStretch(1)
+        self._general_save_button = QPushButton("Save Changes")
+        self._general_save_button.setObjectName("settingsSaveButton")
+        self._general_save_button.setEnabled(False)
+        self._general_save_button.setProperty("pendingSave", False)
+        self._general_save_button.setCursor(Qt.PointingHandCursor)
+        self._general_save_button.clicked.connect(self._save_general_changes)
+        save_row.addWidget(self._general_save_button)
+        inner_layout.addLayout(save_row)
+
+        inner_layout.addStretch(1)
+        layout.addWidget(scroll, 1)
+        return panel
+
+    # ----- General panel: section helper -----------------------------------
+    def _make_general_section(
+        self,
+        title: str,
+        summary: str,
+        details: str | None = None,
+    ) -> tuple["QFrame", "QVBoxLayout"]:
+        """Build a card-shaped section with a title, a one-liner
+        summary, an optional 'Show more' toggle that reveals a
+        details paragraph, and an empty body layout the caller
+        fills with controls. Returns (card, body_layout). All
+        text inside the card uses self.config.text_color so the
+        whole tab stays on-theme with the rest of the app."""
+        text_color = str(self.config.text_color or "#E5F6FF")
+        accent = str(self.config.accent_color or "#1DE9B6")
+        card = QFrame()
+        card.setObjectName("innerCard")
+        card.setAttribute(Qt.WA_StyledBackground, True)
+        card.setStyleSheet(self._settings_inner_card_stylesheet())
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet(
+            f"font-size: 15px; font-weight: 700; color: {text_color};"
+        )
+        card_layout.addWidget(title_label)
+
+        if summary:
+            summary_label = QLabel(summary)
+            summary_label.setWordWrap(True)
+            summary_label.setStyleSheet(
+                f"font-size: 12px; color: {text_color};"
+            )
+            card_layout.addWidget(summary_label)
+
+        if details:
+            details_label = QLabel(details)
+            details_label.setWordWrap(True)
+            details_label.setStyleSheet(
+                f"font-size: 12px; color: {text_color};"
+            )
+            details_label.setVisible(False)
+            toggle_button = QPushButton("Show more...")
+            toggle_button.setObjectName("generalShowMore")
+            toggle_button.setFlat(True)
+            toggle_button.setCursor(Qt.PointingHandCursor)
+            toggle_button.setStyleSheet(
+                f"QPushButton#generalShowMore {{"
+                f"  background: transparent;"
+                f"  border: none;"
+                f"  color: {accent};"
+                f"  padding: 0px;"
+                f"  text-align: left;"
+                f"  font-size: 12px;"
+                f"  font-weight: 600;"
+                f"}}"
+                f"QPushButton#generalShowMore:hover {{"
+                f"  text-decoration: underline;"
+                f"}}"
+            )
+
+            def _toggle_details() -> None:
+                visible = not details_label.isVisible()
+                details_label.setVisible(visible)
+                toggle_button.setText("Show less..." if visible else "Show more...")
+
+            toggle_button.clicked.connect(_toggle_details)
+            card_layout.addWidget(toggle_button)
+            card_layout.addWidget(details_label)
+
+        body_container = QWidget()
+        body_container.setStyleSheet("background: transparent;")
+        body_layout = QVBoxLayout(body_container)
+        body_layout.setContentsMargins(0, 6, 0, 0)
+        body_layout.setSpacing(8)
+        card_layout.addWidget(body_container)
+        return card, body_layout
+
+    def _general_text_qss(self) -> str:
+        """Per-control QSS that applies the theme text color to
+        labels, checkboxes, and combo box surfaces. Combo dropdown
+        items are styled via QAbstractItemView so the popup list
+        also uses text color."""
+        text_color = str(self.config.text_color or "#E5F6FF")
+        accent = str(self.config.accent_color or "#1DE9B6")
+        is_light = self._palette_is_light()
+        combo_bg = "rgba(0,0,0,0.05)" if is_light else "rgba(255,255,255,0.06)"
+        return (
+            f"QLabel {{ color: {text_color}; }}"
+            f"QCheckBox {{ color: {text_color}; spacing: 8px; }}"
+            f"QComboBox {{"
+            f"  color: {text_color};"
+            f"  background-color: {combo_bg};"
+            f"  border: 1px solid {accent};"
+            f"  border-radius: 6px;"
+            f"  padding: 6px 10px;"
+            f"  selection-background-color: {accent};"
+            f"  selection-color: #001B24;"
+            f"}}"
+            f"QComboBox QAbstractItemView {{"
+            f"  color: {text_color};"
+            f"  background-color: {self.config.surface_color or '#0F172A'};"
+            f"  selection-background-color: {accent};"
+            f"  selection-color: #001B24;"
+            f"  border: 1px solid {accent};"
+            f"}}"
+        )
+
+    def _general_checkbox_qss(self) -> str:
+        """Visible-on-dark-theme checkbox indicator QSS. The
+        default Qt indicator on the dark surface renders as a
+        nearly-black square that's very hard to see — explicit
+        styling fixes the visibility:
+          - Unchecked: light translucent surface + accent border.
+          - Checked:   solid accent fill + dark navy checkmark
+                       (drawn via background-color + a unicode
+                       check is too fragile across DPI; we use a
+                       data-URI svg checkmark instead).
+          - Hover:     brighter border for affordance.
+        """
+        text_color = str(self.config.text_color or "#E5F6FF")
+        accent = str(self.config.accent_color or "#1DE9B6")
+        # Inline SVG check mark — embedded as a data-URI so we
+        # don't have to ship an asset file. Drawn in the same
+        # dark navy used by the Save Changes / OK button text so
+        # the checkmark reads against the accent fill.
+        check_svg = (
+            "url(\"data:image/svg+xml;utf8,"
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+            "<path d='M3.5 8.5l3 3 6-7' stroke='%23001B24' "
+            "stroke-width='2.4' fill='none' "
+            "stroke-linecap='round' stroke-linejoin='round'/>"
+            "</svg>\")"
+        )
+        return (
+            f"QCheckBox {{"
+            f"  color: {text_color};"
+            f"  spacing: 10px;"
+            f"  font-size: 13px;"
+            f"}}"
+            f"QCheckBox::indicator {{"
+            f"  width: 18px;"
+            f"  height: 18px;"
+            f"  border-radius: 4px;"
+            f"  border: 1.5px solid rgba(229,246,255,0.55);"
+            f"  background-color: rgba(255,255,255,0.10);"
+            f"}}"
+            f"QCheckBox::indicator:hover {{"
+            f"  border: 1.5px solid {accent};"
+            f"  background-color: rgba(255,255,255,0.18);"
+            f"}}"
+            f"QCheckBox::indicator:checked {{"
+            f"  background-color: {accent};"
+            f"  border: 1.5px solid {accent};"
+            f"  image: {check_svg};"
+            f"}}"
+            f"QCheckBox::indicator:checked:hover {{"
+            f"  background-color: {accent};"
+            f"  border: 1.5px solid {accent};"
+            f"}}"
+            f"QCheckBox::indicator:disabled {{"
+            f"  border: 1.5px solid rgba(127,127,127,0.35);"
+            f"  background-color: rgba(127,127,127,0.10);"
+            f"}}"
+        )
+
+    # ----- General panel: deferred-save plumbing ---------------------------
+    def _register_general_baseline(self, key: str, current_value: object) -> None:
+        """Snapshot a control's initial value so the dirty check
+        is just `current != baseline`."""
+        self._general_baseline[key] = current_value
+
+    def _on_general_control_changed(self, key: str, new_value: object) -> None:
+        """Buffer a control change. Writes into `_general_pending`
+        (cleared on save) and re-evaluates the Save button state."""
+        baseline = self._general_baseline.get(key, object())
+        if new_value == baseline:
+            self._general_pending.pop(key, None)
+        else:
+            self._general_pending[key] = new_value
+        self._update_general_save_state()
+
+    def _update_general_save_state(self) -> None:
+        dirty = bool(self._general_pending)
+        for attr in ("_general_save_button", "_general_save_button_top"):
+            button = getattr(self, attr, None)
+            if button is None:
+                continue
+            button.setEnabled(dirty)
+            button.setProperty("pendingSave", dirty)
+            # Property changes don't auto-restyle in Qt — re-polish so
+            # the QSS rule keyed on `[pendingSave="true"]` actually
+            # repaints.
+            try:
+                button.style().unpolish(button)
+                button.style().polish(button)
+            except Exception:
+                pass
+
+    def _save_general_changes(self) -> None:
+        """Apply every pending change to self.config in one shot,
+        persist, then run any side-effects that depend on the new
+        values (e.g., applying the new mini-viewer visibility)."""
+        if not self._general_pending:
+            return
+        previous = {key: getattr(self.config, key, None) for key in self._general_pending.keys()}
+        for key, value in self._general_pending.items():
+            try:
+                setattr(self.config, key, value)
+            except Exception:
+                pass
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+        # Refresh baselines so future changes compare against the
+        # newly-saved values.
+        for key, value in self._general_pending.items():
+            self._general_baseline[key] = value
+        applied_keys = list(self._general_pending.keys())
+        self._general_pending.clear()
+        self._update_general_save_state()
+        # Side-effects: apply runtime consequences of the toggles
+        # (mini viewer visibility, popup gating recomputation, etc.).
+        self._apply_general_runtime_changes(applied_keys, previous)
+
+    def _apply_general_runtime_changes(
+        self, applied_keys: list[str], previous: dict[str, object]
+    ) -> None:
+        """Run side-effects after a Save Changes click — refresh
+        the mini-viewer's visibility per the new toggles, kick the
+        game detector if gaming-mode changed, sync any duplicated
+        controls in other panels (Camera, Save Locations) so they
+        don't show stale values, etc."""
+        if "overlay_camera_view_enabled" in applied_keys or "overlay_gaming_live_view_disabled" in applied_keys:
+            try:
+                self._reapply_mini_viewer_visibility()
+            except Exception:
+                pass
+        if "overlay_gaming_mode_enabled" in applied_keys or "overlay_gaming_live_view_disabled" in applied_keys:
+            # Make sure the periodic detector is running if any
+            # gaming-mode flag is on, and stopped otherwise.
+            try:
+                self._refresh_game_detector_state()
+            except Exception:
+                pass
+        # Sync the Camera panel's system-mode buttons + their
+        # label-refresh callbacks. The buttons are still used as
+        # the "instant save" affordance on the Camera tab; without
+        # this resync they'd show the OLD checked state until the
+        # tab was rebuilt, which is jarring after a Save Changes
+        # click in General.
+        if "low_fps_mode" in applied_keys:
+            button = getattr(self, "low_fps_button", None)
+            if button is not None:
+                try:
+                    button.setChecked(bool(self.config.low_fps_mode))
+                    refresh = getattr(self, "_refresh_low_fps_button_label", None)
+                    if callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+        if "lite_mode" in applied_keys:
+            button = getattr(self, "lite_mode_button", None)
+            if button is not None:
+                try:
+                    button.setChecked(bool(self.config.lite_mode))
+                    refresh = getattr(self, "_refresh_lite_mode_button_label", None)
+                    if callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+        if "gpu_mode" in applied_keys:
+            button = getattr(self, "gpu_mode_button", None)
+            if button is not None:
+                try:
+                    button.setChecked(bool(self.config.gpu_mode))
+                    refresh = getattr(self, "_refresh_gpu_mode_button_label", None)
+                    if callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+        # Save Locations panel's mouse-monitor combo, if it exists.
+        if "mouse_active_monitor_index" in applied_keys:
+            combo = getattr(self, "_save_locations_mouse_monitor_combo", None)
+            if combo is not None:
+                target = self.config.mouse_active_monitor_index
+                try:
+                    for row in range(combo.count()):
+                        if combo.itemData(row) == target:
+                            combo.blockSignals(True)
+                            combo.setCurrentIndex(row)
+                            combo.blockSignals(False)
+                            break
+                except Exception:
+                    pass
+        # Mouse-control box geometry — repaint the live overlay if
+        # mouse mode is active, so the new sensitivity is visible
+        # immediately rather than waiting for the next mode toggle.
+        if any(key.startswith("mouse_control_box_") for key in applied_keys):
+            worker = getattr(self, "_worker", None)
+            if worker is not None and hasattr(worker, "refresh_mouse_control_box"):
+                try:
+                    worker.refresh_mouse_control_box()
+                except Exception:
+                    pass
+
+    # ----- General panel: section builders ---------------------------------
+    def _build_general_mouse_section(self) -> "QFrame":
+        card, body = self._make_general_section(
+            "Mouse",
+            "Set how a small hand movement maps to cursor movement, and "
+            "pick which monitor mouse mode controls.",
+            details=(
+                "Sensitivity controls the size of the on-camera control "
+                "box — a smaller box means a tiny hand movement covers "
+                "the whole screen (high sensitivity), a larger box "
+                "means you need broader movement (lower sensitivity, "
+                "more precision). The monitor choice clamps the cursor "
+                "output to a single screen on multi-monitor setups; "
+                "leave it on All Monitors to use the full virtual "
+                "desktop. The preview below shows the red mouse-control "
+                "area against the monitor(s) you've selected."
+            ),
+        )
+        text_color = str(self.config.text_color or "#E5F6FF")
+        body.setSpacing(10)
+
+        # Sensitivity slider — invert the mouse_control_box_area
+        # value so the slider feels intuitive (larger = more
+        # sensitive). Backing config field stays as
+        # mouse_control_box_area in [0.06..0.40]; slider is 1..100.
+        sens_label_row = QHBoxLayout()
+        sens_label = QLabel("Sensitivity")
+        sens_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; color: {text_color};"
+        )
+        sens_label_row.addWidget(sens_label)
+        sens_label_row.addStretch(1)
+        sens_value_label = QLabel()
+        sens_value_label.setStyleSheet(
+            f"font-size: 12px; color: {text_color};"
+        )
+        sens_label_row.addWidget(sens_value_label)
+        body.addLayout(sens_label_row)
+
+        sens_slider = QSlider(Qt.Horizontal)
+        sens_slider.setRange(1, 100)
+        sens_slider.setSingleStep(1)
+        sens_slider.setPageStep(5)
+        # Map area 0.40 (low sens) ↔ slider 1, area 0.06 (high
+        # sens) ↔ slider 100. Linear interpolation.
+        AREA_MAX = 0.40
+        AREA_MIN = 0.06
+        def _area_to_slider(area: float) -> int:
+            ratio = (AREA_MAX - max(AREA_MIN, min(AREA_MAX, float(area)))) / max(1e-6, (AREA_MAX - AREA_MIN))
+            return int(round(1 + ratio * 99))
+
+        def _slider_to_area(value: int) -> float:
+            ratio = (max(1, min(100, int(value))) - 1) / 99.0
+            return AREA_MAX - ratio * (AREA_MAX - AREA_MIN)
+
+        initial_area = float(getattr(self.config, "mouse_control_box_area", 0.18))
+        sens_slider.setValue(_area_to_slider(initial_area))
+        sens_value_label.setText(f"{sens_slider.value()}")
+        self._register_general_baseline("mouse_control_box_area", float(initial_area))
+
+        def _on_sens_changed(value: int) -> None:
+            sens_value_label.setText(f"{int(value)}")
+            self._on_general_control_changed(
+                "mouse_control_box_area", float(_slider_to_area(value))
+            )
+
+        sens_slider.valueChanged.connect(_on_sens_changed)
+        body.addWidget(sens_slider)
+        self._general_controls["mouse_control_box_area"] = sens_slider
+
+        # Monitor combo — same options the existing Save Locations
+        # mouse panel uses. Index None = all monitors; 0..N-1 = a
+        # specific screen.
+        monitor_label = QLabel("Mouse mode controls")
+        monitor_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; margin-top: 4px; color: {text_color};"
+        )
+        body.addWidget(monitor_label)
+
+        monitor_combo = QComboBox()
+        monitor_combo.setStyleSheet(self._general_text_qss())
+        monitor_combo.addItem("All Monitors", None)
+        try:
+            for index, screen in enumerate(QGuiApplication.screens() or []):
+                if screen is None:
+                    continue
+                geo = screen.geometry()
+                label = f"Monitor {index + 1} ({geo.width()}×{geo.height()})"
+                if screen == QGuiApplication.primaryScreen():
+                    label += "  (Main)"
+                monitor_combo.addItem(label, index)
+        except Exception:
+            pass
+        initial_monitor = getattr(self.config, "mouse_active_monitor_index", None)
+        # Find the matching item; fall back to All Monitors.
+        for row in range(monitor_combo.count()):
+            if monitor_combo.itemData(row) == initial_monitor:
+                monitor_combo.setCurrentIndex(row)
+                break
+        self._register_general_baseline("mouse_active_monitor_index", initial_monitor)
+
+        # Preview widget — same widget the Save Locations Mouse
+        # panel uses. Live-updates whenever the combo changes,
+        # even before Save Changes is clicked, so the user can see
+        # the new monitor highlighted as they pick.
+        preview = _MouseControlMonitorPreview(self.config)
+        preview.set_monitor_index(initial_monitor)
+        self._general_mouse_preview = preview
+
+        def _on_monitor_changed(_idx: int) -> None:
+            data = monitor_combo.currentData()
+            value = data if data is None else int(data)
+            self._on_general_control_changed("mouse_active_monitor_index", value)
+            try:
+                preview.set_monitor_index(value)
+            except Exception:
+                pass
+
+        monitor_combo.currentIndexChanged.connect(_on_monitor_changed)
+        body.addWidget(monitor_combo)
+        self._general_controls["mouse_active_monitor_index"] = monitor_combo
+        body.addWidget(preview)
+
+        return card
+
+    def _build_general_overlay_section(self) -> "QFrame":
+        card, body = self._make_general_section(
+            "Overlay",
+            "Choose what Touchless shows on screen while it's running.",
+            details=(
+                "Camera view = the small live thumbnail in the corner. "
+                "Text pop-ups = transient toasts and prompts (save-"
+                "location prompts, gesture rebind hints, etc.). "
+                "Gaming overlay = automatically suppress text pop-ups "
+                "when a known game is running, so a notification "
+                "doesn't steal focus mid-match. Gaming live view = "
+                "automatically hide the camera thumbnail when a game "
+                "is running. Detected games include Valorant, "
+                "CS, League, Fortnite, Apex, Overwatch, Rainbow Six, "
+                "Rocket League, Minecraft, GTA V, and similar — the "
+                "list is process-name based."
+            ),
+        )
+        text_color = str(self.config.text_color or "#E5F6FF")
+
+        # Windowed / borderless warning — a yellow-tinted info
+        # banner. Above the toggles so users see it before they
+        # turn gaming mode on. Yellow stays on purpose: it's a
+        # warning, not body copy.
+        warning = QLabel(
+            "Heads up: for the overlay to actually appear over a game, "
+            "set the game to Windowed Fullscreen or Borderless mode. "
+            "Exclusive Fullscreen will minimize the game whenever any "
+            "Touchless window appears (this is a Windows + DirectX "
+            "limitation, not specific to Touchless)."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet(
+            "QLabel {"
+            "  background: rgba(255, 196, 0, 0.10);"
+            "  border: 1px solid rgba(255, 196, 0, 0.45);"
+            "  border-radius: 10px;"
+            "  padding: 10px 12px;"
+            "  color: #FFD479;"
+            "  font-size: 12px;"
+            "}"
+        )
+        body.addWidget(warning)
+
+        checkbox_qss = self._general_checkbox_qss()
+        toggles = [
+            ("overlay_camera_view_enabled", "Touchless camera view", "Show the small live camera thumbnail when the engine is running."),
+            ("overlay_text_popups_enabled", "Text pop-ups", "Show transient toasts, prompts, and hint pills."),
+            ("overlay_gaming_mode_enabled", "Gaming overlay (auto-hide pop-ups)", "When a game is detected, automatically suppress text pop-ups."),
+            ("overlay_gaming_live_view_disabled", "Gaming live view (auto-hide camera)", "When a game is detected, automatically hide the camera view."),
+        ]
+        for key, label_text, tooltip in toggles:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            checkbox = QCheckBox(label_text)
+            checkbox.setStyleSheet(checkbox_qss)
+            checkbox.setToolTip(tooltip)
+            initial = bool(getattr(self.config, key, False))
+            checkbox.setChecked(initial)
+            self._register_general_baseline(key, initial)
+
+            def _make_handler(key_name: str):
+                def _handler(state: int) -> None:
+                    self._on_general_control_changed(key_name, bool(state))
+                return _handler
+
+            checkbox.stateChanged.connect(_make_handler(key))
+            row.addWidget(checkbox)
+            row.addStretch(1)
+            body.addLayout(row)
+            self._general_controls[key] = checkbox
+
+        return card
+
+    def _build_general_system_modes_section(self) -> "QFrame":
+        """Per-mode card layout that mirrors the Camera tab: each
+        mode gets its own short summary + 'Show more...' expandable
+        details + the existing checkable button styled the same
+        way the Camera tab styles them. The buttons feed the
+        deferred-save buffer instead of saving immediately, and
+        each one stays in sync with its Camera-tab counterpart on
+        Save Changes (see _apply_general_runtime_changes)."""
+        card, body = self._make_general_section(
+            "System Modes",
+            "Performance modes for slower machines or supported GPUs.",
+            details=None,
+        )
+        body.setSpacing(14)
+        camera_button_style = self._settings_panel_button_stylesheet()
+
+        # ---- Low FPS Mode ----
+        body.addWidget(
+            self._build_expandable_note(
+                "Keeps gestures registering when your camera frame rate drops.",
+                "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). Touchless can also offer to turn this on automatically if your measured FPS stays low for too long.",
+                object_name="cameraNote",
+            )
+        )
+        low_fps_btn = QPushButton()
+        low_fps_btn.setCheckable(True)
+        low_fps_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        low_fps_btn.setStyleSheet(camera_button_style)
+        low_initial = bool(getattr(self.config, "low_fps_mode", False))
+        low_fps_btn.setChecked(low_initial)
+        low_fps_btn.setText("Low FPS Mode: ON" if low_initial else "Low FPS Mode")
+        self._register_general_baseline("low_fps_mode", low_initial)
+
+        def _on_low_fps_clicked(checked: bool) -> None:
+            low_fps_btn.setText("Low FPS Mode: ON" if checked else "Low FPS Mode")
+            self._on_general_control_changed("low_fps_mode", bool(checked))
+
+        low_fps_btn.clicked.connect(_on_low_fps_clicked)
+        low_fps_row = QHBoxLayout()
+        low_fps_row.addWidget(low_fps_btn)
+        low_fps_row.addStretch(1)
+        body.addLayout(low_fps_row)
+        self._general_controls["low_fps_mode"] = low_fps_btn
+
+        # ---- Lite Mode ----
+        body.addWidget(
+            self._build_expandable_note(
+                "Speeds up processing for simpler tracking on lighter hardware.",
+                "Lite Mode improves processing by about 2.5x for simple gestures and commands. For very extreme angles or heavy occlusion it may be slightly less stable. A \"Lite\" badge appears in live viewers when activated.",
+                object_name="cameraNote",
+            )
+        )
+        lite_btn = QPushButton()
+        lite_btn.setCheckable(True)
+        lite_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        lite_btn.setStyleSheet(camera_button_style)
+        lite_initial = bool(getattr(self.config, "lite_mode", False))
+        lite_btn.setChecked(lite_initial)
+        lite_btn.setText("Lite Mode: ON" if lite_initial else "Lite Mode")
+        self._register_general_baseline("lite_mode", lite_initial)
+
+        def _on_lite_clicked(checked: bool) -> None:
+            lite_btn.setText("Lite Mode: ON" if checked else "Lite Mode")
+            self._on_general_control_changed("lite_mode", bool(checked))
+
+        lite_btn.clicked.connect(_on_lite_clicked)
+        lite_row = QHBoxLayout()
+        lite_row.addWidget(lite_btn)
+        lite_row.addStretch(1)
+        body.addLayout(lite_row)
+        self._general_controls["lite_mode"] = lite_btn
+
+        # ---- GPU Mode ----
+        body.addWidget(
+            self._build_expandable_note(
+                "Uses your graphics card for faster hand tracking when available.",
+                "If your machine can run GPU Mode, Touchless uses the graphics card to speed up hand tracking. If not, Touchless quietly falls back to the regular path so gestures keep working.",
+                object_name="cameraNote",
+            )
+        )
+        gpu_btn = QPushButton()
+        gpu_btn.setCheckable(True)
+        gpu_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        gpu_btn.setStyleSheet(camera_button_style)
+        gpu_initial = bool(getattr(self.config, "gpu_mode", False))
+        gpu_btn.setChecked(gpu_initial)
+        gpu_btn.setText("GPU Mode: ON" if gpu_initial else "GPU Mode")
+        self._register_general_baseline("gpu_mode", gpu_initial)
+
+        # GPU probe tooltip — same probe + reasoning the Camera
+        # panel surfaces. Toggle stays enabled regardless because
+        # the runtime falls back to CPU MediaPipe transparently.
+        try:
+            from ...gesture.tracking.gpu_probe import probe_gpu_paths
+            probe = probe_gpu_paths()
+            if probe.has_any_gpu_path:
+                gpu_btn.setToolTip(probe.path_summary())
+            else:
+                gpu_btn.setToolTip(
+                    probe.path_summary()
+                    + "\n\nToggling on is safe — runtime falls back to CPU MediaPipe automatically."
+                )
+        except Exception:
+            pass
+
+        def _on_gpu_clicked(checked: bool) -> None:
+            gpu_btn.setText("GPU Mode: ON" if checked else "GPU Mode")
+            self._on_general_control_changed("gpu_mode", bool(checked))
+
+        gpu_btn.clicked.connect(_on_gpu_clicked)
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(gpu_btn)
+        gpu_row.addStretch(1)
+        body.addLayout(gpu_row)
+        self._general_controls["gpu_mode"] = gpu_btn
+
+        return card
+
+    def _build_general_spotify_section(self) -> "QFrame":
+        card, body = self._make_general_section(
+            "Spotify",
+            "Connect Touchless to Spotify so voice commands and "
+            "gestures can control playback.",
+            details=None,
+        )
+        # Connect Spotify button — opens OAuth in a browser. Not
+        # gated on the deferred-save mechanism (it does its own
+        # token persistence).
+        self.connect_spotify_button = QPushButton("Connect Spotify")
+        self.connect_spotify_button.setObjectName("connectSpotifyButton")
+        self.connect_spotify_button.setCursor(Qt.PointingHandCursor)
+        self.connect_spotify_button.clicked.connect(self._on_connect_spotify_clicked)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.connect_spotify_button)
+        row.addStretch(1)
+        body.addLayout(row)
+        return card
 
     def _build_gesture_guide_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
@@ -9195,27 +10182,23 @@ class MainWindow(QMainWindow):
         return panel
 
     def _on_save_locations_mouse_monitor_changed(self, _index: int) -> None:
-        """Persist the new monitor preference and refresh the preview.
-        Saved immediately (no Save Changes button) since the rest of
-        the dropdown-driven settings in the app behave that way.
-        Touches `last_action_label` so the user sees confirmation."""
+        """Refresh the visual preview AND mark Save Changes pending.
+        Was previously a save-on-change handler — but the rest of
+        Save Locations works with a Save Changes flow (paths and
+        names don't write to disk until the button is clicked), so
+        the dropdown should match. Persisting now happens in
+        _save_all_save_location_settings."""
         combo = getattr(self, "_save_locations_mouse_monitor_combo", None)
         preview = getattr(self, "_save_locations_mouse_preview", None)
         if combo is None:
             return
         chosen = combo.currentData()
-        # itemData returns None for the "All Monitors" entry, which
-        # is exactly the config sentinel we want.
-        self.config.mouse_active_monitor_index = chosen if isinstance(chosen, int) else None
-        try:
-            save_config(self.config)
-        except Exception:
-            pass
         if preview is not None:
             preview.set_monitor_index(chosen)
-        if hasattr(self, "last_action_label"):
-            label = combo.currentText()
-            self.last_action_label.setText(f"Last action: mouse control monitor set to {label}")
+        # Re-run dirty detection so Save Changes flips to its
+        # primary-blue pending color when the dropdown value
+        # differs from what's currently saved on disk.
+        self._refresh_save_locations_save_state()
 
     def _save_all_save_location_settings(self) -> None:
         all_ok = True
@@ -9226,6 +10209,18 @@ class MainWindow(QMainWindow):
         for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
             editor = self._save_name_inputs.get(output_kind)
             if not self._apply_save_name(output_kind, editor):
+                all_ok = False
+        # Persist the mouse-control monitor choice the same way the
+        # other Save Locations fields do — only on Save Changes
+        # click. Combo's itemData returns None for the "All
+        # Monitors" entry, which matches the config sentinel.
+        combo = getattr(self, "_save_locations_mouse_monitor_combo", None)
+        if combo is not None:
+            chosen = combo.currentData()
+            self.config.mouse_active_monitor_index = chosen if isinstance(chosen, int) else None
+            try:
+                save_config(self.config)
+            except Exception:
                 all_ok = False
         if all_ok:
             self.last_action_label.setText("Last action: save location settings updated")
@@ -9238,9 +10233,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_save_locations_save_state(self, _text: str = "") -> None:
         """Set the Save Locations button to primary-blue pending
-        when any path or name field differs from its on-disk value,
-        neutral when every field matches. Called from the textChanged
-        signals on each editor and after a successful save."""
+        when any path / name / monitor-dropdown field differs from
+        its on-disk value, neutral when every field matches.
+        Called from the textChanged signals on each editor, the
+        currentIndexChanged signal on the monitor dropdown, and
+        after a successful save."""
         button = getattr(self, "save_locations_button", None)
         if button is None:
             return
@@ -9261,6 +10258,19 @@ class MainWindow(QMainWindow):
                     if str(editor.text() or "").strip() != str(saved).strip():
                         pending = True
                         break
+            # Mouse-control monitor dropdown: the user selecting a
+            # different monitor should pop Save Changes into pending
+            # mode the same way typing a new path does. itemData ==
+            # None encodes "All Monitors", same encoding the saved
+            # config field uses, so the comparison is straight ==.
+            if not pending:
+                combo = getattr(self, "_save_locations_mouse_monitor_combo", None)
+                if combo is not None:
+                    chosen = combo.currentData()
+                    chosen_norm = chosen if isinstance(chosen, int) else None
+                    saved_idx = getattr(self.config, "mouse_active_monitor_index", None)
+                    if chosen_norm != saved_idx:
+                        pending = True
         except Exception:
             pending = False
         self._set_settings_save_button_pending(button, pending)
@@ -10040,6 +11050,17 @@ Admin elevation
 
 
     def open_tutorial(self, from_settings: bool = False, start_step_index: int = 0) -> None:
+        # Show the loading pill BEFORE constructing the tutorial
+        # window — TutorialWindow's __init__ pulls in MediaPipe,
+        # opens the camera, and builds a complex layout, so on
+        # cold-start machines there's a noticeable delay between
+        # the click and the window appearing. processEvents()
+        # forces a paint so the pill renders before the construction
+        # blocks the event loop.
+        self._show_tutorial_launching_pill()
+        from PySide6.QtWidgets import QApplication as _QApplication
+        _QApplication.processEvents()
+
         if self.tutorial_window is None:
             self.tutorial_window = TutorialWindow(self.config, self)
             self.tutorial_window.tutorial_closed.connect(self._on_tutorial_closed)
@@ -10056,10 +11077,102 @@ Admin elevation
         self.tutorial_window.show()
         self.tutorial_window.raise_()
         self.tutorial_window.activateWindow()
+        # 250 ms gives the OS time to actually display the tutorial
+        # window before the pill starts fading, so there's no gap
+        # between the pill disappearing and the tutorial chrome
+        # appearing.
+        QTimer.singleShot(250, self._hide_tutorial_launching_pill)
         if start_step_index > 0:
             self.last_action_label.setText(f"Last action: opened tutorial at part {start_step_index + 1}")
         else:
             self.last_action_label.setText("Last action: opened tutorial")
+
+    def _show_tutorial_launching_pill(self) -> None:
+        """Center a 'Tutorial Launching...' pill (with animated
+        dots) over the main window so the user gets immediate
+        visual feedback during tutorial-window construction."""
+        pill = getattr(self, "_tutorial_launching_pill", None)
+        if pill is None:
+            pill = QLabel(self)
+            pill.setObjectName("tutorialLaunchingPill")
+            pill.setAlignment(Qt.AlignCenter)
+            pill.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            pill.setStyleSheet(
+                """
+                QLabel#tutorialLaunchingPill {
+                    background: rgba(11, 61, 145, 0.94);
+                    border: 1px solid rgba(29, 233, 182, 0.85);
+                    border-radius: 22px;
+                    padding: 14px 32px;
+                    color: #E5F6FF;
+                    font-size: 17px;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
+                }
+                """
+            )
+            pill.setVisible(False)
+            effect = QGraphicsOpacityEffect(pill)
+            effect.setOpacity(1.0)
+            pill.setGraphicsEffect(effect)
+            self._tutorial_launching_pill = pill
+            self._tutorial_launching_pill_effect = effect
+            self._tutorial_launching_dot_count = 0
+            self._tutorial_launching_dot_timer = QTimer(self)
+            self._tutorial_launching_dot_timer.setInterval(350)
+            self._tutorial_launching_dot_timer.timeout.connect(
+                self._tick_tutorial_launching_dots
+            )
+
+        self._tutorial_launching_pill_effect.setOpacity(1.0)
+        self._tutorial_launching_dot_count = 0
+        self._tick_tutorial_launching_dots()
+        self._tutorial_launching_pill.setVisible(True)
+        self._tutorial_launching_pill.raise_()
+        self._tutorial_launching_dot_timer.start()
+
+    def _tick_tutorial_launching_dots(self) -> None:
+        pill = getattr(self, "_tutorial_launching_pill", None)
+        if pill is None:
+            return
+        dots = "." * (self._tutorial_launching_dot_count % 4)
+        # Pad to 3 dots so the pill width doesn't jitter as the
+        # animation cycles.
+        padded = dots.ljust(3)
+        pill.setText(f"Tutorial Launching{padded}")
+        pill.adjustSize()
+        self._position_tutorial_launching_pill()
+        self._tutorial_launching_dot_count += 1
+
+    def _position_tutorial_launching_pill(self) -> None:
+        pill = getattr(self, "_tutorial_launching_pill", None)
+        if pill is None:
+            return
+        pw = pill.width()
+        ph = pill.height()
+        cx = (self.width() - pw) // 2
+        cy = (self.height() - ph) // 2
+        pill.move(max(0, cx), max(0, cy))
+
+    def _hide_tutorial_launching_pill(self) -> None:
+        pill = getattr(self, "_tutorial_launching_pill", None)
+        if pill is None or not pill.isVisible():
+            return
+        timer = getattr(self, "_tutorial_launching_dot_timer", None)
+        if timer is not None:
+            timer.stop()
+        effect = getattr(self, "_tutorial_launching_pill_effect", None)
+        if effect is None:
+            pill.setVisible(False)
+            return
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(220)
+        anim.setStartValue(effect.opacity())
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(lambda: pill.setVisible(False))
+        self._tutorial_launching_pill_anim = anim  # keep a ref
+        anim.start()
 
     def _on_tutorial_closed(self, completed: bool, auto_start: bool, launched_from_settings: bool) -> None:
         if launched_from_settings:
@@ -10120,8 +11233,18 @@ Admin elevation
             except Exception:
                 pass
         self.settings_content_stack.setCurrentIndex(index)
-        for i, button in enumerate(self._settings_nav_buttons):
-            button.setChecked(i == index)
+        # Match by page_index, NOT list position. The sidebar visual
+        # order (Instructions, General, Control Guide, ...) is NOT
+        # the same as the SECTION_* index order — SECTION_GENERAL is
+        # 10 but its button sits at list slot 1. Iterating with `i`
+        # would check the wrong button (the one before the actual
+        # target, which is exactly the "above-it-turns-green" bug
+        # the user reported).
+        for button in self._settings_nav_buttons:
+            try:
+                button.setChecked(getattr(button, "page_index", -1) == index)
+            except Exception:
+                pass
         # Lazily fetch the release history the first time the user
         # opens the Updates section, so we don't hit GitHub on every
         # settings page entry.
@@ -11276,6 +12399,10 @@ Admin elevation
         if self._walkthrough_next_button is not None:
             self._walkthrough_next_button.setVisible(False)
             self._walkthrough_next_button.setText("Next")
+        # Hide finale pill if it was visible (Microphone-stage exit).
+        finale = getattr(self, "_walkthrough_finale_pill", None)
+        if finale is not None:
+            finale.setVisible(False)
         # Hide skip button + restore Back label.
         if self._walkthrough_skip_button is not None:
             self._walkthrough_skip_button.setVisible(False)
@@ -11335,30 +12462,14 @@ Admin elevation
         return None
 
     def _apply_walkthrough_pointing_visuals(self) -> None:
-        """Pointing phase: paint the 'click X' hint, lock every
-        non-target sidebar tab, and attach a bouncing+glowing animation
-        to the target tab. The glow is rendered as a separate overlay
-        on the settings page (NOT a child of the sidebar) so it can
-        extend past the sidebar's left/right edges without being
-        clipped."""
-        target_section = self._walkthrough_target_section()
-        if self._walkthrough_hint_label is not None:
-            self._walkthrough_hint_label.setText(
-                WALKTHROUGH_POINTING_HINTS.get(target_section, "")
-            )
-        if self._walkthrough_next_button is not None:
-            self._walkthrough_next_button.setVisible(False)
-        if self._walkthrough_next_fade_effect is not None:
-            self._walkthrough_next_fade_effect.setOpacity(1.0)
-        self._detach_walkthrough_target_visuals()
-        target_button = self._walkthrough_target_button_widget()
-        if target_button is None:
-            return
-        self._walkthrough_target_button = target_button
-        self._lock_non_target_nav_buttons(target_button)
-        self._show_walkthrough_target_glow(target_button)
-        self._start_walkthrough_bounce(target_button)
-        self._position_walkthrough_overlay()
+        """Legacy entry point — kept so existing call sites
+        (_enter_walkthrough_state, _on_walkthrough_next_clicked)
+        don't need to change. The walkthrough no longer has a
+        separate "click on the X tab" pointing phase; clicking
+        Next auto-navigates and we go straight to the on-page
+        visuals here."""
+        self._walkthrough_phase = "on_page"
+        self._apply_walkthrough_on_page_visuals()
 
     def _attach_walkthrough_glow(self, button) -> None:
         try:
@@ -11602,17 +12713,25 @@ Admin elevation
                 text_w = 0
             desired_pill_w = text_w + 48
             pill_w = max(200, min(desired_pill_w, available_pill_w))
-            # Cap pill height so it doesn't dip into the description
-            # text. Anchor pill BOTTOM to a fixed offset (40 px) below
-            # the panel top — sits in the gap between the title and
-            # the panel's description text. Anything taller (long-hint
-            # two-line wrap) grows UPWARDS past the panel's top edge
-            # into the page padding instead.
-            target_pill_bottom = 40
+            # Pill geometry: anchor the BOTTOM in the gap between
+            # the panel title and the panel description. The
+            # `_make_content_panel` builder now reserves an extra
+            # 20 px addSpacing between title and subtitle, so the
+            # pill can sit at full natural height in that gap
+            # without clipping either widget. Tall hints (long
+            # multi-line wraps) grow UPWARD past the panel's top
+            # edge into the page padding rather than down into
+            # the description text.
+            panel_top_y = panel_top_left_in_page.y()
             pill_h_natural = hint.sizeHint().height()
-            pill_h = min(max(50, pill_h_natural), 96)
+            pill_h = min(max(50, pill_h_natural), 132)
+            # 64 px below the panel's top edge: roughly where the
+            # title's bottom + half the addSpacing(20) gap lives,
+            # so the pill's bottom sits in the title → description
+            # gap with comfortable clearance from both.
+            pill_bottom_target = panel_top_y + 64
             pill_x = panel_top_left_in_page.x() + pill_x_offset
-            pill_y = panel_top_left_in_page.y() + (target_pill_bottom - pill_h)
+            pill_y = pill_bottom_target - pill_h
             # Don't punch through the page's top edge.
             pill_y = max(0, pill_y)
             hint.setGeometry(pill_x, pill_y, pill_w, pill_h)
@@ -11642,6 +12761,12 @@ Admin elevation
                 button.setGeometry(btn_x, btn_y, next_btn_w, next_btn_h)
             hint.raise_()
             button.raise_()
+            # Keep the finale pill centered on every overlay reflow
+            # so window resizes don't desync it from the page center.
+            finale = getattr(self, "_walkthrough_finale_pill", None)
+            if finale is not None and finale.isVisible():
+                self._position_walkthrough_finale_pill()
+                finale.raise_()
         except Exception:
             pass
 
@@ -11652,30 +12777,33 @@ Admin elevation
     # ---- on-page phase + Next button ---------------------------------
 
     def _apply_walkthrough_on_page_visuals(self) -> None:
-        """User landed on the target page. Swap pointing hint for
-        the page-description hint and schedule the Next button fade-
-        in 3 s later. Locks on non-target sidebar buttons stay in
-        place — the user can ONLY click the currently-targeted tab
-        even after landing on its page; everything else stays
-        unhoverable / unclickable until the walkthrough advances or
-        exits."""
+        """User is on a walkthrough page. Set the page hint, lock
+        every non-target sidebar tab, attach a thin "active click
+        green" border to the current page's tab so the user can
+        see at a glance where they are in the tour, and schedule
+        the Next button fade-in 3 s later."""
         target_section = self._walkthrough_target_section()
-        self._detach_walkthrough_target_visuals()
-        # Re-assert locks: in the on-page phase the only enabled tab
-        # is the current target (so its :checked green styling reads
-        # cleanly). Every other sidebar tab stays disabled.
+        # Hide any finale visuals from a prior step transition.
+        self._hide_walkthrough_finale_visuals()
         target_button = self._walkthrough_target_button_widget()
         if target_button is not None:
             self._lock_non_target_nav_buttons(target_button)
+            # Re-attach the thin border highlight to the current
+            # page's tab. Each navigation rebuilds it so the border
+            # follows the active step around the sidebar.
+            self._show_walkthrough_target_glow(target_button)
+            self._walkthrough_target_button = target_button
         if self._walkthrough_hint_label is not None:
+            self._walkthrough_hint_label.setVisible(True)
             self._walkthrough_hint_label.setText(
                 WALKTHROUGH_PAGE_HINTS.get(target_section, "")
             )
         if self._walkthrough_next_button is not None:
             self._walkthrough_next_button.setVisible(False)
-            # Final step uses a different label; everything else says "Next".
-            is_final = self._walkthrough_step_index >= len(WALKTHROUGH_PAGES) - 1
-            self._walkthrough_next_button.setText("Gesture Tutorial" if is_final else "Next")
+            # Always "Next" — even on Microphone (the last regular
+            # entry). Microphone's Next click enters the FINALE
+            # phase which presents its own "Gesture Tutorial" button.
+            self._walkthrough_next_button.setText("Next")
         if self._walkthrough_next_fade_effect is not None:
             self._walkthrough_next_fade_effect.setOpacity(0.0)
         # Schedule the fade-in.
@@ -11695,13 +12823,22 @@ Admin elevation
         landing position, fades in, and bounces a few times before
         settling. Drives both the geometry animation (OutBounce) and
         the opacity animation in parallel."""
-        if not self._walkthrough_active or self._walkthrough_phase != "on_page":
+        # Allow the bounce-in from both regular pages (on_page →
+        # next_visible) AND the finale phase (Gesture Tutorial
+        # button bouncing in over the centered finale pill).
+        if not self._walkthrough_active or self._walkthrough_phase not in (
+            "on_page", "finale"
+        ):
             return
         button = self._walkthrough_next_button
         page = getattr(self, "settings_page", None)
         if button is None or page is None:
             return
-        self._walkthrough_phase = "next_visible"
+        # Finale keeps phase = "finale" so subsequent Next-clicks
+        # route to the exit-into-tutorial branch; everywhere else
+        # the bounce moves us into "next_visible".
+        if self._walkthrough_phase == "on_page":
+            self._walkthrough_phase = "next_visible"
         button.setVisible(True)
         # First call positions the button at its landing geometry.
         self._position_walkthrough_overlay()
@@ -11751,15 +12888,37 @@ Admin elevation
     def _on_walkthrough_next_clicked(self) -> None:
         if not self._walkthrough_active:
             return
-        is_final = self._walkthrough_step_index >= len(WALKTHROUGH_PAGES) - 1
-        if is_final:
-            # Final step → close walkthrough, route to gesture tutorial.
+        # Finale-phase "Gesture Tutorial" click: exit + open tutorial.
+        if self._walkthrough_phase == "finale":
             self._exit_walkthrough(open_tutorial=True)
             return
-        # Advance to the next page's pointing phase.
+        # Last regular page (Microphone) → enter finale phase
+        # instead of navigating away. The user stays on Microphone
+        # while the big center pill + Gesture Tutorial button
+        # appear, so the panel they were just looking at stays in
+        # context behind the finale message.
+        is_final_regular = (
+            self._walkthrough_step_index >= len(WALKTHROUGH_PAGES) - 1
+        )
+        if is_final_regular:
+            self._apply_walkthrough_finale_visuals()
+            return
+        # Auto-advance to the next page. Setting phase = "pointing"
+        # before show_settings_section lets the existing gate at
+        # show_settings_section line ~10431 promote us back to
+        # "on_page" once the panel is visible — same code path the
+        # user-clicked-tab flow used to take, just without the
+        # intervening "click the X tab" prompt.
         self._walkthrough_step_index += 1
         self._walkthrough_phase = "pointing"
-        self._apply_walkthrough_pointing_visuals()
+        target = self._walkthrough_target_section()
+        try:
+            self.show_settings_section(target)
+        except Exception:
+            # Fallback: if show_settings_section throws, still apply
+            # on_page visuals so the walkthrough doesn't get stuck
+            # on a stale page.
+            self._apply_walkthrough_on_page_visuals()
 
     def _on_walkthrough_target_clicked(self) -> None:
         """Called from show_settings_section when the user clicked
@@ -11769,6 +12928,96 @@ Admin elevation
             return
         self._walkthrough_phase = "on_page"
         self._apply_walkthrough_on_page_visuals()
+
+    # ---- finale phase ------------------------------------------------
+
+    def _apply_walkthrough_finale_visuals(self) -> None:
+        """Final stop in the walkthrough: stay on the Microphone
+        page, show a big centered pill summarizing what's beyond
+        the guided tour, and bounce in the Gesture Tutorial button
+        (which re-uses the existing Next button — clicking it
+        exits + opens the tutorial)."""
+        self._walkthrough_phase = "finale"
+        # Hint pill is suppressed during the finale — the big
+        # centered pill carries the message instead.
+        if self._walkthrough_hint_label is not None:
+            self._walkthrough_hint_label.setVisible(False)
+        # Build the centered pill on first use, then reposition it.
+        pill = self._ensure_walkthrough_finale_pill()
+        if pill is not None:
+            self._position_walkthrough_finale_pill()
+            pill.setVisible(True)
+            pill.raise_()
+        # Re-flow the Next button as "Gesture Tutorial" with another
+        # bounce-in (start hidden + transparent so the bounce reads).
+        button = self._walkthrough_next_button
+        if button is not None:
+            button.setText("Gesture Tutorial")
+            button.setVisible(False)
+        if self._walkthrough_next_fade_effect is not None:
+            self._walkthrough_next_fade_effect.setOpacity(0.0)
+        # Reuse the existing "next button bounces in" timing — fires
+        # _show_walkthrough_next_button after 600 ms so the pill
+        # lands first and the button arrives a beat later.
+        timer = self._walkthrough_next_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._show_walkthrough_next_button)
+            self._walkthrough_next_timer = timer
+        timer.stop()
+        timer.start(600)
+
+    def _hide_walkthrough_finale_visuals(self) -> None:
+        pill = getattr(self, "_walkthrough_finale_pill", None)
+        if pill is not None:
+            pill.setVisible(False)
+
+    def _ensure_walkthrough_finale_pill(self):
+        """Build (lazily) and return the big centered finale pill —
+        a multi-line QLabel anchored to the settings page so it
+        floats over whichever panel the user happens to be on at
+        finale time (Microphone, by spec)."""
+        pill = getattr(self, "_walkthrough_finale_pill", None)
+        if pill is not None:
+            return pill
+        page = getattr(self, "settings_page", None) or self
+        pill = QLabel(WALKTHROUGH_FINALE_MESSAGE, page)
+        pill.setObjectName("walkthroughFinalePill")
+        pill.setAlignment(Qt.AlignCenter)
+        pill.setWordWrap(True)
+        pill.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        accent = self.config.accent_color or "#1DE9B6"
+        pill.setStyleSheet(
+            f"""
+            QLabel#walkthroughFinalePill {{
+                background: rgba(11, 61, 145, 0.94);
+                border: 2px solid {accent};
+                border-radius: 22px;
+                padding: 28px 36px;
+                color: #E5F6FF;
+                font-size: 17px;
+                font-weight: 600;
+                line-height: 1.45;
+            }}
+            """
+        )
+        pill.setMaximumWidth(560)
+        pill.setVisible(False)
+        self._walkthrough_finale_pill = pill
+        return pill
+
+    def _position_walkthrough_finale_pill(self) -> None:
+        pill = getattr(self, "_walkthrough_finale_pill", None)
+        page = getattr(self, "settings_page", None)
+        if pill is None or page is None:
+            return
+        pill.adjustSize()
+        pw = min(pill.width(), 560)
+        ph = pill.height()
+        cx = max(0, (page.width() - pw) // 2)
+        cy = max(0, (page.height() - ph) // 2)
+        pill.setGeometry(cx, cy, pw, ph)
 
     def _on_back_button_clicked(self) -> None:
         """Back / Exit Walk-through handler.
@@ -12687,6 +13936,15 @@ Admin elevation
         is up; otherwise spins up a one-shot SpotifyController so the
         user can authorise from a cold launch."""
         from ..integration.noop_engine import SpotifyController as _SpotifyController
+        # Suppress the first-active prompt — the user is actively
+        # connecting, so popping a modal on top of the in-progress
+        # OAuth flow would be redundant and confusing.
+        if not bool(getattr(self.config, "spotify_first_active_prompt_shown", False)):
+            self.config.spotify_first_active_prompt_shown = True
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
         worker = getattr(self, "_worker", None)
         controller = getattr(worker, "spotify_controller", None) if worker is not None else None
         if controller is None:
@@ -12713,6 +13971,185 @@ Admin elevation
                 self.last_action_label.setText("Last action: Spotify connected")
             else:
                 self.last_action_label.setText(f"Last action: Spotify connect failed — {message or 'see browser'}")
+
+    def _maybe_show_spotify_first_active_prompt(self) -> None:
+        """First-time Spotify-active gate. Called from the engine
+        debug-frame handler whenever we see Spotify running. The
+        prompt fires at most once per install — controlled by
+        config.spotify_first_active_prompt_shown — and only when
+        the user has no saved tokens (already authorised users
+        skip it entirely). The in-flight latch keeps multiple
+        rapid frames from stacking modals while the user is
+        deciding."""
+        if getattr(self, "_spotify_first_prompt_in_flight", False):
+            return
+        if bool(getattr(self.config, "spotify_first_active_prompt_shown", False)):
+            return
+        # Respect the General → Overlay → Text pop-ups toggle. Do
+        # NOT latch the prompt-shown flag here — if popups are
+        # re-enabled later the user still gets the first-time
+        # prompt the next time Spotify is detected.
+        if not self._should_show_text_popups():
+            return
+        worker = getattr(self, "_worker", None)
+        controller = getattr(worker, "spotify_controller", None) if worker is not None else None
+        if controller is None:
+            return
+        try:
+            if bool(getattr(controller, "has_authorization", False)):
+                # Already authorised in a prior run — silently
+                # latch the flag so we don't poll on every frame.
+                self.config.spotify_first_active_prompt_shown = True
+                try:
+                    save_config(self.config)
+                except Exception:
+                    pass
+                return
+        except Exception:
+            return
+        self._spotify_first_prompt_in_flight = True
+        # Defer the modal one event-loop tick so the current debug
+        # frame finishes processing (and the engine isn't blocked
+        # waiting on a synchronous QDialog.exec from inside a slot).
+        QTimer.singleShot(0, self._show_spotify_first_active_prompt)
+
+    def _show_spotify_first_active_prompt(self) -> None:
+        try:
+            allow = TouchlessNotice.show_confirm(
+                self,
+                "Connect Spotify?",
+                "Allow Touchless to connect to Spotify?",
+                confirm_label="Allow",
+                cancel_label="Don't Allow",
+            )
+        finally:
+            # Latch the flag regardless of choice — the user has
+            # answered, we never ask again. They can still connect
+            # later via the Connect Spotify button at the bottom of
+            # the Instructions panel.
+            self.config.spotify_first_active_prompt_shown = True
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
+            self._spotify_first_prompt_in_flight = False
+        if allow:
+            self._on_connect_spotify_clicked()
+        else:
+            self._show_spotify_decline_pill()
+
+    # ----- Spotify decline pill (bottom-center, auto-fade) ----------------
+
+    def _ensure_spotify_decline_pill(self) -> "QFrame":
+        """Lazy-create the pill widget that surfaces after the user
+        clicks Don't Allow. Tells them where to find the Connect
+        Spotify button later. Parented to the main window so it
+        floats over whichever page is showing; restyled to match
+        the Touchless dark/teal theme."""
+        pill = self._spotify_decline_pill
+        if pill is not None:
+            return pill
+        pill = QFrame(self)
+        pill.setObjectName("spotifyDeclinePill")
+        pill.setAttribute(Qt.WA_StyledBackground, True)
+        pill.setStyleSheet(
+            "QFrame#spotifyDeclinePill {"
+            "  background: rgba(15, 23, 42, 0.96);"
+            "  border: 1px solid rgba(29, 233, 182, 0.55);"
+            "  border-radius: 14px;"
+            "}"
+            "QLabel {"
+            "  color: #E5F6FF;"
+            "  font-size: 13px;"
+            "  background: transparent;"
+            "}"
+        )
+        layout = QHBoxLayout(pill)
+        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setSpacing(8)
+        label = QLabel(
+            "If you would like to connect Touchless to Spotify at some "
+            "point, find the connect to Spotify button at the bottom of "
+            "Instructions page."
+        )
+        label.setWordWrap(True)
+        label.setMaximumWidth(560)
+        layout.addWidget(label)
+        pill.setVisible(False)
+        self._spotify_decline_pill = pill
+        return pill
+
+    def _ensure_spotify_decline_pill_fade(self) -> tuple:
+        pill = self._ensure_spotify_decline_pill()
+        effect = self._spotify_decline_pill_fade_effect
+        anim = self._spotify_decline_pill_fade_anim
+        if effect is None:
+            effect = QGraphicsOpacityEffect(pill)
+            effect.setOpacity(1.0)
+            pill.setGraphicsEffect(effect)
+            self._spotify_decline_pill_fade_effect = effect
+        if anim is None:
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(900)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(QEasingCurve.InOutQuad)
+            anim.finished.connect(self._on_spotify_decline_pill_fade_done)
+            self._spotify_decline_pill_fade_anim = anim
+        return effect, anim
+
+    def _show_spotify_decline_pill(self) -> None:
+        pill = self._ensure_spotify_decline_pill()
+        effect, anim = self._ensure_spotify_decline_pill_fade()
+        if anim is not None and anim.state() == QPropertyAnimation.Running:
+            anim.stop()
+        if effect is not None:
+            effect.setOpacity(1.0)
+        pill.adjustSize()
+        self._position_spotify_decline_pill()
+        pill.setVisible(True)
+        pill.raise_()
+        timer = self._spotify_decline_pill_hide_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._fade_spotify_decline_pill)
+            self._spotify_decline_pill_hide_timer = timer
+        # User asked for the pill to "fade away after 4 seconds" — start
+        # the fade animation at t=4s; the fade itself runs ~0.9s on top.
+        timer.start(4000)
+
+    def _position_spotify_decline_pill(self) -> None:
+        pill = self._spotify_decline_pill
+        if pill is None:
+            return
+        pill.adjustSize()
+        margin_bottom = 32
+        x = max(8, (self.width() - pill.width()) // 2)
+        y = max(8, self.height() - pill.height() - margin_bottom)
+        pill.move(x, y)
+
+    def _fade_spotify_decline_pill(self) -> None:
+        pill = self._spotify_decline_pill
+        if pill is None or not pill.isVisible():
+            return
+        effect, anim = self._ensure_spotify_decline_pill_fade()
+        if effect is None or anim is None:
+            pill.setVisible(False)
+            return
+        if anim.state() == QPropertyAnimation.Running:
+            anim.stop()
+        anim.setStartValue(float(effect.opacity()))
+        anim.setEndValue(0.0)
+        anim.start()
+
+    def _on_spotify_decline_pill_fade_done(self) -> None:
+        pill = self._spotify_decline_pill
+        effect = self._spotify_decline_pill_fade_effect
+        if pill is None or effect is None:
+            return
+        if effect.opacity() <= 0.001:
+            pill.setVisible(False)
 
     def start_engine(self, checked: bool = False, skip_tutorial_prompt: bool = False) -> None:
             # Diagnostic trace — written to stderr (same stream as
@@ -13006,6 +14443,12 @@ Admin elevation
             self.mini_live_viewer.detach_from_worker()
 
     def _show_mini_live_viewer(self) -> None:
+        # Gated by the General → Overlay toggles. When the user
+        # has Camera View off, OR Gaming Live View is on AND a
+        # game is currently running, we just don't open the
+        # thumbnail at all.
+        if not self._should_show_camera_view():
+            return
         self._ensure_mini_live_viewer()
         if self.mini_live_viewer is None:
             return
@@ -13017,6 +14460,162 @@ Admin elevation
         if self.mini_live_viewer is not None:
             self.mini_live_viewer.detach_from_worker()
             self.mini_live_viewer.hide()
+
+    # ----- Overlay gating + game detection ---------------------------------
+    def _should_show_camera_view(self) -> bool:
+        """True iff the mini live viewer should appear right now.
+        False when the user has Camera View off in General, or
+        when Gaming Live View is on AND a game is currently
+        running."""
+        if not bool(getattr(self.config, "overlay_camera_view_enabled", True)):
+            return False
+        if (
+            bool(getattr(self.config, "overlay_gaming_live_view_disabled", False))
+            and self._is_game_running()
+        ):
+            return False
+        return True
+
+    def _should_show_text_popups(self) -> bool:
+        """True iff transient text popups (info notices, pills,
+        post-action save prompts) should appear right now. Modal
+        confirms / warnings are NOT gated by this — only
+        non-essential transient surfaces are."""
+        if not bool(getattr(self.config, "overlay_text_popups_enabled", True)):
+            return False
+        if (
+            bool(getattr(self.config, "overlay_gaming_mode_enabled", False))
+            and self._is_game_running()
+        ):
+            return False
+        return True
+
+    # Process-name based game detector. Lower-cased match against
+    # psutil's process iter — covers the common Windows shooter /
+    # MOBA / battle royale lineup. The list is a starting point;
+    # users who play niche titles can request additions and the
+    # set just grows.
+    _KNOWN_GAME_EXECUTABLES = frozenset({
+        "valorant.exe",
+        "valorant-win64-shipping.exe",
+        "csgo.exe",
+        "cs2.exe",
+        "league of legends.exe",
+        "leagueclient.exe",
+        "leagueclientux.exe",
+        "fortniteclient-win64-shipping.exe",
+        "r5apex.exe",
+        "overwatch.exe",
+        "rainbowsix.exe",
+        "rainbowsix_vulkan.exe",
+        "dota2.exe",
+        "rocketleague.exe",
+        "minecraft.exe",
+        "javaw.exe",  # generic Java but Minecraft is the dominant Windows case
+        "rustclient.exe",
+        "tslgame.exe",  # PUBG
+        "gta5.exe",
+        "gtav.exe",
+        "cyberpunk2077.exe",
+        "eldenring.exe",
+        "starfield.exe",
+        "destiny2.exe",
+        "ffxiv_dx11.exe",
+        "wow.exe",
+        "wowclassic.exe",
+        "warframe.x64.exe",
+        "modernwarfare.exe",
+        "cod.exe",
+        "blackops3.exe",
+        "blackopsmp.exe",
+        "warzone.exe",
+    })
+
+    def _is_game_running(self) -> bool:
+        """Cheap accessor — returns the cached state computed by
+        the periodic detector tick. Default False if the detector
+        hasn't run yet (i.e., no gaming-mode flag was ever
+        enabled, so we never started polling)."""
+        return bool(getattr(self, "_game_running_cached", False))
+
+    def _refresh_game_detector_state(self) -> None:
+        """Start the periodic detector when any gaming-mode flag is
+        on, stop it when both are off. Avoids polling the process
+        list for users who never enable gaming mode."""
+        gaming_mode = bool(getattr(self.config, "overlay_gaming_mode_enabled", False))
+        live_view_off = bool(getattr(self.config, "overlay_gaming_live_view_disabled", False))
+        wants_detector = gaming_mode or live_view_off
+
+        timer = getattr(self, "_game_detector_timer", None)
+        if wants_detector:
+            if timer is None:
+                timer = QTimer(self)
+                # 2 s cadence — slow enough to be free, fast
+                # enough that the gaming overlay kicks in within a
+                # couple of seconds of game launch.
+                timer.setInterval(2000)
+                timer.timeout.connect(self._game_detector_tick)
+                self._game_detector_timer = timer
+            if not timer.isActive():
+                timer.start()
+                # Run once immediately so the first state lands
+                # without a 2 s delay.
+                self._game_detector_tick()
+        else:
+            if timer is not None and timer.isActive():
+                timer.stop()
+            # Reset cached state when the detector is off so
+            # `_is_game_running()` doesn't keep returning a stale
+            # True from a previous session.
+            self._game_running_cached = False
+
+    def _game_detector_tick(self) -> None:
+        """Periodic check — set _game_running_cached and re-apply
+        overlay visibility if it changed."""
+        try:
+            import psutil
+        except Exception:
+            return
+        running = False
+        try:
+            for proc in psutil.process_iter(["name"]):
+                try:
+                    name = (proc.info.get("name") or "").lower()
+                except Exception:
+                    continue
+                if name and name in self._KNOWN_GAME_EXECUTABLES:
+                    running = True
+                    break
+        except Exception:
+            return
+        was_running = bool(getattr(self, "_game_running_cached", False))
+        self._game_running_cached = running
+        if running != was_running:
+            try:
+                self._reapply_mini_viewer_visibility()
+            except Exception:
+                pass
+
+    def _reapply_mini_viewer_visibility(self) -> None:
+        """Re-evaluate whether the mini viewer should be showing
+        and bring it in line. Called on save-changes click and on
+        game-running state changes."""
+        worker = getattr(self, "_worker", None)
+        engine_running = worker is not None and bool(getattr(worker, "is_running", False))
+        if not engine_running:
+            return
+        live_view_open = (
+            self.live_view_window is not None and self.live_view_window.isVisible()
+        )
+        debug_open = self.debugger_window is not None and self.debugger_window.isVisible()
+        if live_view_open or debug_open:
+            return
+        if self._should_show_camera_view():
+            if self.mini_live_viewer is None or not self.mini_live_viewer.isVisible():
+                self._show_mini_live_viewer()
+        else:
+            if self.mini_live_viewer is not None and self.mini_live_viewer.isVisible():
+                self._hide_mini_live_viewer()
 
     def _handle_toggle_gestures_requested(self) -> None:
         if self._worker is None:
@@ -13859,6 +15458,12 @@ Admin elevation
             return
         resolved_path = Path(path)
         if not resolved_path.exists():
+            return
+        # Gated by General → Overlay → Text pop-ups. When the user
+        # has popups off (or gaming-mode is auto-suppressing them),
+        # the file just stays in the default folder — same outcome
+        # the voice "clip that" command produces.
+        if not self._should_show_text_popups():
             return
         self._pending_post_action_save = {
             "output_kind": str(output_kind or ""),
@@ -15388,7 +16993,21 @@ Admin elevation
             self._queue_post_action_save_prompt("clips", output_path)
             return True
         return False
-    def _export_recent_clip(self, duration_seconds: int) -> bool:
+    def _export_recent_clip(
+        self,
+        duration_seconds: int,
+        *,
+        auto_save: bool = False,
+        auto_select_monitor: bool = False,
+    ) -> bool:
+        """Kick off a clip export. `auto_save=True` skips the
+        post-action save-location voice prompt — the clip stays in
+        the default clips folder. `auto_select_monitor=True` skips
+        the multi-monitor picker dialog and uses the union of all
+        screens (matches the cache region exactly so no cropping is
+        needed). Both default to False so the gesture path keeps
+        its existing prompt-driven behaviour; the voice "clip that"
+        path passes True/True so the user gets a hands-off save."""
         duration_seconds = int(max(1, duration_seconds))
         if self._utility_countdown_active or self._capture_region_selection_mode is not None:
             return False
@@ -15407,10 +17026,20 @@ Admin elevation
             # process until after our slot returns — meaning the
             # user would still see the picker overlapping the
             # processing overlay for one frame.
-            self._export_clip_async(duration_seconds, QRect(region))
+            self._export_clip_async(
+                duration_seconds, QRect(region), auto_save=auto_save
+            )
 
-        if len(options) == 1:
-            _kickoff_export(QRect(options[0][1]))
+        if len(options) == 1 or auto_select_monitor:
+            # Use the cache's full union geometry whenever possible
+            # so no per-monitor cropping is needed — that's what the
+            # ffmpeg cache already records. The `auto_select_monitor`
+            # path is the voice-trigger fast path.
+            if auto_select_monitor:
+                target_region = self._screens_union_geometry()
+            else:
+                target_region = options[0][1]
+            _kickoff_export(QRect(target_region))
             return True
 
         dialog = CaptureMonitorDialog(self.config, f"clip {duration_seconds} sec", options, self)
@@ -15447,7 +17076,87 @@ Admin elevation
         dialog.update()
         return True
 
-    def _export_clip_async(self, duration_seconds: int, region: QRect) -> None:
+    def _buffered_clip_seconds(self) -> float:
+        """Total seconds of clip-cache footage currently usable for
+        an export, summed over the same data sources the export
+        thread reads.
+
+        - ffmpeg backend: sum of finalized segment durations from
+          the segment-list CSV. The in-progress segment is NOT in
+          the manifest, so it doesn't count — `_run_clip_export_ffmpeg`
+          can't reach it either. Result is the actual on-disk
+          buffer size, which is what the trim filter has to work
+          with.
+        - opencv backend: sum of finalized segment durations PLUS
+          the in-progress writer's elapsed time. `_run_clip_export_opencv`
+          rotates the in-progress writer into the segments list
+          before reading, so its footage is available to the
+          export.
+
+        Returns 0.0 if no backend is running. Used by `_export_clip_async`
+        to refuse requests it can't fulfil at the requested duration
+        — a 60 s clip needs ~60 s of finalized buffer, otherwise the
+        trim filter silently outputs a shorter file than the user
+        asked for."""
+        backend = self._clip_cache_backend
+        if backend == "ffmpeg":
+            try:
+                entries = self._parse_ffmpeg_clip_manifest()
+            except Exception:
+                return 0.0
+            total = 0.0
+            for entry in entries:
+                try:
+                    span = float(entry.get("end_time", 0.0)) - float(entry.get("start_time", 0.0))
+                except Exception:
+                    continue
+                if span > 0.0:
+                    total += span
+            return total
+        if backend == "opencv":
+            total = 0.0
+            for meta in self._clip_cache_segments:
+                try:
+                    path = Path(meta.get("path"))
+                except Exception:
+                    continue
+                if not path.exists() or int(meta.get("frame_count", 0) or 0) <= 0:
+                    continue
+                try:
+                    start = float(meta.get("start_time", 0.0) or 0.0)
+                    end = float(meta.get("end_time", start) or start)
+                    span = end - start
+                except Exception:
+                    continue
+                if span > 0.0:
+                    total += span
+            if (
+                self._clip_cache_segment_writer is not None
+                and int(self._clip_cache_segment_frame_count or 0) > 0
+            ):
+                try:
+                    started = float(self._clip_cache_segment_started_at or 0.0)
+                except Exception:
+                    started = 0.0
+                if started > 0.0:
+                    total += max(0.0, time.time() - started)
+            return total
+        return 0.0
+
+    def _has_buffered_clip_data(self) -> bool:
+        """True when ANY usable cached footage exists. Distinct
+        from the duration-correctness gate in `_export_clip_async`
+        — this only catches the empty-cache case (e.g., engine
+        not started, or the very first frame after Start)."""
+        return self._buffered_clip_seconds() > 0.0
+
+    def _export_clip_async(
+        self,
+        duration_seconds: int,
+        region: QRect,
+        *,
+        auto_save: bool = False,
+    ) -> None:
         # Off-main-thread clip export. The ffmpeg subprocess for a
         # 60 s concat + crop + trim + encode takes 3-8 s; running
         # it inline used to freeze the UI completely. Now:
@@ -15470,18 +17179,53 @@ Admin elevation
         if target.isNull() or target.width() <= 1 or target.height() <= 1:
             self.last_action_label.setText("Last action: clip canceled")
             return
+        # Cache warm-up + duration-correctness guard — without this
+        # the Processing pill appears for one frame and disappears
+        # (export thread returns instantly with empty manifest), or
+        # it produces a clip SHORTER than the user asked for. The
+        # ffmpeg trim filter caps at the available buffer length,
+        # so a 60 s clip request against a 35 s buffer silently
+        # writes a 35 s file. Refuse here instead, with a clear
+        # message that names the actual buffer size, so 60 s clips
+        # are always 60 s and 30 s clips are always 30 s.
+        buffered_seconds = self._buffered_clip_seconds()
+        if buffered_seconds <= 0.0:
+            seg_seconds = int(round(float(self._clip_cache_segment_seconds)))
+            self.last_action_label.setText(
+                "Last action: clip not ready yet — keep recording for at least "
+                f"{seg_seconds}s after Start before requesting a clip"
+            )
+            return
+        # Tiny tolerance for segment-boundary jitter: ffmpeg
+        # finalizes 10 s segments at keyframe boundaries, so the
+        # last segment may be 9.8-10.2 s. Without the tolerance, a
+        # buffer that's "60 s" by intention but 59.7 s by manifest
+        # arithmetic would refuse a 60 s clip even though the
+        # output would round to 60.0 s.
+        margin = 0.5
+        if buffered_seconds + margin < float(duration_seconds):
+            self.last_action_label.setText(
+                "Last action: only "
+                f"{buffered_seconds:.1f}s of clip buffer available — keep "
+                f"recording for at least {int(duration_seconds)}s before "
+                f"requesting a {int(duration_seconds)}s clip"
+            )
+            return
         try:
             self.processing_overlay.show_processing(f"Processing {duration_seconds}s clip")
         except Exception:
             pass
 
         # Reset shared result slot for this run. Worker thread
-        # writes here; GUI callback reads.
+        # writes here; GUI callback reads. `auto_save` is set
+        # main-thread BEFORE the worker starts so the completion
+        # handler can read it without the worker ever touching it.
         self._clip_export_result = {
             "success": False,
             "output_path": None,
             "actual_seconds": 0.0,
             "error": None,
+            "auto_save": bool(auto_save),
         }
 
         # Connect the cross-thread bridge signal exactly once. We
@@ -15507,6 +17251,7 @@ Admin elevation
                     "output_path": output_path,
                     "actual_seconds": float(actual_seconds or 0.0),
                     "error": None,
+                    "auto_save": bool(auto_save),
                 }
             except Exception as exc:
                 self._clip_export_result = {
@@ -15514,6 +17259,7 @@ Admin elevation
                     "output_path": None,
                     "actual_seconds": 0.0,
                     "error": f"{type(exc).__name__}: {exc!s}",
+                    "auto_save": bool(auto_save),
                 }
             # Bounce to the GUI thread via Qt signal — works from
             # any thread, doesn't require a local event loop.
@@ -15547,6 +17293,16 @@ Admin elevation
             return
         if not success or output_path is None:
             self.last_action_label.setText("Last action: no recent clip available yet")
+            return
+        auto_save = bool(result.get("auto_save", False))
+        if auto_save:
+            # Voice-trigger fast path: clip already lives in the
+            # default clips folder; don't open the "where to save"
+            # voice prompt — the user said "clip that" and expects
+            # the action to be one-and-done.
+            self.last_action_label.setText(
+                f"Last action: saved {actual_seconds:.1f}s clip to {output_path}"
+            )
             return
         self.last_action_label.setText(
             f"Last action: saved {actual_seconds:.1f}s clip to {output_path}"
@@ -16105,6 +17861,15 @@ Admin elevation
     def _on_worker_debug_frame(self, frame, info) -> None:
         if not isinstance(info, dict):
             return
+        # First-time Spotify-active prompt — fires once per install,
+        # the first time we see Spotify running while the engine is
+        # up AND the user has no saved Spotify tokens. Catches every
+        # path the user mentioned: already-open at Start, manually
+        # opened, opened by voice, opened by the right-hand 'two'
+        # gesture. The flag is read directly from the payload the
+        # engine ticks each frame.
+        if bool(info.get("spotify_window_open", False)):
+            self._maybe_show_spotify_first_active_prompt()
         drawing_target = str(info.get("drawing_render_target", self._drawing_render_target) or self._drawing_render_target)
         self._set_drawing_render_target(drawing_target)
         request_token = int(info.get("drawing_request_token", 0) or 0)
@@ -16158,6 +17923,17 @@ Admin elevation
                 utility_handled = self._export_recent_clip(30)
             elif utility_request_action == "clip_1m":
                 utility_handled = self._export_recent_clip(60)
+            elif utility_request_action == "clip_30s_voice":
+                # Voice-triggered: skip the multi-monitor picker
+                # and the post-action save-location prompt so the
+                # clip just lands in the default folder.
+                utility_handled = self._export_recent_clip(
+                    30, auto_save=True, auto_select_monitor=True
+                )
+            elif utility_request_action == "clip_1m_voice":
+                utility_handled = self._export_recent_clip(
+                    60, auto_save=True, auto_select_monitor=True
+                )
             if utility_handled:
                 self._last_utility_request_token = utility_request_token
                 if self._worker is not None and hasattr(self._worker, "acknowledge_utility_request"):
@@ -16481,6 +18257,8 @@ Admin elevation
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._update_home_status_card_width()
+        if getattr(self, "_spotify_decline_pill", None) is not None and self._spotify_decline_pill.isVisible():
+            self._position_spotify_decline_pill()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         try:

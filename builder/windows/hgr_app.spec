@@ -67,6 +67,34 @@ for source_path, target_name in (
     if source_path.exists():
         datas.append((str(source_path), target_name))
 
+# Bundle ffmpeg.exe alongside Touchless.exe so the camera fallback
+# path can use it. Why we need ffmpeg in the bundle: cv2.VideoCapture
+# under DirectShow constructs a filter graph in-process — and a
+# buggy third-party filter (Canon EOS Webcam Utility's filter has a
+# documented segfault) takes the whole Touchless process down. The
+# ffmpeg subprocess approach (`ffmpeg -f dshow -i video=<name>`)
+# instantiates the same DirectShow graph in a CHILD process, so a
+# crash there only kills ffmpeg.exe, not Touchless. Used as a safe
+# fallback when the in-process MSMF and DSHOW paths can't open the
+# camera (e.g., older EOS Webcam Utility versions that only register
+# a DirectShow filter, no Media Foundation Frame Source).
+#
+# Source: locates ffmpeg via shutil.which("ffmpeg"), which honours
+# PATH on the build machine. The dev currently has the gyan.dev
+# static build at C:\Users\<...>\ffmpeg-7.0.2-full_build\bin\. Static
+# build is self-contained — no DLLs to bundle alongside it.
+import shutil  # noqa: E402 — late import is fine in PyInstaller spec
+_ffmpeg_src = shutil.which("ffmpeg")
+if _ffmpeg_src and Path(_ffmpeg_src).exists():
+    binaries.append((_ffmpeg_src, "."))
+else:
+    raise RuntimeError(
+        "ffmpeg.exe not found on PATH. Install ffmpeg (e.g. the "
+        "gyan.dev static build) and add its bin/ directory to PATH "
+        "before building Touchless. The bundled ffmpeg is required "
+        "for the EOS Webcam Utility fallback capture path."
+    )
+
 
 def _collect_whisper_runtime(roots):
     """Bundle only the whisper runtime files the app actually uses.

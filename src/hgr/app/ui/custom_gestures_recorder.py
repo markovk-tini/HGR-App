@@ -516,7 +516,10 @@ class RecordingWindow(QDialog):
             # borrowing the worker's frames they've already been mirrored
             # by the engine, so flipping again would flip them back to
             # camera-perspective — skip in that case.
-            mirrored = np_frame if not self._owns_camera else cv2.flip(np_frame, 1)
+            should_flip = self._owns_camera and not bool(
+                getattr(self._config, "camera_source_is_mirrored", False)
+            )
+            mirrored = cv2.flip(np_frame, 1) if should_flip else np_frame
             # Worker may emit BGR; MediaPipe wants RGB.
             rgb = cv2.cvtColor(mirrored, cv2.COLOR_BGR2RGB) if mirrored.shape[2] == 3 else mirrored[:, :, :3]
             result = self._mp_hands.process(rgb)
@@ -576,7 +579,13 @@ class RecordingWindow(QDialog):
                 # thumbnails match the look of the preset gesture
                 # cards in the Control Guide.
                 if self._recorder.count in self._thumbnail_capture_indices:
-                    crop = self._crop_hand_thumbnail(display_bgr, lm, draw_bbox=True)
+                    crop = self._crop_hand_thumbnail(
+                        display_bgr,
+                        lm,
+                        draw_bbox=True,
+                        handedness=self._latest_handedness,
+                        gesture_name=self._name,
+                    )
                     if crop is not None:
                         self._candidate_thumbnails.append(
                             (int(self._recorder.count), crop)
@@ -711,6 +720,8 @@ class RecordingWindow(QDialog):
         frame_bgr: np.ndarray,
         landmarks: np.ndarray,
         draw_bbox: bool = False,
+        handedness: Optional[str] = None,
+        gesture_name: str = "",
     ) -> Optional[np.ndarray]:
         """Crop a hand-centered thumbnail from a BGR frame using the
         MediaPipe landmarks as a guide. Bbox is expanded slightly
@@ -722,7 +733,10 @@ class RecordingWindow(QDialog):
         When draw_bbox=True a green rectangle is drawn around the
         tight hand bounds inside the crop, so the thumbnail mimics
         the look of the preset Control Guide gesture cards (which
-        all show a green bbox over the live skeleton)."""
+        all show a green bbox over the live skeleton). If a
+        `handedness` and/or `gesture_name` is provided, a banner is
+        drawn above the bbox in the same `Right | gesture_name`
+        format the live app uses for preset gestures."""
         try:
             h, w = frame_bgr.shape[:2]
         except Exception:
@@ -745,8 +759,18 @@ class RecordingWindow(QDialog):
             return None
         half = side * 0.5
         x1 = int(round(max(0, cx - half)))
-        y1 = int(round(max(0, cy - half)))
         x2 = int(round(min(w, cx + half)))
+        # Reserve ~32 frame-pixels of headroom ABOVE the hand bbox so
+        # the "Left/Right | name" banner always fits cleanly above the
+        # green box (instead of being forced inside it on poses where
+        # the hand sits high in the frame). Extends y1 upward when the
+        # natural square-centered crop wouldn't already provide that
+        # gap; never shrinks below the natural top so the bbox itself
+        # is never clipped.
+        _BANNER_HEADROOM_PX = 36
+        natural_y1 = max(0, int(round(cy - half)))
+        banner_y1 = max(0, int(round(y_min - _BANNER_HEADROOM_PX)))
+        y1 = min(natural_y1, banner_y1)
         y2 = int(round(min(h, cy + half)))
         if x2 - x1 < 24 or y2 - y1 < 24:
             return None
@@ -760,14 +784,71 @@ class RecordingWindow(QDialog):
                 rect_x2 = int(round(min(crop.shape[1] - 1, x_max - x1 + pad_w)))
                 rect_y2 = int(round(min(crop.shape[0] - 1, y_max - y1 + pad_h)))
                 if rect_x2 > rect_x1 + 4 and rect_y2 > rect_y1 + 4:
+                    # Match the live app's per-hand bbox style:
+                    # active-green BGR (130, 220, 70) and a 3-pixel
+                    # border. The live view paints in widget-pixel
+                    # space at a generous size, so its 2-pixel
+                    # painter pen reads thicker than 2 pixels in our
+                    # cropped, smaller-resolution thumbnail. Bumping
+                    # to 3 px here matches the visual weight of the
+                    # preset Control Guide cards so custom-gesture
+                    # thumbnails look at home next to them.
+                    bbox_color = (130, 220, 70)  # BGR — matches gpu_video_widget active green
                     cv2.rectangle(
                         crop,
                         (rect_x1, rect_y1),
                         (rect_x2, rect_y2),
-                        (60, 220, 80),  # accent green in BGR
-                        thickness=2,
+                        bbox_color,
+                        thickness=1,
                         lineType=cv2.LINE_AA,
                     )
+
+                    # Banner: "Right | gesture_name" — mirrors the
+                    # live view's per-hand label for preset gestures.
+                    # Only the gesture name on its own when there's
+                    # no handedness vote yet (rare; usually MP gives
+                    # us a label every frame).
+                    banner_text = ""
+                    if handedness and gesture_name:
+                        banner_text = f"{handedness} | {gesture_name}"
+                    elif gesture_name:
+                        banner_text = gesture_name
+                    elif handedness:
+                        banner_text = handedness
+                    if banner_text:
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.5
+                        font_thickness = 1
+                        (text_w, text_h), _ = cv2.getTextSize(
+                            banner_text, font, font_scale, font_thickness
+                        )
+                        # No background or border — just the green
+                        # text drawn directly on the camera image.
+                        # Place above the bbox; the crop is sized
+                        # with explicit headroom so the banner fits
+                        # without ever overlapping the box. Falls
+                        # back to inside-the-box only on the rare
+                        # frame where the hand is right at the top
+                        # edge AND headroom couldn't be reserved.
+                        text_x = max(2, rect_x1)
+                        if rect_y1 - 6 >= text_h:
+                            text_y = rect_y1 - 6
+                        else:
+                            text_y = rect_y1 + text_h + 4
+                        # Thin black outline first, then green text
+                        # on top — keeps the label readable against
+                        # bright backgrounds without bulking up the
+                        # stroke.
+                        cv2.putText(
+                            crop, banner_text, (text_x, text_y),
+                            font, font_scale, (0, 0, 0),
+                            font_thickness + 1, cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            crop, banner_text, (text_x, text_y),
+                            font, font_scale, bbox_color,
+                            font_thickness, cv2.LINE_AA,
+                        )
             except Exception:
                 pass
         return crop

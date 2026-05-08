@@ -160,7 +160,7 @@ class MiniLiveViewer(QWidget):
 
         # Centered overlay label on top of the video panel — visible
         # only while the worker pipeline is frozen (custom-gesture
-        # recorder open). Stretched edge-to-edge with a transparent
+        # recorder or sandbox open). Stretched edge-to-edge with a transparent
         # background so the blurred frame underneath shows through;
         # the centered text + dark scrim sits in the middle.
         self._frozen_overlay = QLabel(self.video_label)
@@ -177,6 +177,7 @@ class MiniLiveViewer(QWidget):
             "}"
         )
         self._frozen_overlay.hide()
+        self._frozen_overlay.setText("Paused\nCustom gesture tool active...")
 
         self.gesture_chip = QLabel("Gesture: neutral")
         self.gesture_chip.setObjectName("miniChip")
