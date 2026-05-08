@@ -58,7 +58,7 @@ class MouseGestureTracker:
         vertical_margin: float = 0.12,
         cursor_reference_width: float = 0.40,
         cursor_reference_height: float = 0.34,
-        control_box_center_x: float = 0.62,
+        control_box_center_x: float = 0.67,
         control_box_center_y: float = 0.55,
         control_box_area: float = 0.18,
         control_box_aspect_power: float = 0.40,
@@ -72,13 +72,19 @@ class MouseGestureTracker:
         control_box_min_height: float = 0.32,
         control_box_max_height: float = 0.62,
         scroll_confirm_frames: int = 2,
-        scroll_hold_seconds: float = 0.28,
-        scroll_step_distance: float = 0.065,
-        scroll_deadzone: float = 0.018,
+        # Tightened scroll feel: shorter hold to enter scroll mode,
+        # smaller step distance so each unit of hand movement scrolls
+        # more, and a higher per-update step cap so big sweeps land
+        # in fewer frames. Previous values (0.28 hold, 0.065 step,
+        # cap 5) made scrolling feel sluggish — the user reported
+        # "make it scroll more per movement".
+        scroll_hold_seconds: float = 0.20,
+        scroll_step_distance: float = 0.034,
+        scroll_deadzone: float = 0.014,
         scroll_tip_blend: float = 0.42,
         scroll_idle_decay: float = 0.72,
         scroll_reverse_deadband: float = 1.10,
-        scroll_max_steps_per_update: int = 5,
+        scroll_max_steps_per_update: int = 12,
         pose_grace_seconds: float = 0.22,
         no_hand_grace_seconds: float = 0.18,
     ) -> None:
@@ -188,6 +194,16 @@ class MouseGestureTracker:
         self._scroll_candidate_since = 0.0
         self._scroll_pose_grace_until = 0.0
         self._scroll_last_y: float | None = None
+        # Anchor-velocity scroll state: the Y at which the user
+        # entered scroll mode acts as a "neutral" point. Distance
+        # above the anchor produces an upward scroll RATE; distance
+        # below produces a downward rate. Bigger offset = faster.
+        # _scroll_anchor_y is the captured pose-start position;
+        # _scroll_last_emit_time tracks the last update for dt-based
+        # accumulation. _scroll_residual carries fractional steps
+        # over between frames.
+        self._scroll_anchor_y: float | None = None
+        self._scroll_last_emit_time: float | None = None
         self._scroll_residual = 0.0
         self._scroll_velocity_ema = 0.0
         self._scroll_last_direction = 0
@@ -260,7 +276,7 @@ class MouseGestureTracker:
         if self._scrolling:
             if scroll_pose_active:
                 self._scroll_pose_grace_until = now + self.pose_grace_seconds
-                scroll_steps = self._update_scroll(hand_reading)
+                scroll_steps = self._update_scroll(hand_reading, now)
             elif now >= self._scroll_pose_grace_until:
                 self._stop_scrolling()
             if self._scrolling:
@@ -286,7 +302,14 @@ class MouseGestureTracker:
                 and (now - self._scroll_candidate_since) >= self.scroll_hold_seconds
             ):
                 self._scrolling = True
-                self._scroll_last_y = self._scroll_control_y(hand_reading)
+                # Capture the Y at pose-confirmation as the neutral
+                # anchor. From here, hand-above = scroll up, hand-
+                # below = scroll down, with rate proportional to
+                # distance from the anchor (anchor-velocity model).
+                anchor_y = self._scroll_control_y(hand_reading)
+                self._scroll_anchor_y = anchor_y
+                self._scroll_last_y = anchor_y
+                self._scroll_last_emit_time = now
                 self._scroll_residual = 0.0
                 self._scroll_velocity_ema = 0.0
                 self._scroll_last_direction = 0
@@ -462,46 +485,99 @@ class MouseGestureTracker:
         self._scroll_candidate_since = 0.0
         self._scroll_pose_grace_until = 0.0
         self._scroll_last_y = None
+        self._scroll_anchor_y = None
+        self._scroll_last_emit_time = None
         self._scroll_residual = 0.0
         self._scroll_velocity_ema = 0.0
         self._scroll_last_direction = 0
 
-    def _update_scroll(self, hand_reading) -> int:
+    # Anchor-velocity scroll tunables. Offset is "anchor_y -
+    # current_y", measured in normalized frame coords (0..1). The
+    # camera frame Y axis runs top-to-bottom, so a hand moving UP
+    # in the camera view produces a POSITIVE offset → scroll up.
+    #
+    # Curve choices:
+    #   deadzone = 0.025   small jitter near the anchor doesn't scroll
+    #   full_offset = 0.18 ~18% of frame from anchor = max rate
+    #   rate range 4..40 steps/sec gives a clearly-paced slow start
+    #     (just over deadzone) up to a fast page-flip rate at full
+    #     offset. Page lines per Windows wheel notch are 3 by default
+    #     so 40 steps/sec ≈ 120 lines/sec at the extreme — fast but
+    #     not jarring.
+    #   curve = 1.3 is slightly super-linear: progress 50% → rate
+    #     ~17, progress 100% → rate 40. Feels like "the more I lean,
+    #     the faster" without going too aggressive too quickly.
+    _SCROLL_ANCHOR_DEADZONE = 0.025
+    _SCROLL_ANCHOR_FULL_OFFSET = 0.18
+    _SCROLL_RATE_MIN = 4.0
+    _SCROLL_RATE_MAX = 40.0
+    _SCROLL_RATE_CURVE = 1.3
+
+    def _update_scroll(self, hand_reading, now: float) -> int:
+        """Anchor-velocity scroll: the Y captured at scroll-pose
+        confirmation acts as a neutral position. Hand above anchor →
+        scroll up at a rate proportional to the offset; hand below →
+        scroll down. Bigger offset → faster, with a slow-start curve
+        so small movements scroll gently and big movements ramp up.
+
+        Replaces the previous delta-based model (which scrolled by
+        the per-frame change in hand Y) — that model required the
+        user to keep moving their hand to keep scrolling. The new
+        rate-based model is what the user asked for: hold the hand
+        offset above/below the anchor and the page scrolls
+        continuously, faster when held further away.
+        """
         current_y = self._scroll_control_y(hand_reading)
-        if self._scroll_last_y is None:
-            self._scroll_last_y = current_y
+        if self._scroll_anchor_y is None or self._scroll_last_emit_time is None:
+            # Mode just started this frame and the start path
+            # already initialized the anchor for the next call —
+            # nothing to do this tick.
+            self._scroll_anchor_y = current_y
+            self._scroll_last_emit_time = now
             return 0
 
-        delta = self._scroll_last_y - current_y
-        self._scroll_last_y = current_y
-        quiet_threshold = self.scroll_deadzone * 0.55
-        if abs(delta) <= quiet_threshold:
-            self._scroll_velocity_ema *= self.scroll_idle_decay
+        # Time delta since the last scroll-rate evaluation. Clamp to
+        # avoid pathological catch-up if a frame stalls (e.g. window
+        # was hidden), which would otherwise emit a huge step burst.
+        dt = max(0.0, float(now) - float(self._scroll_last_emit_time))
+        dt = min(dt, 0.10)
+        self._scroll_last_emit_time = now
+
+        # Camera Y increases downward, so anchor_y - current_y is
+        # POSITIVE when the hand is ABOVE the anchor (= scroll up).
+        offset = float(self._scroll_anchor_y) - current_y
+        magnitude = abs(offset)
+
+        # Deadzone: small jitter near the anchor doesn't scroll.
+        if magnitude <= self._SCROLL_ANCHOR_DEADZONE:
+            # Bleed off any leftover fractional residual so the next
+            # move-out doesn't fire a stale step from earlier hold.
             if abs(self._scroll_residual) < 0.2:
+                self._scroll_residual = 0.0
+            else:
                 self._scroll_residual *= 0.5
+            self._scroll_last_direction = 0
             return 0
 
-        self._scroll_velocity_ema = 0.42 * delta + 0.58 * self._scroll_velocity_ema
-        base_units = delta / max(self.scroll_step_distance, 1e-6)
-        speed_gain = 1.0 + min(
-            1.6,
-            abs(self._scroll_velocity_ema) / max(self.scroll_step_distance * 0.85, 1e-6),
-        )
-        distance_gain = 1.0 + min(
-            1.2,
-            max(0.0, abs(delta) - self.scroll_deadzone) / max(self.scroll_step_distance * 1.6, 1e-6),
-        )
-        units = base_units * max(1.0, 0.55 * speed_gain + 0.45 * distance_gain)
-        direction = 1 if units > 0.0 else -1
+        # Map (deadzone..full_offset) → (0..1) progress, then a
+        # gentle exponent gives the slow-start ramp the user asked
+        # for ("slowly starts scrolling … the more they move … the
+        # faster"). Beyond full_offset, progress saturates at 1.
+        usable = max(1e-6, self._SCROLL_ANCHOR_FULL_OFFSET - self._SCROLL_ANCHOR_DEADZONE)
+        progress = clamp01((magnitude - self._SCROLL_ANCHOR_DEADZONE) / usable)
+        ramp = progress ** self._SCROLL_RATE_CURVE
+        rate = self._SCROLL_RATE_MIN + (self._SCROLL_RATE_MAX - self._SCROLL_RATE_MIN) * ramp
+        signed_rate = rate if offset > 0 else -rate
+
+        # Reset residual on a clean direction reversal so the new
+        # direction starts from "no built-up debt" rather than
+        # immediately emitting an extra step.
+        direction = 1 if signed_rate > 0 else -1
         if self._scroll_last_direction and direction != self._scroll_last_direction:
-            if abs(units) < self.scroll_reverse_deadband:
-                self._scroll_residual = 0.0
-                self._scroll_velocity_ema *= 0.35
-                self._scroll_last_direction = direction
-                return 0
-            self._scroll_residual *= 0.25
+            self._scroll_residual = 0.0
         self._scroll_last_direction = direction
-        self._scroll_residual += units
+
+        self._scroll_residual += signed_rate * dt
         steps = int(math.trunc(self._scroll_residual))
         if steps == 0:
             return 0
@@ -780,19 +856,77 @@ class MouseGestureTracker:
         return self._scroll_pose_ready_from_hand(hand_reading) or self._two_finger_scroll_pose_ready_from_hand(hand_reading)
 
     def _two_finger_scroll_pose_ready_from_hand(self, hand_reading) -> bool:
+        """Two-finger scroll pose: index + middle extended and
+        TOUCHING (closed peace sign), ring + pinky curled in.
+
+        The previous version required `_primary_open` for both index
+        AND middle (strict bend angles + palm distance) AND
+        `_scroll_folded` for ring AND pinky (must be partially-curled
+        with curl >= 0.42). In practice, holding a closed peace sign
+        relaxes the proximal joints just enough that a casual user
+        rarely hits all four thresholds simultaneously — the user
+        reported the gesture "doesn't work". Here we relax all four
+        gates and add a geometric landmark-distance fallback so the
+        pose triggers reliably without requiring the user to
+        hyper-extend their fingers.
+        """
         fingers = hand_reading.fingers
         index_middle = hand_reading.spreads["index_middle"]
-        return (
-            self._primary_open(fingers["index"])
-            and self._primary_open(fingers["middle"])
-            and self._scroll_folded(fingers["ring"])
-            and self._scroll_folded(fingers["pinky"])
-            and (
-                index_middle.state == "together"
-                or index_middle.distance <= 0.30
-                or index_middle.together_strength >= 0.22
-            )
-        )
+
+        # Index + middle: looser "extended" check. Use the standard
+        # motion-ready relaxation, OR accept any non-fully-curled
+        # state with reasonable openness. This catches the natural
+        # peace-sign-closed pose where the joints are slightly bent.
+        def _two_up(finger) -> bool:
+            if self._motion_primary_ready(finger):
+                return True
+            if finger.state in {"fully_open", "mostly_open"}:
+                return True
+            if finger.state == "partially_curled" and finger.openness >= 0.50 and finger.curl <= 0.55:
+                return True
+            return False
+
+        # Ring + pinky: looser "not extended" check. Anything that
+        # ISN'T clearly open passes. Most users naturally curl these
+        # when holding a peace sign without forcing them into a
+        # tight fist.
+        def _two_down(finger) -> bool:
+            if finger.state in {"partially_curled", "mostly_curled", "closed"}:
+                return True
+            if finger.state == "mostly_open" and finger.curl >= 0.30:
+                return True
+            return finger.openness <= 0.55
+
+        if not (_two_up(fingers["index"]) and _two_up(fingers["middle"])):
+            return False
+        if not (_two_down(fingers["ring"]) and _two_down(fingers["pinky"])):
+            return False
+
+        # "Together" check: rely on the spread descriptor, but also
+        # accept a direct landmark-distance fallback so the pose
+        # registers even if the spread classifier hasn't latched
+        # onto "together" yet.
+        if index_middle.state == "together":
+            return True
+        if index_middle.distance <= 0.42:
+            return True
+        if index_middle.together_strength >= 0.15:
+            return True
+        try:
+            lm = hand_reading.landmarks
+            if lm is not None and len(lm) > 12:
+                ix, iy = float(lm[8][0]), float(lm[8][1])
+                mx, my = float(lm[12][0]), float(lm[12][1])
+                tip_dist = math.hypot(ix - mx, iy - my)
+                hand_size = self._hand_size(lm)
+                # Tip-to-tip distance under ~half a hand-size = the
+                # tips are visibly touching. Same scale-invariance
+                # reasoning as the pinch detection.
+                if tip_dist <= 0.55 * hand_size:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _motion_pose_ready(
         self,

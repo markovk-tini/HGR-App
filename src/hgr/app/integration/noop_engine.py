@@ -4571,6 +4571,27 @@ class GestureWorker(QObject):
         # execution, which is what keeps the live view smooth.
 
     def _handle_volume_control(self, result, now: float, *, hand_handedness: str | None) -> None:
+        # Tutorial isolation: volume + mute go through the
+        # volume_tracker pipeline, NOT _dispatch_action — so the
+        # tutorial whitelist there doesn't catch them. Reset the
+        # tracker and bail when the tutorial is active so the
+        # user's gesture can't accidentally crank the system
+        # volume or toggle mute while they're learning a different
+        # gesture. Resumes normally as soon as the tutorial
+        # session ends.
+        if self._tutorial_mode_enabled:
+            try:
+                self.volume_tracker.reset()
+            except Exception:
+                pass
+            self._volume_mode_active = False
+            self._volume_status_text = "tutorial"
+            self._volume_overlay_visible = False
+            self._volume_dual_active = False
+            self._volume_init_palm_x = None
+            self._update_volume_overlay()
+            return
+
         if not self.volume_controller.available:
             self._volume_message = self.volume_controller.message
             self._volume_mode_active = False

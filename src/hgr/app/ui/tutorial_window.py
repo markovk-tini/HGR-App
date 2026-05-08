@@ -1706,7 +1706,7 @@ class TutorialWindow(QDialog):
                 "\u2022 Left-click \u2014 RIGHT hand: PINCH thumb tip to index tip, then release. Hold the pinch to click-and-drag.\n"
                 "\u2022 Right-click \u2014 RIGHT hand: PINCH thumb tip to middle tip, then release.\n"
                 "\u2022 Keep the other 3 fingers relaxed (open or partial curl) \u2014 a fist won\u2019t register as a pinch.\n"
-                "\u2022 Scroll \u2014 RIGHT hand: index + middle extended and TOUCHING together (ring + pinky curled). Hold briefly, then move hand UP to scroll up, DOWN to scroll down.\n\n"
+                "\u2022 Scroll \u2014 RIGHT hand: index + middle extended and TOUCHING together (ring + pinky curled). Hold briefly to set a NEUTRAL anchor at your current hand height; then lift up to scroll up (further = faster) or drop down to scroll down (further = faster). Return near the anchor to slow and stop.\n\n"
                 "To complete: turn on, click every tutorial target, turn off."
             ),
             "voice_command": (
@@ -2434,12 +2434,17 @@ class TutorialWindow(QDialog):
                                     fallback_scale=0.96, now=now)
         elif step_key == "mouse_mode":
             # Top-right helper inset:
-            #   Mouse mode OFF → static "Left Three.png" pose so the
-            #     user knows the activation gesture before they do
-            #     anything.
-            #   Mouse mode ON  → looped "Mouse Clicks.mp4" demo so
-            #     they see the new pinch click mechanic in action
-            #     while they practice it.
+            #   Mouse mode OFF                    → small "Left Three.png"
+            #     pose so the user knows the activation gesture.
+            #   Mouse mode ON, targets remaining  → looped "Mouse Clicks.mp4"
+            #     demo so they see the pinch click mechanic to mirror.
+            #   Mouse mode ON, all targets done   → small "Left Three.png"
+            #     pose again, signalling that the next thing to do is
+            #     toggle mouse mode off (same gesture as turning it on).
+            # The Left Three image is rendered at a smaller scale than
+            # the Mouse Clicks demo so it doesn't dominate the live view
+            # (it's just a static reminder, not something the user has
+            # to mirror frame-by-frame).
             # Plus, when mouse mode is ON, we ALSO render the SAME
             # mouse overlays the live view uses so the tutorial preview
             # matches the real experience.
@@ -2456,22 +2461,32 @@ class TutorialWindow(QDialog):
                 } if self._mouse_tracker.mode_enabled else None
             )
             mode_on = mouse_state is not None and bool(mouse_state.get("mode_enabled"))
-            if mode_on:
-                # Mouse mode ON: play the click-demo clip in the
-                # corner inset so the user can mirror the pinch
-                # mechanic. Border colour stays the standard accent.
+            try:
+                targets_done = bool(self.mouse_widget.completed)
+            except Exception:
+                targets_done = False
+            if mode_on and not targets_done:
+                # Active practice phase: play the pinch-click demo so
+                # the user can mirror the mechanic. Full-size inset
+                # because they're actively learning the motion.
                 self._draw_static_demo(frame, None, "mouse_clicks",
                                         fallback_scale=1.00, now=now)
             else:
-                # Mouse mode OFF: show the static activation pose so
-                # the user knows what gesture to hold first.
+                # Either pre-activation (mode_off) or post-completion
+                # (targets cleared, time to toggle off). Both states
+                # want the SAME hint — the Left Three pose. Smaller
+                # inset because it's a static reminder, not a motion
+                # to mirror.
                 self._draw_static_demo(frame, None, "left_three",
-                                        fallback_scale=1.00, now=now)
+                                        fallback_scale=0.62, now=now)
             if mouse_state is not None and mouse_state.get("camera_control_bounds") is not None:
                 self._draw_tutorial_mouse_overlays(frame, mouse_state)
         elif step_key == "voice_command":
+            # Smaller inset for the Left Hand One pose: it's a static
+            # reminder, not an animated demo, so it doesn't need to
+            # dominate the corner.
             self._draw_static_demo(frame, None, "left_one",
-                                    fallback_scale=1.00, now=now)
+                                    fallback_scale=0.62, now=now)
             self._draw_top_label(frame, "Voice", accent)
     def _drain_voice_queue(self) -> None:
         while True:
@@ -2802,6 +2817,14 @@ class TutorialWindow(QDialog):
                 self._play_pause_ready_for_next = False
                 self._trigger_encouragement(now)
                 visual_ready = True
+                # Toggling Spotify playback can pop the Spotify
+                # desktop client to the foreground (its window
+                # manager reacts to play/pause Web API commands by
+                # raising the main window in some Spotify versions).
+                # Kick the refocus guard so the tutorial stays in
+                # front for the next ~3 s — same belt-and-suspenders
+                # we already use for the spotify_open step.
+                self._start_tutorial_refocus_guard()
             self._set_step_progress(self._fist_progress_html())
             if self._spotify_toggle_count >= 2:
                 self._complete_step("Completed! Swipe right to move on!")
@@ -2994,6 +3017,10 @@ class TutorialWindow(QDialog):
                 if self._spotify_toggle_count >= 2:
                     self._complete_step("Completed! Swipe right to move on!")
                 visual_ready = True
+                # Mirrors the engine-driven path above (line ~2786):
+                # Spotify can pop to the foreground on play/pause Web
+                # API commands. Snap focus back to the tutorial.
+                self._start_tutorial_refocus_guard()
             return visual_ready
 
         if step.key == "gesture_wheel":

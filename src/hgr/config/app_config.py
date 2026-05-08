@@ -148,7 +148,7 @@ class AppConfig:
     # because mouse mode runs off the right hand (left hand is the
     # toggle pose), so a center-right placement matches where the
     # right hand naturally rests in the mirrored camera view.
-    mouse_control_box_center_x: float = 0.62
+    mouse_control_box_center_x: float = 0.67
     mouse_control_box_center_y: float = 0.55
     mouse_control_box_area: float = 0.18
     mouse_control_box_aspect_power: float = 0.40
@@ -298,6 +298,8 @@ def load_config() -> AppConfig:
         if abs(float(values.get("mouse_control_box_center_x", 0.0)) - 0.44) < 1e-6:
             values["mouse_control_box_center_x"] = DEFAULT_CONFIG.mouse_control_box_center_x
         if abs(float(values.get("mouse_control_box_center_x", 0.0)) - 0.50) < 1e-6:
+            values["mouse_control_box_center_x"] = DEFAULT_CONFIG.mouse_control_box_center_x
+        if abs(float(values.get("mouse_control_box_center_x", 0.0)) - 0.62) < 1e-6:
             values["mouse_control_box_center_x"] = DEFAULT_CONFIG.mouse_control_box_center_x
         if abs(float(values.get("mouse_control_box_center_y", 0.0)) - 0.56) < 1e-6:
             values["mouse_control_box_center_y"] = DEFAULT_CONFIG.mouse_control_box_center_y
