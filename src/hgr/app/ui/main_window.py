@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import csv
+import math
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -33,11 +35,16 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
+    QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
     QSizePolicy,
@@ -93,6 +100,53 @@ SECTION_SAVE_LOCATIONS = 6
 SECTION_COLORS = 7
 SECTION_TUTORIAL = 8
 SECTION_UPDATES = 9
+
+# Ordered sequence the guided walkthrough visits. Stops at Save
+# Locations and then routes to the live gesture tutorial.
+WALKTHROUGH_PAGES = (
+    SECTION_GESTURES,
+    SECTION_CUSTOM_GESTURE,
+    SECTION_GESTURE_BINDS,
+    SECTION_CAMERA,
+    SECTION_MICROPHONE,
+    SECTION_SAVE_LOCATIONS,
+)
+
+# Pointing-phase hint shown above the settings page while the
+# walkthrough is waiting for the user to click the next tab.
+WALKTHROUGH_POINTING_HINTS = {
+    SECTION_GESTURES:
+        "Let's get started by clicking on the Control Guide tab!",
+    SECTION_CUSTOM_GESTURE:
+        "Ok, let's move on to Custom Gestures!",
+    SECTION_GESTURE_BINDS:
+        "Now let's check out Gesture Binds!",
+    SECTION_CAMERA:
+        "Next up — Camera settings!",
+    SECTION_MICROPHONE:
+        "Almost there — let's set up your Microphone!",
+    SECTION_SAVE_LOCATIONS:
+        "Last one — Save Locations!",
+}
+
+# On-page descriptive hint shown after the user lands on the target
+# tab. Three seconds later the Next button (or "Gesture Tutorial"
+# button on the final step) fades in.
+WALKTHROUGH_PAGE_HINTS = {
+    SECTION_GESTURES:
+        "Use this page to view all preset gestures and example voice commands.",
+    SECTION_CUSTOM_GESTURE:
+        "Record your own hand poses here and bind them to keys, hotkeys, or commands.",
+    SECTION_GESTURE_BINDS:
+        "Reassign which gestures trigger which built-in actions.",
+    SECTION_CAMERA:
+        "Pick which camera Touchless uses to see your gestures!",
+    SECTION_MICROPHONE:
+        "Pick which microphone Touchless uses to listen for your voice commands!",
+    SECTION_SAVE_LOCATIONS:
+        "Choose where Touchless saves your drawings, screenshots, recordings, and clips! "
+        "When ready, let's try doing some Touchless controls!",
+}
 
 
 
@@ -228,6 +282,7 @@ class TitleBar(QFrame):
         self._hover_timer.setInterval(30)
         self._hover_timer.timeout.connect(self._sync_control_hover_state)
         self._hover_timer.start()
+        self._walkthrough_active = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -253,6 +308,30 @@ class TitleBar(QFrame):
         )
         self.version_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.version_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addStretch(1)
+
+        # "Tutorial" indicator label, centred horizontally between the
+        # version tag and the window controls. Visible only while the
+        # walkthrough is active — set_walkthrough_active(True) shows
+        # it. Mouse-transparent so the user can still drag the window
+        # by clicking through the label.
+        self.tutorial_indicator_label = QLabel("Tutorial", self)
+        self.tutorial_indicator_label.setObjectName("titleBarTutorialIndicator")
+        self.tutorial_indicator_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.tutorial_indicator_label.setStyleSheet(
+            "QLabel#titleBarTutorialIndicator {"
+            "  color: #1DE9B6;"
+            "  font-size: 13px;"
+            "  font-weight: 800;"
+            "  letter-spacing: 1px;"
+            "  text-transform: uppercase;"
+            "  background: transparent;"
+            "  padding: 0 12px;"
+            "}"
+        )
+        self.tutorial_indicator_label.setAlignment(Qt.AlignCenter)
+        self.tutorial_indicator_label.setVisible(False)
+        layout.addWidget(self.tutorial_indicator_label, 0, Qt.AlignCenter)
         layout.addStretch(1)
 
         controls = QWidget(self)
@@ -286,6 +365,68 @@ class TitleBar(QFrame):
         self.max_button.update()
         self.close_button.update()
         QTimer.singleShot(0, self._sync_control_hover_state)
+
+    def set_walkthrough_active(self, active: bool) -> None:
+        """Toggle the centred 'Tutorial' indicator + the title-bar
+        edge glow that completes the window-perimeter halo."""
+        active = bool(active)
+        self.tutorial_indicator_label.setVisible(active)
+        if self._walkthrough_active != active:
+            self._walkthrough_active = active
+            self.update()  # repaint to draw / drop the glow strips
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        if not self._walkthrough_active:
+            return
+        # Walk-through edge glow on the title bar — top, left and
+        # right strips. Combined with the body-area glow MainWindow
+        # paints below the title bar, this completes a halo around
+        # the entire app window perimeter (the user asked for "a
+        # glow around the whole app window in walkthrough").
+        try:
+            from PySide6.QtGui import QLinearGradient
+        except Exception:
+            return
+        try:
+            accent = QColor(self.parent_window.config.accent_color or "#1DE9B6")
+        except Exception:
+            accent = QColor("#1DE9B6")
+        if not accent.isValid():
+            accent = QColor("#1DE9B6")
+        rect = self.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        side_depth = 18
+        top_depth = min(14, rect.height())
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.setPen(Qt.NoPen)
+            start = QColor(accent)
+            start.setAlpha(70)
+            end = QColor(accent)
+            end.setAlpha(0)
+            # Top strip
+            grad = QLinearGradient(0, 0, 0, top_depth)
+            grad.setColorAt(0.0, start)
+            grad.setColorAt(1.0, end)
+            painter.setBrush(grad)
+            painter.drawRect(0, 0, rect.width(), top_depth)
+            # Left strip
+            grad = QLinearGradient(0, 0, side_depth, 0)
+            grad.setColorAt(0.0, start)
+            grad.setColorAt(1.0, end)
+            painter.setBrush(grad)
+            painter.drawRect(0, 0, side_depth, rect.height())
+            # Right strip
+            grad = QLinearGradient(rect.width(), 0, rect.width() - side_depth, 0)
+            grad.setColorAt(0.0, start)
+            grad.setColorAt(1.0, end)
+            painter.setBrush(grad)
+            painter.drawRect(rect.width() - side_depth, 0, side_depth, rect.height())
+        finally:
+            painter.end()
 
     def _sync_control_hover_state(self) -> None:
         cursor_pos = QCursor.pos()
@@ -347,6 +488,132 @@ class SettingsNavButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("settingsNavButton")
         self.clicked.connect(lambda: self.parent_window.show_settings_section(self.page_index))
+
+
+class _WalkthroughEdgeGlowOverlay(QWidget):
+    """Mouse-transparent overlay painted on top of the central
+    widget's children so the walkthrough edge halo can sit OVER the
+    surface fills of the title bar and page stack instead of being
+    hidden behind them."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self._accent = QColor("#1DE9B6")
+
+    def set_accent(self, color) -> None:
+        try:
+            c = QColor(color)
+            if c.isValid():
+                self._accent = c
+        except Exception:
+            pass
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        try:
+            from PySide6.QtGui import QLinearGradient
+        except Exception:
+            return
+        rect = self.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.setPen(Qt.NoPen)
+            depth = max(20, min(56, int(min(rect.width(), rect.height()) * 0.045)))
+            for side in ("top", "bottom", "left", "right"):
+                if side == "top":
+                    grad = QLinearGradient(0, 0, 0, depth)
+                    band = QRect(0, 0, rect.width(), depth)
+                elif side == "bottom":
+                    grad = QLinearGradient(0, rect.height(), 0, rect.height() - depth)
+                    band = QRect(0, rect.height() - depth, rect.width(), depth)
+                elif side == "left":
+                    grad = QLinearGradient(0, 0, depth, 0)
+                    band = QRect(0, 0, depth, rect.height())
+                else:  # right
+                    grad = QLinearGradient(rect.width(), 0, rect.width() - depth, 0)
+                    band = QRect(rect.width() - depth, 0, depth, rect.height())
+                start = QColor(self._accent)
+                start.setAlpha(95)
+                end = QColor(self._accent)
+                end.setAlpha(0)
+                grad.setColorAt(0.0, start)
+                grad.setColorAt(1.0, end)
+                painter.setBrush(grad)
+                painter.drawRect(band)
+        finally:
+            painter.end()
+
+
+class _WalkthroughTargetGlow(QWidget):
+    """Soft accent-color halo painted around the currently-targeted
+    sidebar tab. Lives as a free-floating child of the settings page
+    (NOT the sidebar QFrame) so the halo can bleed past the sidebar's
+    left/right borders without being clipped. Mouse-transparent — the
+    target button still receives every click. Painted by stacking a
+    handful of progressively-fainter rounded rectangles outwards from
+    the target's bounding rect, which Qt has no built-in primitive
+    for but renders cheaply via repeated drawRoundedRect calls."""
+
+    _PADDING = 14  # px around the target on every side
+
+    def __init__(self, parent: QWidget, target_button, accent_color: str):
+        super().__init__(parent)
+        self._target = target_button
+        try:
+            self._accent = QColor(accent_color)
+        except Exception:
+            self._accent = QColor("#1DE9B6")
+        if not self._accent.isValid():
+            self._accent = QColor("#1DE9B6")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent;")
+
+    def update_position(self) -> None:
+        target = self._target
+        parent = self.parent()
+        if target is None or parent is None:
+            return
+        try:
+            target_size = target.size()
+            top_left_in_parent = target.mapTo(parent, QPoint(0, 0))
+            pad = self._PADDING
+            self.setGeometry(
+                top_left_in_parent.x() - pad,
+                top_left_in_parent.y() - pad,
+                target_size.width() + pad * 2,
+                target_size.height() + pad * 2,
+            )
+        except Exception:
+            pass
+
+    def paintEvent(self, event):  # noqa: N802 (Qt API)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            # Paint a series of concentric translucent rounded rects,
+            # each fainter than the last, to fake a soft outer glow
+            # without depending on a graphics-effect that would clip
+            # to the sidebar's bounds.
+            outer_rect = self.rect().adjusted(1, 1, -1, -1)
+            steps = 6
+            for i in range(steps, 0, -1):
+                inset = (steps - i) * 2
+                fill = QColor(self._accent)
+                fill.setAlpha(int(20 + (steps - i) * 18))
+                painter.setBrush(fill)
+                painter.drawRoundedRect(
+                    outer_rect.adjusted(inset, inset, -inset, -inset),
+                    18, 18,
+                )
+        finally:
+            painter.end()
 
 
 class ColorPickerButton(QPushButton):
@@ -586,6 +853,194 @@ class StartTutorialDialog(QDialog):
 
     def _choose_tutorial(self) -> None:
         self.choice = "tutorial"
+        self.accept()
+
+    def _choose_start(self) -> None:
+        self.choice = "start"
+        self.accept()
+
+
+class WalkthroughStartDialog(QDialog):
+    """Yes/No prompt fired when the user clicks START. Mirrors the
+    StartTutorialDialog look-and-feel (same dialog title, same
+    accent-button styling, same do-not-show checkbox) so the user
+    sees a single consistent first-run prompt family.
+
+    Outcomes:
+      - 'walkthrough' → enter the guided walkthrough state
+      - 'start'       → start the engine without the walkthrough
+      - 'cancel'      → user dismissed the prompt"""
+
+    def __init__(self, config: AppConfig, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.choice: Optional[str] = None
+        self.setModal(True)
+        self.setWindowTitle("Touchless")
+        from PySide6.QtWidgets import QApplication
+        app_icon = QApplication.windowIcon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+        self.setMinimumWidth(420)
+        self.setObjectName("startTutorialDialog")
+        self.setSizeGripEnabled(False)
+        self._build_ui()
+        self._apply_theme()
+
+    @property
+    def do_not_show_again(self) -> bool:
+        return self.do_not_show_checkbox.isChecked()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 14)
+        root.setSpacing(8)
+
+        title = QLabel("Would you like to start the Touchless walk-through?")
+        title.setObjectName("startDialogTitle")
+        title.setWordWrap(True)
+        root.addWidget(title)
+
+        subtitle = QLabel(
+            "Yes — walk through basics. No — start the app now."
+        )
+        subtitle.setObjectName("startDialogSubtitle")
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        self.do_not_show_checkbox = QCheckBox("Please don't show this message again")
+        self.do_not_show_checkbox.setObjectName("startDialogCheckbox")
+        root.addWidget(self.do_not_show_checkbox)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 4, 0, 0)
+        button_row.addStretch(1)
+
+        self.yes_button = QPushButton("Yes")
+        self.yes_button.setObjectName("startDialogPrimaryButton")
+        self.yes_button.clicked.connect(self._choose_walkthrough)
+        self.yes_button.setDefault(True)
+
+        self.no_button = QPushButton("No")
+        self.no_button.setObjectName("startDialogButton")
+        self.no_button.clicked.connect(self._choose_start)
+
+        button_row.addWidget(self.yes_button)
+        button_row.addWidget(self.no_button)
+        root.addLayout(button_row)
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(
+            f"""
+            QDialog#startTutorialDialog {{
+                background-color: {self.config.surface_color};
+                color: {self.config.text_color};
+                border: 1px solid rgba(29,233,182,0.30);
+            }}
+            QLabel#startDialogTitle {{
+                color: {self.config.accent_color};
+                font-size: 22px;
+                font-weight: 900;
+            }}
+            QLabel#startDialogSubtitle {{
+                color: {self.config.text_color};
+                font-size: 14px;
+            }}
+            QCheckBox#startDialogCheckbox {{
+                color: {self.config.text_color};
+                spacing: 10px;
+                font-size: 14px;
+            }}
+            QCheckBox#startDialogCheckbox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid rgba(255,255,255,0.35);
+                background: rgba(255,255,255,0.05);
+            }}
+            QCheckBox#startDialogCheckbox::indicator:checked {{
+                background: {self.config.accent_color};
+                border: 1px solid {self.config.accent_color};
+            }}
+            QPushButton#startDialogButton {{
+                background-color: {self.config.primary_color};
+                color: {self.config.text_color};
+                border: 1px solid rgba(29,233,182,0.35);
+                border-radius: 12px;
+                padding: 10px 18px;
+                min-width: 86px;
+                font-weight: 800;
+            }}
+            QPushButton#startDialogButton:hover {{
+                border: 1px solid {self.config.accent_color};
+            }}
+            QPushButton#startDialogButton:pressed {{
+                background-color: {self.config.accent_color};
+                color: #001B24;
+            }}
+            QPushButton#startDialogPrimaryButton {{
+                background-color: {self.config.accent_color};
+                color: #001B24;
+                border: 1px solid {self.config.accent_color};
+                border-radius: 12px;
+                padding: 10px 18px;
+                min-width: 86px;
+                font-weight: 900;
+            }}
+            QPushButton#startDialogPrimaryButton:hover {{
+                background-color: rgba(29,233,182,0.92);
+                border: 1px solid #6BFFE0;
+            }}
+            QPushButton#startDialogPrimaryButton:pressed {{
+                background-color: rgba(29,233,182,0.78);
+                color: #001B24;
+            }}
+            """
+        )
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API name)
+        super().showEvent(event)
+        try:
+            self._apply_dwm_caption_color()
+        except Exception:
+            pass
+
+    def _apply_dwm_caption_color(self) -> None:
+        # Mirror StartTutorialDialog so the OS title bar colour
+        # matches the Touchless theme instead of defaulting to the
+        # plain white Windows caption.
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return
+        hwnd = int(self.winId())
+        if not hwnd:
+            return
+        DWMWA_CAPTION_COLOR = 35
+        DWMWA_TEXT_COLOR = 36
+        caption = ctypes.c_uint32(0x00913D0B)
+        text = ctypes.c_uint32(0x00FFF6E5)
+        try:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint32(DWMWA_CAPTION_COLOR),
+                ctypes.byref(caption),
+                ctypes.sizeof(caption),
+            )
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint32(DWMWA_TEXT_COLOR),
+                ctypes.byref(text),
+                ctypes.sizeof(text),
+            )
+        except Exception:
+            pass
+
+    def _choose_walkthrough(self) -> None:
+        self.choice = "walkthrough"
         self.accept()
 
     def _choose_start(self) -> None:
@@ -972,6 +1427,7 @@ class GestureGuideCard(QFrame):
     ):
         super().__init__(parent)
         self.setObjectName("innerCard")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(16)
@@ -1035,6 +1491,7 @@ class VoiceCommandCard(QFrame):
     ):
         super().__init__(parent)
         self.setObjectName("innerCard")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(8)
@@ -1155,6 +1612,7 @@ class GestureGuideSection(QFrame):
 
         self.header_button = QPushButton(f"▶  {title}")
         self.header_button.setObjectName("gestureGuideSectionButton")
+        self.header_button.setProperty("settingsPanelButton", True)
         self.header_button.setCheckable(True)
         self.header_button.setChecked(False)
         self.header_button.clicked.connect(self._toggle_expanded)
@@ -2675,7 +3133,174 @@ class EraserOptionsDialog(_HandSelectorBase):
         self._thickness_value.setText(str(self._selected_thickness))
 
 
-class _RefreshingCameraCombo(QComboBox):
+class _DisplayOverrideCombo(QComboBox):
+    """QComboBox with an optional display-only text override."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._display_text_override = ""
+
+    def set_display_text_override(self, text: str) -> None:
+        self._display_text_override = str(text or "").strip()
+        self.update()
+
+    def clear_display_text_override(self) -> None:
+        self._display_text_override = ""
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if not self._display_text_override:
+            super().paintEvent(event)
+            return
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.currentText = self._display_text_override
+        painter.drawComplexControl(QStyle.CC_ComboBox, option)
+        painter.drawControl(QStyle.CE_ComboBoxLabel, option)
+
+
+class _CallbackLabel(QLabel):
+    """QLabel that forwards real text changes to a callback."""
+
+    def __init__(self, text: str = "", parent=None, on_text_changed=None) -> None:
+        self._on_text_changed = on_text_changed
+        self._suppress_callback = True
+        super().__init__(text, parent)
+        self._suppress_callback = False
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt API)
+        old_text = self.text()
+        super().setText(text)
+        if self._suppress_callback:
+            return
+        new_text = self.text()
+        callback = self._on_text_changed
+        if callback is not None and new_text != old_text:
+            try:
+                callback(new_text)
+            except Exception:
+                pass
+
+
+class _ExpandCollapseButton(QAbstractButton):
+    """Small icon button that draws expand/collapse arrows."""
+
+    def __init__(self, parent_window: "MainWindow"):
+        super().__init__(parent_window)
+        self.parent_window = parent_window
+        self._hovered = False
+        self._pressed = False
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(34, 24)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setMouseTracking(True)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hovered = False
+        self._pressed = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._pressed = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._pressed = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+    def _draw_arrow(self, painter: QPainter, start: QPointF, end: QPointF) -> None:
+        painter.drawLine(start, end)
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        length = math.hypot(dx, dy) or 1.0
+        ux = dx / length
+        uy = dy / length
+        head = 3.6
+        side = 1.9
+        left = QPointF(
+            end.x() - ux * head - uy * side,
+            end.y() - uy * head + ux * side,
+        )
+        right = QPointF(
+            end.x() - ux * head + uy * side,
+            end.y() - uy * head - ux * side,
+        )
+        painter.drawLine(end, left)
+        painter.drawLine(end, right)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        if self._pressed:
+            fill = QColor(29, 233, 182, 46)
+            border = QColor(29, 233, 182, 175)
+        elif self.isChecked():
+            fill = QColor(29, 233, 182, 34)
+            border = QColor(29, 233, 182, 150)
+        elif self._hovered:
+            fill = QColor(29, 233, 182, 24)
+            border = QColor(29, 233, 182, 110)
+        else:
+            fill = QColor(130, 187, 255, 18)
+            border = QColor(127, 127, 127, 86)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        painter.fillPath(path, fill)
+        pen = QPen(border)
+        pen.setWidthF(1.1)
+        painter.setPen(pen)
+        painter.drawPath(path)
+
+        icon_pen = QPen(QColor(self.parent_window.config.text_color))
+        icon_pen.setWidthF(1.55)
+        icon_pen.setCapStyle(Qt.RoundCap)
+        icon_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(icon_pen)
+
+        w = float(self.width())
+        h = float(self.height())
+        if self.isChecked():
+            self._draw_arrow(
+                painter,
+                QPointF(w * 0.80, h * 0.23),
+                QPointF(w * 0.60, h * 0.40),
+            )
+            self._draw_arrow(
+                painter,
+                QPointF(w * 0.20, h * 0.77),
+                QPointF(w * 0.40, h * 0.60),
+            )
+        else:
+            self._draw_arrow(
+                painter,
+                QPointF(w * 0.60, h * 0.40),
+                QPointF(w * 0.80, h * 0.23),
+            )
+            self._draw_arrow(
+                painter,
+                QPointF(w * 0.40, h * 0.60),
+                QPointF(w * 0.20, h * 0.77),
+            )
+
+
+class _RefreshingCameraCombo(_DisplayOverrideCombo):
     """QComboBox that emits `popup_about_to_show` right before its
     dropdown opens, so the camera list can refresh lazily without a
     separate "Search Devices" button."""
@@ -2688,6 +3313,304 @@ class _RefreshingCameraCombo(QComboBox):
         except Exception:
             pass
         super().showPopup()
+
+
+class _MouseControlMonitorPreview(QWidget):
+    """Mini visualization that mirrors the live camera-frame mouse-
+    box overlay (mouse_overlay.draw_mouse_control_box_overlay): an
+    outer red mouse-control rectangle holding a faithful proportional
+    layout of every connected monitor. Selected monitor renders in
+    accent green; other monitors render dim blue; "All Monitors"
+    shows every monitor highlighted equally. Aspect ratios and
+    relative positions match the actual virtual desktop so users see
+    the same spatial mapping they'll see in the live view.
+
+    Repaints on set_monitor_index() OR when the screen layout changes
+    (handled by an event filter on QGuiApplication's screen list —
+    cheap; the screen-list change signal fires only on plug/unplug).
+    """
+
+    def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._monitor_index: int | None = None
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_monitor_index(self, value) -> None:
+        self._monitor_index = value if isinstance(value, int) else None
+        self.update()
+
+    def _virtual_desktop_bounds(self):
+        """Compute the union QRect of every connected monitor, plus a
+        per-monitor list. Returns (union_rect_or_None, [QRect, ...]).
+        Mirrors what mouse_controller.virtual_bounds() returns at
+        runtime, but uses Qt instead of Win32 so the preview works
+        on dev machines without the full controller available."""
+        from PySide6.QtGui import QGuiApplication as _QGui
+        from PySide6.QtCore import QRect as _QR
+
+        screens = []
+        try:
+            screens = list(_QGui.screens() or [])
+        except Exception:
+            return None, []
+        if not screens:
+            return None, []
+        rects = []
+        for s in screens:
+            try:
+                rects.append(s.geometry())
+            except Exception:
+                continue
+        if not rects:
+            return None, []
+        left = min(r.left() for r in rects)
+        top = min(r.top() for r in rects)
+        right = max(r.right() for r in rects)
+        bottom = max(r.bottom() for r in rects)
+        return _QR(left, top, right - left + 1, bottom - top + 1), rects
+
+    def paintEvent(self, ev) -> None:  # noqa: N802 — Qt naming
+        from PySide6.QtGui import QPainter as _QP, QColor as _QC, QPen as _QPen, QBrush as _QBrush, QFont as _QFont
+        from PySide6.QtCore import QRect as _QRect, Qt as _Qt
+        painter = _QP(self)
+        painter.setRenderHint(_QP.Antialiasing)
+
+        # Outer "camera frame" — dark surface, matches the inner-card
+        # background so the preview reads as part of the panel.
+        outer_pad = 12
+        outer_rect = self.rect().adjusted(outer_pad, outer_pad, -outer_pad, -outer_pad)
+        painter.setBrush(_QBrush(_QC(self._config.surface_color or "#0F172A")))
+        painter.setPen(_QPen(_QC(200, 220, 255, 60), 1))
+        painter.drawRoundedRect(outer_rect, 10, 10)
+
+        # Outer red rectangle ("Mouse control area" — same color +
+        # placement as draw_mouse_control_box_overlay). Sized to fill
+        # the outer card with a generous inner margin, so the inner
+        # monitor map can use the bulk of the box.
+        red = _QC("#FF5252")
+        red_fill = _QC(red.red(), red.green(), red.blue(), 18)
+        red_border = _QC(red.red(), red.green(), red.blue(), 230)
+        margin = 22
+        box = outer_rect.adjusted(margin, margin, -margin, -margin)
+        painter.setBrush(_QBrush(red_fill))
+        painter.setPen(_QPen(red_border, 2))
+        painter.drawRoundedRect(box, 6, 6)
+        painter.setPen(_QPen(red_border))
+        painter.setFont(_QFont(self.font().family(), 9, _QFont.Bold))
+        painter.drawText(box.left() + 8, box.top() - 4, "Mouse control area")
+
+        # Monitor layout inside the red box. Two modes:
+        #
+        #   "All Monitors"  -> show the full virtual-desktop split,
+        #                      every monitor proportional, all
+        #                      equally highlighted (the cursor can
+        #                      reach any of them).
+        #   Single monitor  -> show ONLY that monitor filling the
+        #                      box, since mouse mode is constrained
+        #                      to it. The user reported the smaller-
+        #                      sub-region rendering felt confusing
+        #                      ("if I pick monitor 1 the whole red
+        #                      box should BE monitor 1") — this
+        #                      matches the cursor-mapping behavior
+        #                      where the user's hand reach now maps
+        #                      across the entire chosen display.
+        union, rects = self._virtual_desktop_bounds()
+        if union is None or not rects or union.width() <= 0 or union.height() <= 0:
+            painter.setPen(_QPen(_QC(200, 220, 255, 180)))
+            painter.drawText(box, int(_Qt.AlignCenter), "(no monitors detected)")
+            return
+
+        accent_str = self._config.accent_color or "#1DE9B6"
+        accent = _QC(accent_str)
+        if not accent.isValid():
+            accent = _QC("#1DE9B6")
+        accent_fill = _QC(accent.red(), accent.green(), accent.blue(), 180)
+        dim_fill = _QC(39, 72, 108, 220)
+        outline = _QC(228, 236, 243, 255)
+        inner_margin = 14
+
+        if isinstance(self._monitor_index, int) and 0 <= self._monitor_index < len(rects):
+            # Single-monitor mode: that monitor IS the whole map.
+            chosen = rects[self._monitor_index]
+            avail_w = max(40, box.width() - inner_margin * 2)
+            avail_h = max(30, box.height() - inner_margin * 2)
+            mon_w = max(1, chosen.width())
+            mon_h = max(1, chosen.height())
+            scale = min(avail_w / float(mon_w), avail_h / float(mon_h))
+            map_w = int(round(mon_w * scale))
+            map_h = int(round(mon_h * scale))
+            map_x = box.left() + (box.width() - map_w) // 2
+            map_y = box.top() + (box.height() - map_h) // 2
+            mon_rect = _QRect(map_x, map_y, map_w, map_h)
+            painter.setBrush(_QBrush(accent_fill))
+            painter.setPen(_QPen(outline, 1))
+            painter.drawRect(mon_rect)
+            painter.setPen(_QPen(_QC(245, 250, 252, 240)))
+            painter.setFont(_QFont(self.font().family(), 11, _QFont.Bold))
+            painter.drawText(mon_rect, int(_Qt.AlignCenter), f"Monitor {self._monitor_index + 1}")
+            return
+
+        # All-Monitors mode: render the union with each monitor
+        # proportionally placed.
+        avail_w = max(40, box.width() - inner_margin * 2)
+        avail_h = max(30, box.height() - inner_margin * 2)
+        scale = min(avail_w / float(union.width()), avail_h / float(union.height()))
+        map_w = int(round(union.width() * scale))
+        map_h = int(round(union.height() * scale))
+        map_x = box.left() + (box.width() - map_w) // 2
+        map_y = box.top() + (box.height() - map_h) // 2
+
+        painter.setBrush(_QBrush(_QC(8, 14, 26, 255)))
+        painter.setPen(_QPen(_QC(92, 124, 154, 200), 1))
+        painter.drawRect(_QRect(map_x, map_y, map_w, map_h))
+
+        for idx, geo in enumerate(rects):
+            sx1 = map_x + int(round((geo.left() - union.left()) * scale))
+            sy1 = map_y + int(round((geo.top() - union.top()) * scale))
+            sx2 = map_x + int(round((geo.right() - union.left() + 1) * scale))
+            sy2 = map_y + int(round((geo.bottom() - union.top() + 1) * scale))
+            mon_rect = _QRect(sx1, sy1, sx2 - sx1, sy2 - sy1)
+            painter.setBrush(_QBrush(accent_fill))
+            painter.setPen(_QPen(outline, 1))
+            painter.drawRect(mon_rect)
+            painter.setPen(_QPen(_QC(245, 250, 252, 240)))
+            painter.setFont(_QFont(self.font().family(), 9, _QFont.Bold))
+            painter.drawText(mon_rect.adjusted(4, 2, -2, -2), int(_Qt.AlignTop | _Qt.AlignLeft), str(idx + 1))
+
+
+class _MouseMonitorChoiceDialog(QDialog):
+    """One-shot popup shown when mouse mode flips on. Lets the user
+    pick a monitor for the cursor to be constrained to (or "All
+    Monitors" for the historical full-virtual-desktop behavior).
+    Lives on top, doesn't steal focus, dismissible without choosing.
+
+    Spec from the user (paraphrased): "monitor selection popup like
+    the screenshot picker, with 'Preset your choice in Mouse
+    settings' subtitle and a button called 'Monitor Choices' that
+    opens Save Locations and scrolls to the Mouse part."
+
+    Communicates back via two signals:
+      monitor_chosen(value)  - value is int (monitor index 0..N-1)
+                               or None ("All Monitors").
+      preset_requested()     - user clicked the Monitor Choices button
+                               and wants the Save Locations Mouse
+                               Control section to come up.
+    """
+
+    monitor_chosen = Signal(object)
+    preset_requested = Signal()
+
+    def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self.setWindowTitle("Mouse Monitor")
+        self.setObjectName("mouseMonitorChoiceDialog")
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setWindowFlag(Qt.Tool, True)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("Choose which monitor to control")
+        title.setStyleSheet(
+            f"color: {config.accent_color}; font-size: 18px; font-weight: 800;"
+        )
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        subtitle = QLabel("Preset your choice in Mouse settings to skip this popup next time.")
+        subtitle.setStyleSheet(f"color: {config.text_color}; font-size: 12px;")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        # Per-monitor buttons + an "All Monitors" entry. Buttons are
+        # styled to match the rest of the Touchless dialogs so the
+        # popup feels like a first-class app surface, not a system
+        # message box.
+        from PySide6.QtGui import QGuiApplication as _QGui
+
+        screens = []
+        try:
+            screens = list(_QGui.screens() or [])
+        except Exception:
+            pass
+        button_style = (
+            f"QPushButton {{"
+            f" background: rgba(29,233,182,0.12);"
+            f" color: {config.text_color};"
+            f" border: 1px solid rgba(29,233,182,0.40);"
+            f" border-radius: 10px; padding: 9px 14px; font-weight: 700;"
+            f"}}"
+            f"QPushButton:hover {{ background: rgba(29,233,182,0.22); }}"
+        )
+
+        all_btn = QPushButton("All Monitors (full virtual desktop)")
+        all_btn.setStyleSheet(button_style)
+        all_btn.clicked.connect(lambda: self._choose(None))
+        layout.addWidget(all_btn)
+        for idx, screen in enumerate(screens):
+            try:
+                geo = screen.geometry()
+                label = f"Monitor {idx + 1} ({geo.width()}x{geo.height()})"
+            except Exception:
+                label = f"Monitor {idx + 1}"
+            btn = QPushButton(label)
+            btn.setStyleSheet(button_style)
+            btn.clicked.connect(lambda _checked=False, i=idx: self._choose(i))
+            layout.addWidget(btn)
+
+        # Footer row: link to Save Locations preset + Cancel.
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        preset_btn = QPushButton("Monitor Choices")
+        preset_btn.setStyleSheet(button_style)
+        preset_btn.clicked.connect(self._on_preset_clicked)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(button_style)
+        cancel_btn.clicked.connect(self.close)
+        footer.addWidget(preset_btn)
+        footer.addWidget(cancel_btn)
+        layout.addLayout(footer)
+
+        self.setStyleSheet(
+            f"""
+            QDialog#mouseMonitorChoiceDialog {{
+                background-color: {config.surface_color};
+                border: 1px solid rgba(29,233,182,0.30);
+                border-radius: 14px;
+            }}
+            """
+        )
+        # Centered on the primary screen — the user might have
+        # multiple displays open and we don't want this popping up
+        # on whatever monitor the cursor happens to be on.
+        try:
+            primary = _QGui.primaryScreen()
+            if primary is not None:
+                geo = primary.availableGeometry()
+                self.adjustSize()
+                self.move(
+                    geo.center().x() - self.width() // 2,
+                    geo.center().y() - self.height() // 2,
+                )
+        except Exception:
+            pass
+
+    def _choose(self, monitor_index) -> None:
+        self.monitor_chosen.emit(monitor_index)
+        self.close()
+
+    def _on_preset_clicked(self) -> None:
+        # Emit AND close — the receiving handler navigates to Save
+        # Locations on its own; we don't need to keep the dialog
+        # around once the user has decided to go preset-route.
+        self.preset_requested.emit()
+        self.close()
 
 
 class _CameraInventoryThread(QThread):
@@ -2889,7 +3812,6 @@ class CameraPreviewDialog(QDialog):
         root.addWidget(self.status_label)
 
         button_row = QHBoxLayout()
-        button_row.addStretch(1)
         self.exit_button = QPushButton("Exit Preview")
         self.exit_button.setObjectName("cameraPreviewButton")
         self.exit_button.clicked.connect(self.accept)
@@ -2982,7 +3904,8 @@ class CameraPreviewDialog(QDialog):
             return
         # Always mirror — matches the unified selfie convention used
         # everywhere else in the app (engine, tutorial, recorder).
-        frame = cv2.flip(frame, 1)
+        if not bool(getattr(self.config, "camera_source_is_mirrored", False)):
+            frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w = rgb.shape[:2]
         bytes_per_line = w * 3
@@ -3151,7 +4074,6 @@ class TouchlessNotice(QDialog):
         layout.addWidget(body_label, 1)
 
         button_row = QHBoxLayout()
-        button_row.addStretch(1)
         ok_button = QPushButton("OK")
         ok_button.setObjectName("touchlessNoticeOk")
         ok_button.setDefault(True)
@@ -3346,6 +4268,31 @@ class MainWindow(QMainWindow):
         self._clip_export_thread: threading.Thread | None = None
         self.capture_region_overlay.selection_finished.connect(self._on_capture_region_selected)
         self.capture_region_overlay.selection_canceled.connect(self._on_capture_region_canceled)
+        # ------------- Walkthrough state -----------------------------
+        # Guided first-run tour through every Settings tab, ending in
+        # the gesture tutorial. None of these widgets are realised
+        # until _enter_walkthrough_state() runs; the flag controls
+        # whether show_settings_section() gates non-target clicks
+        # and whether the title-bar/window-edge tutorial visuals
+        # render.
+        self._walkthrough_active: bool = False
+        self._walkthrough_step_index: int = 0
+        # Phase: "pointing" (waiting for target tab click) | "on_page"
+        # (target tab opened, hint shown) | "next_visible" (3 s passed,
+        # Next button up).
+        self._walkthrough_phase: str = "pointing"
+        self._walkthrough_hint_label: QLabel | None = None
+        self._walkthrough_skip_button: QPushButton | None = None
+        self._walkthrough_next_button: QPushButton | None = None
+        self._walkthrough_next_fade_anim: QPropertyAnimation | None = None
+        self._walkthrough_next_fade_effect = None
+        self._walkthrough_target_glow_effect = None
+        self._walkthrough_target_button = None
+        self._walkthrough_bounce_anim: QPropertyAnimation | None = None
+        self._walkthrough_bounce_settle_anim: QPropertyAnimation | None = None
+        self._walkthrough_bounce_baseline_y: int = 0
+        self._walkthrough_next_timer: QTimer | None = None
+        # ------------- End walkthrough state -------------------------
         self._drawing_mode_active = False
         self._erase_mode_active = False
         self._worker_drawing_tool = "hidden"
@@ -3503,6 +4450,7 @@ class MainWindow(QMainWindow):
         outer = QWidget()
         outer.setObjectName("rootWindow")
         self.setCentralWidget(outer)
+        self._root_outer = outer
 
         root = QVBoxLayout(outer)
         root.setContentsMargins(0, 0, 0, 0)
@@ -3519,6 +4467,18 @@ class MainWindow(QMainWindow):
         self.settings_page = self._build_settings_page()
         self.page_stack.addWidget(self.home_page)
         self.page_stack.addWidget(self.settings_page)
+
+        # Walkthrough edge-glow overlay. Parented to the central
+        # widget so it stacks on top of every other child (title bar
+        # + page stack) when raise_()'d. The previous implementation
+        # painted glow on MainWindow itself but the central widget's
+        # surface fill paints over MainWindow's background, hiding
+        # the glow strips. A free-floating overlay sidesteps that.
+        self._walkthrough_edge_glow = _WalkthroughEdgeGlowOverlay(outer)
+        self._walkthrough_edge_glow.setVisible(False)
+        # Initial geometry — re-anchored on every resize via
+        # _reposition_walkthrough_edge_glow().
+        self._reposition_walkthrough_edge_glow()
 
     def _build_home_page(self) -> QWidget:
         page = QWidget()
@@ -3543,6 +4503,16 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("START")
         self.end_button = QPushButton("END")
         self.settings_button = QPushButton("SETTINGS")
+        # Connect Spotify — opens the OAuth browser flow for the
+        # current user. Stand-alone button (not gated on engine
+        # state) because authorising Spotify is a one-time per-user
+        # setup that should be doable from a cold launch. Persists
+        # tokens to %APPDATA%\Touchless\spotify_tokens.json so
+        # future launches stay silent.
+        self.connect_spotify_button = QPushButton("Connect Spotify")
+        self.connect_spotify_button.setObjectName("connectSpotifyButton")
+        self.connect_spotify_button.setCursor(Qt.PointingHandCursor)
+        self.connect_spotify_button.clicked.connect(self._on_connect_spotify_clicked)
         # Initial state: app launches with the engine stopped, so END
         # is the inactive button. start_engine / stop_engine swap the
         # pair below; the QPushButton:disabled rule in the global
@@ -3555,6 +4525,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.end_button)
         button_row.addWidget(self.settings_button)
+        button_row.addWidget(self.connect_spotify_button)
         button_row.addStretch(1)
         body_layout.addLayout(button_row)
 
@@ -3563,94 +4534,132 @@ class MainWindow(QMainWindow):
         self.home_status_card = info_card
         info_layout = QVBoxLayout(info_card)
         info_layout.setContentsMargins(18, 18, 18, 18)
-        info_layout.setSpacing(10)
+        info_layout.setSpacing(8)
         info_title = QLabel("Runtime Status")
         info_title.setObjectName("cardTitle")
         info_layout.addWidget(info_title)
-        self.camera_label = QLabel("Camera: scanning...")
-        self.microphone_label = QLabel("Microphone: scanning...")
-        # status_label kept as a hidden compatibility shim — older code
-        # paths still call setText on it; we route the meaningful bits
-        # (errors, missing-camera notices) into camera_label instead.
-        self.status_label = QLabel("")
-        self.status_label.setVisible(False)
-        self.last_action_label = QLabel("Last action: none")
-        self.last_action_label.setVisible(False)
-        for label in (self.camera_label, self.microphone_label):
-            label.setWordWrap(True)
-            info_layout.addWidget(label)
+        self._home_debug_log_entries: list[str] = []
+        self._home_debug_log_max_entries = 250
 
-        history_header_row = QHBoxLayout()
-        history_header_row.setContentsMargins(0, 4, 0, 0)
-        history_header_row.setSpacing(8)
-        history_header = QLabel("Recent Actions")
-        history_header.setObjectName("cardSubtitle")
-        history_header_row.addWidget(history_header)
-        history_header_row.addStretch(1)
+        # status_label kept as a hidden compatibility shim — older
+        # code paths still update it, but the visible device source
+        # now lives in the inline dropdown rows below.
+        self.status_label = _CallbackLabel("", on_text_changed=self._on_home_status_text_changed)
+        self.status_label.setVisible(False)
+        self.last_action_label = _CallbackLabel(
+            "Last action: none",
+            on_text_changed=self._on_home_last_action_text_changed,
+        )
+        self.last_action_label.setVisible(False)
+
+        self.home_camera_combo = _RefreshingCameraCombo()
+        self.home_camera_combo.setObjectName("homeRuntimeDeviceCombo")
+        self.home_camera_combo.popup_about_to_show.connect(self._kick_off_async_camera_refresh)
+        self.home_camera_combo.activated.connect(self._save_camera_preference_from_home)
+        self.home_camera_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        camera_row = QWidget()
+        camera_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        camera_row_layout = QHBoxLayout(camera_row)
+        camera_row_layout.setContentsMargins(0, 0, 0, 0)
+        camera_row_layout.setSpacing(8)
+        self.camera_prefix_label = QLabel("Camera:")
+        self.camera_prefix_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        camera_row_layout.addWidget(self.camera_prefix_label, 0, Qt.AlignVCenter)
+        camera_row_layout.addWidget(self.home_camera_combo, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        camera_row_layout.addStretch(1)
+        info_layout.addWidget(camera_row)
+
+        self.home_microphone_combo = _DisplayOverrideCombo()
+        self.home_microphone_combo.setObjectName("homeRuntimeDeviceCombo")
+        self.home_microphone_combo.activated.connect(self._save_microphone_preference_from_home)
+        self.home_microphone_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        microphone_row = QWidget()
+        microphone_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        microphone_row_layout = QHBoxLayout(microphone_row)
+        microphone_row_layout.setContentsMargins(0, 0, 0, 0)
+        microphone_row_layout.setSpacing(8)
+        self.microphone_prefix_label = QLabel("Microphone:")
+        self.microphone_prefix_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        microphone_row_layout.addWidget(self.microphone_prefix_label, 0, Qt.AlignVCenter)
+        microphone_row_layout.addWidget(self.home_microphone_combo, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        microphone_row_layout.addStretch(1)
+        info_layout.addWidget(microphone_row)
+
+        self._last_action_history_events: list = []
+
+        self.home_log_splitter = QSplitter(Qt.Horizontal)
+        self.home_log_splitter.setObjectName("homeLogSplitter")
+        self.home_log_splitter.setChildrenCollapsible(False)
+        self.home_log_splitter.setHandleWidth(6)
+        self._home_log_default_height = 156
+        self.home_log_splitter.setMinimumHeight(self._home_log_default_height)
+        self.home_log_splitter.setMaximumHeight(self._home_log_default_height)
+
+        recent_actions_pane = QFrame()
+        recent_actions_pane.setObjectName("homeLogPane")
+        recent_actions_layout = QVBoxLayout(recent_actions_pane)
+        recent_actions_layout.setContentsMargins(8, 8, 8, 8)
+        recent_actions_layout.setSpacing(6)
+
+        recent_actions_header = QHBoxLayout()
+        recent_actions_header.setContentsMargins(0, 0, 0, 0)
+        recent_actions_header.setSpacing(8)
+        recent_actions_label = QLabel("Recent Actions")
+        recent_actions_label.setObjectName("cardSubtitle")
+        recent_actions_header.addWidget(recent_actions_label)
+        recent_actions_header.addStretch(1)
         self.undo_action_button = QPushButton("Undo Last")
         self.undo_action_button.setObjectName("undoActionButton")
         self.undo_action_button.setEnabled(False)
         self.undo_action_button.clicked.connect(self._on_undo_last_action)
-        history_header_row.addWidget(self.undo_action_button)
-        # Expand toggle in the top-right of the Recent Actions box —
-        # taps between the default ~140px height and a roomier ~300px
-        # so users with many recent actions can scroll a longer log
-        # without giving up the rest of the home screen.
-        self.action_history_expand_button = QPushButton("⤢")
-        self.action_history_expand_button.setObjectName("actionHistoryExpand")
-        self.action_history_expand_button.setToolTip("Expand / collapse Recent Actions")
-        self.action_history_expand_button.setFixedWidth(34)
-        self.action_history_expand_button.setCheckable(True)
-        self.action_history_expand_button.toggled.connect(self._on_action_history_expand_toggled)
-        history_header_row.addWidget(self.action_history_expand_button)
-        info_layout.addLayout(history_header_row)
-
-        # Search/filter input. Filters the displayed list by case-
-        # insensitive substring on the action label or display text.
-        # Empty input shows everything. The cached event list lives
-        # on _last_action_history_events so a filter change re-runs
-        # the rendering without waiting for a fresh worker emit.
-        self._action_history_search = QLineEdit()
-        self._action_history_search.setPlaceholderText("Filter actions…")
-        self._action_history_search.setClearButtonEnabled(True)
-        self._action_history_search.setObjectName("actionHistorySearch")
-        self._action_history_search.setStyleSheet(
-            "QLineEdit#actionHistorySearch {"
-            "  background: rgba(127,127,127,0.10);"
-            f"  color: {self.config.text_color};"
-            "  border: 1px solid rgba(127,127,127,0.22);"
-            "  border-radius: 6px;"
-            "  padding: 4px 8px;"
-            "  font-size: 12px;"
-            "  margin-bottom: 4px;"
-            "}"
-            "QLineEdit#actionHistorySearch:focus {"
-            f"  border: 1px solid {self.config.accent_color};"
-            "}"
-        )
-        self._action_history_search.textChanged.connect(self._on_action_history_filter_changed)
-        info_layout.addWidget(self._action_history_search)
-        # Cached events from the last worker emit, so a filter change
-        # can re-render without waiting for the next event.
-        self._last_action_history_events: list = []
+        recent_actions_header.addWidget(self.undo_action_button)
+        recent_actions_layout.addLayout(recent_actions_header)
 
         self.action_history_list = QListWidget()
         self.action_history_list.setObjectName("actionHistoryList")
-        self.action_history_list.setMaximumHeight(140)
         self.action_history_list.setSelectionMode(QListWidget.NoSelection)
         self.action_history_list.setFocusPolicy(Qt.NoFocus)
-        # Ensure the list actually scrolls when the content exceeds the
-        # visible height (especially after expand). The default policy
-        # leaves the scrollbar off until Qt re-evaluates layout, which
-        # can leave entries hidden with no way to reach them.
         self.action_history_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.action_history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # Grow vertically when given more room (used by the expand
-        # toggle to occupy the whole Runtime Status box).
-        self.action_history_list.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
-        )
-        info_layout.addWidget(self.action_history_list)
+        self.action_history_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        recent_actions_layout.addWidget(self.action_history_list, 1)
+
+        debug_log_pane = QFrame()
+        debug_log_pane.setObjectName("homeLogPane")
+        debug_log_layout = QVBoxLayout(debug_log_pane)
+        debug_log_layout.setContentsMargins(8, 8, 8, 8)
+        debug_log_layout.setSpacing(6)
+
+        debug_log_header = QHBoxLayout()
+        debug_log_header.setContentsMargins(0, 0, 0, 0)
+        debug_log_header.setSpacing(8)
+        debug_log_label = QLabel("Debug Log")
+        debug_log_label.setObjectName("cardSubtitle")
+        debug_log_header.addWidget(debug_log_label)
+        debug_log_header.addStretch(1)
+        # Keep expand/collapse inside the split panel so it reads like
+        # a control for the Recent Actions / Debug Log area itself.
+        self.action_history_expand_button = _ExpandCollapseButton(self)
+        self.action_history_expand_button.setObjectName("actionHistoryExpand")
+        self.action_history_expand_button.setToolTip("Expand panel")
+        self.action_history_expand_button.toggled.connect(self._on_action_history_expand_toggled)
+        debug_log_header.addWidget(self.action_history_expand_button, 0, Qt.AlignTop)
+        debug_log_layout.addLayout(debug_log_header)
+
+        self.home_debug_log = QPlainTextEdit()
+        self.home_debug_log.setObjectName("homeDebugLog")
+        self.home_debug_log.setReadOnly(True)
+        self.home_debug_log.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.home_debug_log.document().setMaximumBlockCount(self._home_debug_log_max_entries)
+        debug_log_layout.addWidget(self.home_debug_log, 1)
+
+        self.home_log_splitter.addWidget(recent_actions_pane)
+        self.home_log_splitter.addWidget(debug_log_pane)
+        self.home_log_splitter.setStretchFactor(0, 1)
+        self.home_log_splitter.setStretchFactor(1, 2)
+        self.home_log_splitter.setSizes([250, 500])
+        info_layout.addWidget(self.home_log_splitter)
+        self._sync_home_debug_log_widget()
 
         # Stash references to widgets that hide when the user expands
         # Recent Actions to fill the box. The runtime title / camera /
@@ -3658,8 +4667,8 @@ class MainWindow(QMainWindow):
         # height; collapsing restores them.
         self._action_history_collapsible = [
             info_title,
-            self.camera_label,
-            self.microphone_label,
+            camera_row,
+            microphone_row,
         ]
 
         body_layout.addWidget(info_card, 0, Qt.AlignHCenter)
@@ -3701,10 +4710,24 @@ class MainWindow(QMainWindow):
     def _build_settings_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("settingsPage")
+        # Track the page on self so overlay positioning helpers (the
+        # walkthrough pill + Next button) can map geometry into the
+        # page's coord space.
+        self.settings_page = page
 
-        layout = QHBoxLayout(page)
-        layout.setContentsMargins(18, 18, 18, 18)
+        # New page layout: VBox of (sidebar+content) on top, button
+        # row aligned right at the bottom. Putting the buttons in
+        # their own row at the bottom-right matches the user's spec
+        # — they sit BELOW both the sidebar box and the content
+        # panels rather than inside the sidebar.
+        page_root = QVBoxLayout(page)
+        page_root.setContentsMargins(18, 18, 18, 18)
+        page_root.setSpacing(10)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
+        page_root.addLayout(layout, 1)
 
         left_panel = QFrame()
         left_panel.setObjectName("settingsSidebar")
@@ -3860,14 +4883,77 @@ class MainWindow(QMainWindow):
                 "history changes news"
             ),
         }
+        # Nav buttons live inside a scroll area so a short window can
+        # scroll the button list instead of squishing the buttons until
+        # their labels collide. The Back button sits BELOW the scroll
+        # area (outside) so it's always reachable regardless of how
+        # short the window is.
+        nav_scroll = QScrollArea()
+        nav_scroll.setObjectName("settingsNavScroll")
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        nav_scroll.setStyleSheet(
+            "QScrollArea#settingsNavScroll, QScrollArea#settingsNavScroll > QWidget,"
+            " QScrollArea#settingsNavScroll QWidget#qt_scrollarea_viewport"
+            " { background: transparent; border: none; }"
+            # Thin accent-green scrollbar — the default Qt scrollbar
+            # is a heavy black bar that's visually jarring against the
+            # green-trimmed sidebar.
+            f" QScrollArea#settingsNavScroll QScrollBar:vertical {{"
+            f"   background: transparent;"
+            f"   width: 6px;"
+            f"   margin: 4px 1px;"
+            f"   border-radius: 3px;"
+            f" }}"
+            f" QScrollArea#settingsNavScroll QScrollBar::handle:vertical {{"
+            f"   background: {self.config.accent_color};"
+            f"   border-radius: 3px;"
+            f"   min-height: 28px;"
+            f" }}"
+            f" QScrollArea#settingsNavScroll QScrollBar::handle:vertical:hover {{"
+            f"   background: {self.config.accent_color};"
+            f" }}"
+            f" QScrollArea#settingsNavScroll QScrollBar::add-line:vertical,"
+            f" QScrollArea#settingsNavScroll QScrollBar::sub-line:vertical {{"
+            f"   height: 0px;"
+            f"   background: transparent;"
+            f" }}"
+            f" QScrollArea#settingsNavScroll QScrollBar::add-page:vertical,"
+            f" QScrollArea#settingsNavScroll QScrollBar::sub-page:vertical {{"
+            f"   background: transparent;"
+            f" }}"
+        )
+        nav_scroll.viewport().setStyleSheet("background: transparent;")
+        nav_inner = QWidget()
+        nav_inner.setStyleSheet("background: transparent;")
+        nav_inner_layout = QVBoxLayout(nav_inner)
+        nav_inner_layout.setContentsMargins(0, 0, 0, 0)
+        nav_inner_layout.setSpacing(10)
         for button in self._settings_nav_buttons:
-            left_layout.addWidget(button)
+            nav_inner_layout.addWidget(button)
+        nav_inner_layout.addStretch(1)
+        nav_scroll.setWidget(nav_inner)
+        left_layout.addWidget(nav_scroll, 1)
+        # Keep the walk-through target glow latched to the sidebar
+        # button when the user scrolls the nav. Without this signal
+        # connection, mapTo()-based geometry isn't recomputed on
+        # scroll so the glow stays parked at the target's old screen
+        # position even though the button has slid up/down with the
+        # scrollbar.
+        try:
+            nav_scroll.verticalScrollBar().valueChanged.connect(
+                lambda _v: self._update_walkthrough_glow_position()
+            )
+        except Exception:
+            pass
 
-        left_layout.addStretch(1)
-        self.back_button = QPushButton("Back")
-        self.back_button.setObjectName("backButton")
-        self.back_button.clicked.connect(self.show_home_page)
-        left_layout.addWidget(self.back_button, 0, Qt.AlignLeft)
+        # NOTE: Exit / Skip buttons used to live here at the bottom of
+        # the sidebar QFrame. They now live BELOW the QFrame (built
+        # at the page level near `layout.addWidget(left_panel)` so the
+        # styled sidebar box can end above the buttons and the buttons
+        # can size to their text without squashing each other).
 
         self.settings_content_stack = QStackedWidget()
         self.settings_content_stack.setObjectName("settingsContentStack")
@@ -3882,8 +4968,153 @@ class MainWindow(QMainWindow):
         self.settings_content_stack.addWidget(self._build_tutorial_panel())
         self.settings_content_stack.addWidget(self._build_updates_panel())
 
+        # Wrap the content stack in a scroll area so when the window
+        # is too short the active panel scrolls instead of squashing
+        # its widgets together. widgetResizable=True so the panel
+        # still uses the full available width — only the vertical
+        # axis grows beyond the viewport when needed. Each individual
+        # panel that already has its own internal QScrollArea
+        # (Custom Gestures, Gesture Binds, etc.) keeps that scroll
+        # behavior; nesting two scroll areas is fine in Qt — the
+        # outer one only kicks in for panels that don't manage their
+        # own scrolling.
+        content_scroll = QScrollArea()
+        content_scroll.setObjectName("settingsContentScroll")
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setFrameShape(QFrame.NoFrame)
+        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content_scroll.setStyleSheet(
+            "QScrollArea#settingsContentScroll, QScrollArea#settingsContentScroll > QWidget,"
+            " QScrollArea#settingsContentScroll QWidget#qt_scrollarea_viewport"
+            " { background: transparent; border: none; }"
+        )
+        content_scroll.viewport().setStyleSheet("background: transparent;")
+
+        content_scroll.setWidget(self.settings_content_stack)
+
+        # Walk-through pill + Next button — both are FLOATING overlay
+        # children of the settings page. Anchored to the top-right of
+        # whichever panel is active so the pill sits between the panel
+        # title and its description text, NOT in any layout — so the
+        # panel content never gets shifted down when the walkthrough
+        # is active. Hidden when not in walkthrough.
+        try:
+            green_text = str(self.config.accent_color or "#1DE9B6")
+        except Exception:
+            green_text = "#1DE9B6"
+        self._walkthrough_hint_label = QLabel("", page)
+        self._walkthrough_hint_label.setObjectName("walkthroughHint")
+        self._walkthrough_hint_label.setAlignment(Qt.AlignCenter)
+        self._walkthrough_hint_label.setWordWrap(True)
+        # Mouse-transparent so clicks on the panel below pass through
+        # the pill (the panel content under the pill stays clickable).
+        self._walkthrough_hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Blue pill, green text, thick rounded border. radius=28 gives
+        # the pill the rounded-end look the user asked for.
+        self._walkthrough_hint_label.setStyleSheet(
+            "QLabel#walkthroughHint {"
+            f"  color: {green_text};"
+            "  font-size: 20px;"
+            "  font-weight: 900;"
+            f"  background: {self.config.primary_color};"
+            f"  border: 2px solid {self.config.accent_color};"
+            "  border-radius: 28px;"
+            "  padding: 12px 24px;"
+            "}"
+        )
+        self._walkthrough_hint_label.setVisible(False)
+
+        self._walkthrough_next_button = QPushButton("Next", page)
+        self._walkthrough_next_button.setObjectName("walkthroughNextButton")
+        self._walkthrough_next_button.setCursor(Qt.PointingHandCursor)
+        self._walkthrough_next_button.setVisible(False)
+        self._walkthrough_next_button.setStyleSheet(
+            "QPushButton#walkthroughNextButton {"
+            f"  background-color: {self.config.primary_color};"
+            f"  color: {self.config.text_color};"
+            f"  border: 1px solid {self.config.accent_color};"
+            "  border-radius: 14px;"
+            "  padding: 10px 18px;"
+            "  font-weight: 800;"
+            "  min-width: 80px;"
+            "}"
+            "QPushButton#walkthroughNextButton:hover {"
+            f"  background-color: rgba(29,233,182,0.40);"
+            "}"
+        )
+        self._walkthrough_next_button.clicked.connect(self._on_walkthrough_next_clicked)
+        self._walkthrough_next_fade_effect = QGraphicsOpacityEffect(self._walkthrough_next_button)
+        self._walkthrough_next_fade_effect.setOpacity(1.0)
+        self._walkthrough_next_button.setGraphicsEffect(self._walkthrough_next_fade_effect)
+
+        # `_walkthrough_bar` kept as alias for the hint label so other
+        # helpers that reference it (visibility toggle, etc.) keep
+        # working. Position is computed by _position_walkthrough_overlay.
+        self._walkthrough_bar = self._walkthrough_hint_label
+
+        # Re-anchor the overlay whenever the active panel resizes /
+        # the page resizes / the user navigates to a different panel.
+        page.installEventFilter(self)
+        self.settings_content_stack.installEventFilter(self)
+        try:
+            self.settings_content_stack.currentChanged.connect(
+                lambda _idx: self._position_walkthrough_overlay()
+            )
+        except Exception:
+            pass
+
+        # Add the (now-styled) sidebar + content area to the top HBox.
         layout.addWidget(left_panel)
-        layout.addWidget(self.settings_content_stack, 1)
+        layout.addWidget(content_scroll, 1)
+
+        # Bottom row of the settings page — Back + (walkthrough) Skip
+        # buttons aligned to the LEFT of the window. Both buttons get
+        # the same fixed height (44 px) so the row reads as a single
+        # control surface; widths are sized to text via
+        # `QSizePolicy.Maximum` + `min-width: 0`. The bottom row
+        # consumes a small slice of vertical space below the top HBox,
+        # which is what gives the panels above their slightly-raised
+        # bottom edge.
+        self._BOTTOM_BUTTON_HEIGHT = 44
+        self.back_button = QPushButton("Back")
+        self.back_button.setObjectName("backButton")
+        self.back_button.setCursor(Qt.PointingHandCursor)
+        self.back_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.back_button.setFixedHeight(self._BOTTOM_BUTTON_HEIGHT)
+        self.back_button.clicked.connect(self._on_back_button_clicked)
+
+        self._walkthrough_skip_button = QPushButton("Skip to Gesture Tutorial")
+        self._walkthrough_skip_button.setObjectName("walkthroughSkipButton")
+        self._walkthrough_skip_button.setCursor(Qt.PointingHandCursor)
+        self._walkthrough_skip_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._walkthrough_skip_button.setFixedHeight(self._BOTTOM_BUTTON_HEIGHT)
+        self._walkthrough_skip_button.setVisible(False)
+        self._walkthrough_skip_button.clicked.connect(
+            lambda: self._exit_walkthrough(open_tutorial=True)
+        )
+        self._walkthrough_skip_button.setStyleSheet(
+            "QPushButton#walkthroughSkipButton {"
+            f"  background-color: {self.config.primary_color};"
+            f"  color: {self.config.text_color};"
+            "  border: 1px solid rgba(29,233,182,0.55);"
+            "  border-radius: 14px;"
+            "  padding: 6px 16px;"
+            "  font-weight: 800;"
+            "  min-width: 0px;"
+            "}"
+            "QPushButton#walkthroughSkipButton:hover {"
+            f"  background-color: rgba(29,233,182,0.40);"
+            "}"
+        )
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(10)
+        bottom_row.addWidget(self.back_button)
+        bottom_row.addWidget(self._walkthrough_skip_button)
+        bottom_row.addStretch(1)
+        page_root.addLayout(bottom_row, 0)
 
         # Build the search index now that every panel has been
         # constructed and added. Walks each panel for searchable
@@ -4066,16 +5297,10 @@ class MainWindow(QMainWindow):
                 getattr(self, "gpu_mode_button", None),
             ),
             (
-                "Camera: Save Camera Selection",
-                "save camera selection preferred device choose remember",
+                "Camera: Save Changes",
+                "save camera changes selection preferred device choose remember",
                 SECTION_CAMERA,
                 getattr(self, "save_camera_button", None),
-            ),
-            (
-                "Camera: Use Auto-Select",
-                "auto select clear preferred camera default",
-                SECTION_CAMERA,
-                getattr(self, "clear_camera_button", None),
             ),
             (
                 "Camera: Phone Camera (QR)",
@@ -4096,16 +5321,16 @@ class MainWindow(QMainWindow):
                 getattr(self, "use_phone_camera_qr_checkbox", None),
             ),
             (
-                "Microphone: Save Microphone Choice",
-                "save microphone choice mic preferred remember",
+                "Microphone: Save Changes",
+                "save microphone changes choice mic preferred remember",
                 SECTION_MICROPHONE,
                 getattr(self, "save_microphone_button", None),
             ),
             (
-                "Microphone: Use Phone Microphone (QR)",
-                "use phone microphone phone mic qr iphone android",
+                "Microphone: Using Camera Mic",
+                "use phone microphone phone mic qr iphone android camera mic",
                 SECTION_MICROPHONE,
-                getattr(self, "use_phone_mic_checkbox", None),
+                getattr(self, "phone_camera_qr_button_mic", None),
             ),
             (
                 "Microphone: Phone Microphone QR",
@@ -4276,11 +5501,220 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("settingsPanelTitle")
         panel_layout.addWidget(title_label)
 
-        subtitle_label = QLabel(subtitle)
-        subtitle_label.setObjectName("settingsPanelSubtitle")
-        subtitle_label.setWordWrap(True)
-        panel_layout.addWidget(subtitle_label)
+        if str(subtitle or "").strip():
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setObjectName("settingsPanelSubtitle")
+            subtitle_label.setWordWrap(True)
+            panel_layout.addWidget(subtitle_label)
         return panel, panel_layout
+
+    def _settings_inline_link_stylesheet(self) -> str:
+        return (
+            f"QPushButton {{"
+            f"  background: transparent;"
+            f"  border: none;"
+            f"  color: {self.config.accent_color};"
+            f"  padding: 0px;"
+            f"  min-width: 0px;"
+            f"  font-weight: 700;"
+            f"  text-align: left;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  color: {self.config.text_color};"
+            f"  text-decoration: underline;"
+            f"}}"
+        )
+
+    def _settings_success_button_stylesheet(self) -> str:
+        accent = str(self.config.accent_color or "#1DE9B6")
+        return (
+            f"QPushButton {{"
+            f"  background-color: {accent};"
+            f"  color: #001B24;"
+            f"  border: 1px solid {accent};"
+            f"  border-radius: 14px;"
+            f"  padding: 12px 18px;"
+            f"  font-weight: 800;"
+            f"  min-width: 110px;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  border: 1px solid rgba(255,255,255,0.24);"
+            f"}}"
+            f"QPushButton:pressed {{"
+            f"  background-color: {accent};"
+            f"  color: #001B24;"
+            f"}}"
+        )
+
+    def _settings_inner_card_stylesheet(self) -> str:
+        is_light = self._palette_is_light()
+        card_bg = "rgba(0,0,0,0.05)" if is_light else "rgba(255,255,255,0.04)"
+        card_border = "rgba(11,61,145,0.18)" if is_light else "rgba(29,233,182,0.22)"
+        return (
+            f"QFrame#innerCard {{"
+            f"  background-color: {card_bg};"
+            f"  border: 1px solid {card_border};"
+            f"  border-radius: 18px;"
+            f"  color: {self.config.text_color};"
+            f"}}"
+        )
+
+    def _settings_panel_button_stylesheet(self) -> str:
+        # Translucent grey + green outline default, blue-fill hover,
+        # accent-tinted pressed/checked. Mirrors the b5 look the user
+        # confirmed in the b5 release screenshots — the whole BUTTON
+        # changes color on hover/press, not just the border. Save
+        # Changes button has its own rules in the global stylesheet
+        # (`#settingsSaveButton[pendingSave="true"]`) that override
+        # to solid primary-blue when there's a pending change.
+        is_light = self._palette_is_light()
+        text_color = str(self.config.text_color)
+        accent = str(self.config.accent_color or "#1DE9B6")
+        accent_outline = _with_alpha(QColor(accent), 170).name(QColor.HexArgb)
+        accent_outline_strong = _with_alpha(QColor(accent), 230).name(QColor.HexArgb)
+        # Visible grey default — same value the global stylesheet
+        # uses for the rest of the settings buttons so per-button
+        # overrides don't downgrade to nearly-transparent card_bg.
+        button_bg = "rgba(0,0,0,0.18)" if is_light else "rgba(255,255,255,0.08)"
+        hover_bg = _with_alpha(QColor(self.config.primary_color).lighter(118), 170).name(QColor.HexArgb)
+        active_bg = _with_alpha(QColor(self.config.primary_color).lighter(122), 205).name(QColor.HexArgb)
+        soft_text = "rgba(15,23,42,0.55)" if is_light else "rgba(255,255,255,0.55)"
+        disabled_bg = "rgba(127,127,127,0.10)"
+        disabled_border = "rgba(127,127,127,0.18)"
+        return (
+            f"QPushButton {{"
+            f"  background-color: {button_bg};"
+            f"  color: {text_color};"
+            f"  border: 1px solid {accent_outline};"
+            f"  border-radius: 14px;"
+            f"  padding: 12px 18px;"
+            f"  font-weight: 800;"
+            f"  min-width: 110px;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background-color: {hover_bg};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton:pressed {{"
+            f"  background-color: {active_bg};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton:checked {{"
+            f"  background-color: {active_bg};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton:disabled {{"
+            f"  background-color: {disabled_bg};"
+            f"  color: {soft_text};"
+            f"  border: 1px solid {disabled_border};"
+            f"}}"
+        )
+
+    def _mark_settings_panel_button(self, button: QPushButton | None) -> None:
+        if button is None:
+            return
+        button.setProperty("settingsPanelButton", True)
+        # Apply the panel-button look directly so the user sees the
+        # b5 grey-default + blue-hover styling even when the global
+        # QSS doesn't reliably reach the button (e.g. under nested
+        # QScrollArea wrappers). The same helper is used by Camera /
+        # Microphone / Save Locations action buttons; this brings
+        # Open Tutorial / Light Mode / Revert / Updates buttons into
+        # line with them.
+        try:
+            button.setStyleSheet(self._settings_panel_button_stylesheet())
+        except Exception:
+            pass
+
+    def _set_settings_save_button_pending(self, button: QPushButton | None, pending: bool) -> None:
+        if button is None:
+            return
+        button.setProperty("pendingSave", bool(pending))
+        # Apply a direct stylesheet alongside the property so the
+        # solid primary-blue fill is GUARANTEED to land. QSS
+        # attribute-selector rules (`[pendingSave="true"]`) can
+        # silently fail to repaint on some Qt/Windows builds even
+        # after style.unpolish/polish — the user previously saw only
+        # the border color change while the background stayed
+        # translucent. The inline sheet bypasses that quirk.
+        if pending:
+            button.setStyleSheet(self._settings_save_button_pending_stylesheet())
+        else:
+            # Clear the inline sheet so the global QSS rule (neutral
+            # translucent default + blue hover) takes back over.
+            button.setStyleSheet("")
+        self._repolish_widget(button)
+
+    def _settings_save_button_pending_stylesheet(self) -> str:
+        primary = str(self.config.primary_color)
+        text_color = str(self.config.text_color)
+        accent = str(self.config.accent_color or "#1DE9B6")
+        accent_outline_strong = _with_alpha(QColor(accent), 230).name(QColor.HexArgb)
+        hover_blue = _with_alpha(QColor(primary).lighter(118), 235).name(QColor.HexArgb)
+        pressed_blue = _with_alpha(QColor(primary).lighter(125), 245).name(QColor.HexArgb)
+        return (
+            f"QPushButton#settingsSaveButton {{"
+            f"  background-color: {primary};"
+            f"  color: {text_color};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  border-radius: 14px;"
+            f"  padding: 12px 18px;"
+            f"  font-weight: 800;"
+            f"  min-width: 110px;"
+            f"}}"
+            f"QPushButton#settingsSaveButton:hover {{"
+            f"  background-color: {hover_blue};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton#settingsSaveButton:pressed {{"
+            f"  background-color: {pressed_blue};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+        )
+
+    def _build_expandable_note(self, summary: str, details: str, *, object_name: str = "cameraNote") -> QWidget:
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.setSpacing(6)
+
+        summary_label = QLabel(summary)
+        summary_label.setObjectName(object_name)
+        summary_label.setWordWrap(True)
+        summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        summary_row.addWidget(summary_label, 1)
+
+        toggle_button = QPushButton("Show more...")
+        toggle_button.setCursor(Qt.PointingHandCursor)
+        toggle_button.setFlat(True)
+        toggle_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        toggle_button.setStyleSheet(self._settings_inline_link_stylesheet())
+        summary_row.addWidget(toggle_button, 0, Qt.AlignRight | Qt.AlignBottom)
+        layout.addLayout(summary_row)
+
+        detail_label = QLabel(details)
+        detail_label.setObjectName(object_name)
+        detail_label.setWordWrap(True)
+        detail_label.hide()
+        layout.addWidget(detail_label)
+
+        def _toggle() -> None:
+            expanded = not detail_label.isVisible()
+            detail_label.setVisible(expanded)
+            toggle_button.setText("Show less..." if expanded else "Show more...")
+
+        toggle_button.clicked.connect(_toggle)
+        return wrapper
 
     def _build_instructions_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
@@ -4329,6 +5763,8 @@ class MainWindow(QMainWindow):
 
         info_box = QFrame()
         info_box.setObjectName("innerCard")
+        info_box.setAttribute(Qt.WA_StyledBackground, True)
+        info_box.setStyleSheet(self._settings_inner_card_stylesheet())
         info_layout = QVBoxLayout(info_box)
         info_layout.setContentsMargins(16, 16, 16, 16)
         info_layout.setSpacing(10)
@@ -4364,6 +5800,8 @@ class MainWindow(QMainWindow):
 
         info_box = QFrame()
         info_box.setObjectName("innerCard")
+        info_box.setAttribute(Qt.WA_StyledBackground, True)
+        info_box.setStyleSheet(self._settings_inner_card_stylesheet())
         info_layout = QVBoxLayout(info_box)
         info_layout.setContentsMargins(14, 12, 14, 12)
         info_layout.setSpacing(4)
@@ -4541,6 +5979,25 @@ class MainWindow(QMainWindow):
             "Press Esc to cancel. Click Save Changes when you're done.",
         )
         accent = self.config.accent_color or "#1DE9B6"
+        title_item = layout.takeAt(0)
+        title_label = title_item.widget() if title_item is not None else None
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        if title_label is not None:
+            header_row.addWidget(title_label)
+        header_row.addStretch(1)
+        save_btn = QPushButton("Save Changes")
+        save_btn.setObjectName("settingsSaveButton")
+        # Start neutral — the button only becomes primary blue once
+        # the user actually has a pending rebind queued. Mirrors the
+        # camera/microphone Save Changes flow.
+        save_btn.setProperty("pendingSave", False)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self._save_gesture_bindings)
+        header_row.addWidget(save_btn, 0, Qt.AlignTop)
+        layout.insertLayout(0, header_row)
+        self._gesture_binds_save_button = save_btn
 
         # Rebind state — pending changes are held in _pending_changes until
         # the user clicks Save. _pending_action is the action being rebound
@@ -4665,9 +6122,13 @@ class MainWindow(QMainWindow):
         # ---- Left column: bindings table ------------------------------------
         table_box = QFrame()
         table_box.setObjectName("innerCard")
+        table_box.setProperty("gestureBindsRole", "bindings")
+        table_box.setAttribute(Qt.WA_StyledBackground, True)
+        table_box.setStyleSheet(self._settings_inner_card_stylesheet())
         table_layout = QVBoxLayout(table_box)
         table_layout.setContentsMargins(14, 14, 14, 14)
         table_layout.setSpacing(8)
+        self._gesture_binds_table_box = table_box
 
         table_header = QLabel("Bindings")
         table_header.setObjectName("settingsPanelTitle")
@@ -4696,18 +6157,22 @@ class MainWindow(QMainWindow):
         # ---- Right column: All Gesture Poses --------------------------------
         poses_box = QFrame()
         poses_box.setObjectName("innerCard")
+        poses_box.setProperty("gestureBindsRole", "poses")
+        poses_box.setAttribute(Qt.WA_StyledBackground, True)
+        poses_box.setStyleSheet(self._settings_inner_card_stylesheet())
         poses_layout = QVBoxLayout(poses_box)
         poses_layout.setContentsMargins(14, 14, 14, 14)
         poses_layout.setSpacing(8)
+        self._gesture_binds_poses_box = poses_box
 
         poses_header = QLabel("All Gesture Poses")
         poses_header.setObjectName("settingsPanelTitle")
         poses_layout.addWidget(poses_header)
 
-        poses_hint = QLabel("Hover for 1 second to preview a pose.")
-        poses_hint.setObjectName("gestureCardSubtitle")
-        poses_hint.setWordWrap(True)
-        poses_layout.addWidget(poses_hint)
+        poses_prompt = QLabel("Select new pose here")
+        poses_prompt.setObjectName("gestureCardSubtitle")
+        poses_prompt.setWordWrap(True)
+        poses_layout.addWidget(poses_prompt)
 
         poses_list = QListWidget()
         poses_list.setObjectName("gestureBindsPosesList")
@@ -4722,17 +6187,6 @@ class MainWindow(QMainWindow):
 
         columns.addWidget(poses_box, 2)
         body_layout.addLayout(columns, 1)
-
-        # ---- Save bar -------------------------------------------------------
-        save_row = QHBoxLayout()
-        save_row.addStretch(1)
-        save_btn = QPushButton("Save Changes")
-        save_btn.setObjectName("primaryAction")
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.clicked.connect(self._save_gesture_bindings)
-        save_row.addWidget(save_btn)
-        body_layout.addLayout(save_row)
-        self._gesture_binds_save_button = save_btn
 
         scroll.setWidget(body)
         layout.addWidget(scroll, 1)
@@ -4757,24 +6211,75 @@ class MainWindow(QMainWindow):
                 border: 1px solid {accent};
                 color: {accent};
             }}
+            /* During a rebind, the OUTER "All Gesture Poses" frame
+               picks up an accent border so the user knows the panel
+               is in pick-a-pose mode. No background tint — the
+               inner list and its rows must remain neutral grey
+               (see the QListWidget rules below, which deliberately
+               do nothing for the rebind state properties). Only
+               the outer card moves; the scrollable area stays put. */
+            QFrame#innerCard[gestureBindsRole="poses"][rebindTarget="true"] {{
+                border: 2px solid {accent};
+            }}
+            QFrame#innerCard[gestureBindsRole="poses"][rebindPulse="true"] {{
+                border: 3px solid {accent};
+            }}
             QListWidget#gestureBindsPosesList {{
+                /* Outer "All Poses" box: brighter green outline so
+                   the box reads as the focal container. Per-item
+                   hover (below) is now a fainter accent tint, so
+                   the box border out-greens the inner buttons —
+                   inverse of the previous pairing the user asked
+                   to swap. `outline: 0` kills Qt's default 1px
+                   dotted-white focus rectangle that otherwise paints
+                   around the currently-focused row whenever the
+                   list takes keyboard/click focus — that was the
+                   "white box" the user saw on selection. */
                 background: rgba(127, 127, 127, 0.12);
-                border: 1px solid rgba(127, 127, 127, 0.22);
+                border: 1px solid rgba(29, 233, 182, 0.55);
                 border-radius: 8px;
                 padding: 4px;
                 color: {self.config.text_color or "#E5F6FF"};
+                outline: 0;
+            }}
+            QListWidget#gestureBindsPosesList::item {{
+                outline: 0;
+            }}
+            /* Per the user's spec, the list box itself stays
+               visually identical during a rebind — no border
+               change, no background change. Only the per-row
+               hover on individual items lights up. Rules kept
+               as no-ops to preserve property-selector intent
+               while documenting that nothing changes here. */
+            QListWidget#gestureBindsPosesList[rebindTarget="true"] {{
+            }}
+            QListWidget#gestureBindsPosesList[rebindPulse="true"] {{
             }}
             QListWidget#gestureBindsPosesList::item {{
                 padding: 8px 10px;
                 border-radius: 6px;
+                background: rgba(127, 127, 127, 0.10);
+                border: 1px solid transparent;
                 color: {self.config.text_color or "#E5F6FF"};
             }}
             QListWidget#gestureBindsPosesList::item:hover {{
-                background: rgba(127, 127, 127, 0.22);
+                /* Inner pose buttons now use the FAINT accent tint
+                   so they sit under the brighter outer box border. */
+                background: rgba(29, 233, 182, 0.10);
+                border: 1px solid rgba(29, 233, 182, 0.22);
+                color: {self.config.text_color or "#E5F6FF"};
+            }}
+            QListWidget#gestureBindsPosesList[rebindTarget="true"]::item:hover {{
+                /* During an active rebind the per-row hover gets a
+                   slightly stronger pulse so the user can see which
+                   row their cursor is on — still kept under the
+                   outer-box brightness. */
+                background: rgba(29, 233, 182, 0.16);
+                border: 1px solid rgba(29, 233, 182, 0.45);
                 color: {self.config.text_color or "#E5F6FF"};
             }}
             QListWidget#gestureBindsPosesList::item:selected {{
-                background: rgba(29, 233, 182, 0.18);
+                background: rgba(29, 233, 182, 0.12);
                 color: {self.config.text_color or "#E5F6FF"};
             }}
             """
@@ -4924,6 +6429,120 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, pose_id)
             lw.addItem(item)
 
+    @staticmethod
+    def _repolish_widget(widget: QWidget | None) -> None:
+        if widget is None:
+            return
+        style = widget.style()
+        if style is None:
+            return
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+
+    def _ensure_gesture_binds_table_dim_effect(self):
+        box = getattr(self, "_gesture_binds_table_box", None)
+        if box is None:
+            return None
+        effect = getattr(self, "_gesture_binds_table_dim_effect", None)
+        if effect is None:
+            effect = QGraphicsOpacityEffect(box)
+            effect.setOpacity(1.0)
+            box.setGraphicsEffect(effect)
+            self._gesture_binds_table_dim_effect = effect
+        return effect
+
+    def _ensure_gesture_binds_poses_glow(self):
+        box = getattr(self, "_gesture_binds_poses_box", None)
+        if box is None:
+            return None, None
+        effect = getattr(self, "_gesture_binds_poses_glow_effect", None)
+        if effect is None:
+            effect = QGraphicsDropShadowEffect(box)
+            glow = QColor(self.config.accent_color or "#1DE9B6")
+            glow.setAlpha(120)
+            effect.setColor(glow)
+            effect.setOffset(0, 0)
+            effect.setBlurRadius(0.0)
+            effect.setEnabled(False)
+            box.setGraphicsEffect(effect)
+            self._gesture_binds_poses_glow_effect = effect
+        anim = getattr(self, "_gesture_binds_poses_glow_anim", None)
+        if anim is None:
+            anim = QPropertyAnimation(effect, b"blurRadius", self)
+            anim.setDuration(260)
+            anim.setEasingCurve(QEasingCurve.OutBack)
+            self._gesture_binds_poses_glow_anim = anim
+        return effect, anim
+
+    def _finish_gesture_binds_rebind_pulse(self, pulse_id: int) -> None:
+        if pulse_id != int(getattr(self, "_gesture_binds_rebind_pulse_id", 0)):
+            return
+        poses_box = getattr(self, "_gesture_binds_poses_box", None)
+        poses_list = getattr(self, "_gesture_binds_poses_list", None)
+        if poses_box is not None:
+            poses_box.setProperty("rebindPulse", False)
+        if poses_list is not None:
+            poses_list.setProperty("rebindPulse", False)
+        self._repolish_widget(poses_box)
+        self._repolish_widget(poses_list)
+
+    def _set_gesture_binds_rebind_visual_state(self, active: bool) -> None:
+        table_box = getattr(self, "_gesture_binds_table_box", None)
+        poses_box = getattr(self, "_gesture_binds_poses_box", None)
+        poses_list = getattr(self, "_gesture_binds_poses_list", None)
+
+        dim_effect = self._ensure_gesture_binds_table_dim_effect()
+        if dim_effect is not None:
+            dim_effect.setOpacity(0.72 if active else 1.0)
+
+        if table_box is not None:
+            table_box.setProperty("rebindDimmed", bool(active))
+        if poses_box is not None:
+            poses_box.setProperty("rebindTarget", bool(active))
+            poses_box.setProperty("rebindPulse", False)
+        if poses_list is not None:
+            poses_list.setProperty("rebindTarget", bool(active))
+            poses_list.setProperty("rebindPulse", False)
+
+        self._repolish_widget(table_box)
+        self._repolish_widget(poses_box)
+        self._repolish_widget(poses_list)
+
+        glow_effect, glow_anim = self._ensure_gesture_binds_poses_glow()
+        if glow_anim is not None and glow_anim.state() == QPropertyAnimation.Running:
+            glow_anim.stop()
+        if glow_effect is not None:
+            if active:
+                glow = QColor(self.config.accent_color or "#1DE9B6")
+                glow.setAlpha(120)
+                glow_effect.setColor(glow)
+                glow_effect.setEnabled(True)
+                glow_effect.setBlurRadius(0.0)
+            else:
+                glow_effect.setBlurRadius(0.0)
+                glow_effect.setEnabled(False)
+
+        if not active:
+            self._gesture_binds_rebind_pulse_id = int(getattr(self, "_gesture_binds_rebind_pulse_id", 0)) + 1
+            return
+
+        if poses_box is not None:
+            poses_box.setProperty("rebindPulse", True)
+        if poses_list is not None:
+            poses_list.setProperty("rebindPulse", True)
+        self._repolish_widget(poses_box)
+        self._repolish_widget(poses_list)
+
+        if glow_anim is not None:
+            glow_anim.setStartValue(0.0)
+            glow_anim.setEndValue(24.0)
+            glow_anim.start()
+
+        pulse_id = int(getattr(self, "_gesture_binds_rebind_pulse_id", 0)) + 1
+        self._gesture_binds_rebind_pulse_id = pulse_id
+        QTimer.singleShot(220, lambda pid=pulse_id: self._finish_gesture_binds_rebind_pulse(pid))
+
     def _on_gesture_bind_active_clicked(self, action_id: str) -> None:
         # Clear any prior pending state's pressed style.
         prev = self._gesture_binds_pending_action
@@ -4939,6 +6558,7 @@ class MainWindow(QMainWindow):
             btn.setProperty("pendingRebind", True)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+        self._set_gesture_binds_rebind_visual_state(True)
         if self._gesture_binds_pill is not None:
             self._position_gesture_binds_pill()
             # Reset opacity to fully visible BEFORE showing — a
@@ -5099,6 +6719,7 @@ class MainWindow(QMainWindow):
     def _clear_gesture_bind_pending(self) -> None:
         action_id = self._gesture_binds_pending_action
         self._gesture_binds_pending_action = None
+        self._set_gesture_binds_rebind_visual_state(False)
         if action_id:
             btn = self._gesture_binds_active_buttons.get(action_id)
             if btn is not None:
@@ -5136,6 +6757,12 @@ class MainWindow(QMainWindow):
         if btn is not None:
             btn.setText(self._pose_label_for_id(pose_id))
         self._clear_gesture_bind_pending()
+        # Flip the Save Changes button to primary-blue pending state
+        # so the user knows there's an unsaved change. Same UX as the
+        # camera / microphone Save flows.
+        self._set_settings_save_button_pending(
+            getattr(self, "_gesture_binds_save_button", None), True
+        )
         # The new pending binding may have created (or resolved) a
         # collision — re-scan and refresh the yellow warning pill.
         self._refresh_gesture_binds_warnings()
@@ -5156,6 +6783,11 @@ class MainWindow(QMainWindow):
             TouchlessNotice.show_warn(self, "Save failed", f"Could not write settings: {exc}")
             return
         self._gesture_binds_pending_changes.clear()
+        # Save complete — clear the Save Changes button's pending
+        # blue tint back to neutral.
+        self._set_settings_save_button_pending(
+            getattr(self, "_gesture_binds_save_button", None), False
+        )
         # Pending changes flushed — re-scan in case the user just saved
         # a configuration that still has overlapping bindings.
         self._refresh_gesture_binds_warnings()
@@ -5685,9 +7317,18 @@ class MainWindow(QMainWindow):
 
         colors_box = QFrame()
         colors_box.setObjectName("innerCard")
+        colors_box.setAttribute(Qt.WA_StyledBackground, True)
+        colors_box.setStyleSheet(self._settings_inner_card_stylesheet())
         colors_layout = QVBoxLayout(colors_box)
         colors_layout.setContentsMargins(16, 16, 16, 16)
         colors_layout.setSpacing(12)
+
+        # Snapshot the saved colors at panel build so we can detect
+        # pending edits and flip Apply Changes to primary-blue —
+        # mirrors the camera/microphone/save-locations Save Changes
+        # flow. apply_current_settings / revert / light-mode rebuild
+        # all refresh this snapshot.
+        self._colors_saved_snapshot = self._snapshot_colors_config()
 
         self.primary_picker = self._create_color_row(colors_layout, "Primary color", self.config.primary_color, "primary_color")
         self.accent_picker = self._create_color_row(colors_layout, "Accent color", self.config.accent_color, "accent_color")
@@ -5695,18 +7336,25 @@ class MainWindow(QMainWindow):
         self.text_picker = self._create_color_row(colors_layout, "Text color", self.config.text_color, "text_color")
 
         button_row = QHBoxLayout()
-        button_row.addStretch(1)
         # Light / Dark Mode toggle. Click to flip the whole color
         # scheme; the button label reflects the *next* state so the
         # user knows what the click will do.
         in_light_mode = self._is_light_mode_active()
         self.light_mode_button = QPushButton("Dark Mode" if in_light_mode else "Light Mode")
+        self._mark_settings_panel_button(self.light_mode_button)
         self.light_mode_button.clicked.connect(self._on_light_mode_clicked)
         button_row.addWidget(self.light_mode_button)
         revert_button = QPushButton("Revert to Original")
+        self._mark_settings_panel_button(revert_button)
         revert_button.clicked.connect(self.revert_to_original_colors)
         apply_button = QPushButton("Apply Changes")
+        # objectName="settingsSaveButton" so it picks up the same
+        # neutral-default-then-primary-blue-when-pending rules the
+        # Camera / Microphone / Save Locations save buttons use.
+        apply_button.setObjectName("settingsSaveButton")
+        apply_button.setProperty("pendingSave", False)
         apply_button.clicked.connect(self.apply_current_settings)
+        self._colors_apply_button = apply_button
         button_row.addWidget(revert_button)
         button_row.addWidget(apply_button)
         colors_layout.addLayout(button_row)
@@ -5859,8 +7507,25 @@ class MainWindow(QMainWindow):
     def _build_camera_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Camera",
-            "Touchless searches for cameras when it opens. You can leave it on Auto-select or save a specific camera from the devices found on this computer.",
+            "",
         )
+        title_item = layout.takeAt(0)
+        title_label = title_item.widget() if title_item is not None else None
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        if title_label is not None:
+            header_row.addWidget(title_label)
+        header_row.addStretch(1)
+        camera_button_style = self._settings_panel_button_stylesheet()
+        self.save_camera_button = QPushButton("Save Changes")
+        self.save_camera_button.setObjectName("settingsSaveButton")
+        self.save_camera_button.setProperty("pendingSave", False)
+        self.save_camera_button.clicked.connect(self.save_camera_preference_from_settings)
+        self.save_camera_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        header_row.addWidget(self.save_camera_button, 0, Qt.AlignTop)
+        layout.insertLayout(0, header_row)
+        self.clear_camera_button = None
 
         # The camera section has outgrown a single viewport. Wrap it in a
         # scroll area so long content (phone-camera URL + QR block, etc.)
@@ -5908,9 +7573,11 @@ class MainWindow(QMainWindow):
 
         box = QFrame()
         box.setObjectName("innerCard")
+        box.setAttribute(Qt.WA_StyledBackground, True)
+        box.setStyleSheet(self._settings_inner_card_stylesheet())
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(16, 16, 16, 16)
-        box_layout.setSpacing(12)
+        box_layout.setSpacing(8)
 
         # Small checkbox stylesheet shared across this panel.
         checkbox_style_tpl = (
@@ -5941,7 +7608,7 @@ class MainWindow(QMainWindow):
             f"  font-weight: 600;"
             f"  letter-spacing: 1px;"
             f"  text-transform: uppercase;"
-            f"  margin-top: 4px;"
+            f"  margin-top: 0px;"
             f"}}"
         )
 
@@ -5958,7 +7625,14 @@ class MainWindow(QMainWindow):
 
         self.camera_page_status = QLabel("Detected cameras: scanning...")
         self.camera_page_status.setWordWrap(True)
-        box_layout.addWidget(self.camera_page_status)
+        self.camera_page_status.hide()
+
+        note = QLabel(
+            "Choose from the list of cameras connected to your device. Preview shows the selected camera."
+        )
+        note.setObjectName("cameraNote")
+        note.setWordWrap(True)
+        box_layout.addWidget(note)
 
         self.camera_combo = _RefreshingCameraCombo()
         self.camera_combo.setObjectName("settingsCameraCombo")
@@ -5973,34 +7647,32 @@ class MainWindow(QMainWindow):
         # don't kick off duplicate scans.
         self._camera_inventory_thread: _CameraInventoryThread | None = None
         self.camera_combo.popup_about_to_show.connect(self._kick_off_async_camera_refresh)
+        self.camera_combo.currentIndexChanged.connect(self._on_camera_settings_selection_changed)
         box_layout.addWidget(self.camera_combo)
-
-        note = QLabel(
-            "Choose from the list of cameras connected to your device. "
-            "Click Preview to see the selected camera's view."
-        )
-        note.setObjectName("cameraNote")
-        note.setWordWrap(True)
-        box_layout.addWidget(note)
 
         # Preview button row — opens a Touchless-themed live preview of
         # whichever camera is currently selected in the dropdown above.
         preview_row = QHBoxLayout()
-        preview_row.addStretch(1)
+        preview_row.setContentsMargins(0, 0, 0, 0)
+        preview_row.setSpacing(10)
         self.camera_preview_button = QPushButton("Preview")
         self.camera_preview_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.camera_preview_button.clicked.connect(self._open_camera_preview)
+        self.camera_preview_button.setStyleSheet(camera_button_style)
         preview_row.addWidget(self.camera_preview_button)
-        box_layout.addLayout(preview_row)
-
-        self.camera_already_mirrored_checkbox = QCheckBox("This camera source is already mirrored (skip Touchless's flip)")
+        self.camera_already_mirrored_checkbox = QCheckBox("Check this box to flip the camera view, if not mirroring")
         self.camera_already_mirrored_checkbox.setObjectName("cameraMirroredCheckbox")
         self.camera_already_mirrored_checkbox.setStyleSheet(
             checkbox_style_tpl.format(name="cameraMirroredCheckbox", text=self.config.text_color, accent=self.config.accent_color)
         )
-        self.camera_already_mirrored_checkbox.setChecked(bool(getattr(self.config, "camera_source_is_mirrored", False)))
+        self.camera_already_mirrored_checkbox.setChecked(
+            not bool(getattr(self.config, "camera_source_is_mirrored", False))
+        )
         self.camera_already_mirrored_checkbox.toggled.connect(self._on_camera_already_mirrored_toggled)
-        box_layout.addWidget(self.camera_already_mirrored_checkbox)
+        preview_row.addWidget(self.camera_already_mirrored_checkbox)
+        preview_row.addStretch(1)
+        box_layout.addLayout(preview_row)
+        box_layout.addSpacing(16)
 
         # ============================================================
         # 2. PHONE CAMERA VIA QR CODE
@@ -6011,13 +7683,10 @@ class MainWindow(QMainWindow):
         # ============================================================
         box_layout.addWidget(_section_header("Phone Camera — Via QR Code"))
 
-        qr_note = QLabel(
-            "No phone app needed. Click Connect Phone (QR), scan the code with your phone's camera, "
-            "then follow the prompts on the phone page. Touchless serves a small web page that streams your phone's "
-            "camera directly to this PC. Works on iOS and Android."
+        qr_note = self._build_expandable_note(
+            "Use your phone as the camera by scanning a QR code from its browser.",
+            "No phone app is needed. Touchless opens a small phone page that streams the camera directly to this PC after you scan the QR code and works on iPhone and Android.",
         )
-        qr_note.setObjectName("cameraNote")
-        qr_note.setWordWrap(True)
         box_layout.addWidget(qr_note)
 
         qr_row = QHBoxLayout()
@@ -6026,12 +7695,14 @@ class MainWindow(QMainWindow):
         self.phone_camera_qr_button = QPushButton("Show QR Code" if already_paired else "Connect Phone (QR)")
         self.phone_camera_qr_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.phone_camera_qr_button.clicked.connect(self._on_phone_camera_qr_clicked)
+        self.phone_camera_qr_button.setStyleSheet(camera_button_style)
         qr_row.addWidget(self.phone_camera_qr_button)
 
         self.phone_camera_qr_disconnect_button = QPushButton("Disconnect Phone")
         self.phone_camera_qr_disconnect_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.phone_camera_qr_disconnect_button.clicked.connect(self._on_phone_camera_qr_disconnect_clicked)
         self.phone_camera_qr_disconnect_button.setVisible(already_paired)
+        self.phone_camera_qr_disconnect_button.setStyleSheet(camera_button_style)
         qr_row.addWidget(self.phone_camera_qr_disconnect_button)
 
         qr_row.addStretch(1)
@@ -6070,19 +7741,19 @@ class MainWindow(QMainWindow):
         self.phone_camera_qr_status_label = QLabel(initial_status)
         self.phone_camera_qr_status_label.setObjectName("cameraNote")
         self.phone_camera_qr_status_label.setWordWrap(True)
+        self.phone_camera_qr_status_label.setVisible(bool(initial_status))
         box_layout.addWidget(self.phone_camera_qr_status_label)
+        box_layout.addSpacing(16)
 
         # ============================================================
         # 4. LOW FPS MODE
         # ============================================================
         box_layout.addWidget(_section_header("Low FPS Mode"))
 
-        low_fps_note = QLabel(
-            "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). "
-            "Touchless also offers to turn this on automatically if your measured FPS stays low for too long."
+        low_fps_note = self._build_expandable_note(
+            "Keeps gestures registering when your camera frame rate drops.",
+            "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). Touchless can also offer to turn this on automatically if your measured FPS stays low for too long.",
         )
-        low_fps_note.setObjectName("cameraNote")
-        low_fps_note.setWordWrap(True)
         box_layout.addWidget(low_fps_note)
 
         low_fps_row = QHBoxLayout()
@@ -6091,23 +7762,22 @@ class MainWindow(QMainWindow):
         self.low_fps_button.setChecked(bool(self.config.low_fps_mode))
         self.low_fps_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.low_fps_button.clicked.connect(self._on_low_fps_button_toggled)
+        self.low_fps_button.setStyleSheet(camera_button_style)
         low_fps_row.addWidget(self.low_fps_button)
         low_fps_row.addStretch(1)
         box_layout.addLayout(low_fps_row)
         self._refresh_low_fps_button_label()
+        box_layout.addSpacing(16)
 
         # ============================================================
         # 5. LITE MODE
         # ============================================================
         box_layout.addWidget(_section_header("Lite Mode"))
 
-        lite_mode_note = QLabel(
-            "Improves processing by ~2.5x for simple gestures and commands. "
-            "For very extreme angles or heavy occlusion may be slightly less stable. "
-            "\"Lite\" badge will appear in live viewers when activated."
+        lite_mode_note = self._build_expandable_note(
+            "Speeds up processing for simpler tracking on lighter hardware.",
+            "Lite Mode improves processing by about 2.5x for simple gestures and commands. For very extreme angles or heavy occlusion it may be slightly less stable. A \"Lite\" badge appears in live viewers when activated.",
         )
-        lite_mode_note.setObjectName("cameraNote")
-        lite_mode_note.setWordWrap(True)
         box_layout.addWidget(lite_mode_note)
 
         lite_mode_row = QHBoxLayout()
@@ -6116,23 +7786,22 @@ class MainWindow(QMainWindow):
         self.lite_mode_button.setChecked(bool(getattr(self.config, "lite_mode", False)))
         self.lite_mode_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.lite_mode_button.clicked.connect(self._on_lite_mode_button_toggled)
+        self.lite_mode_button.setStyleSheet(camera_button_style)
         lite_mode_row.addWidget(self.lite_mode_button)
         lite_mode_row.addStretch(1)
         box_layout.addLayout(lite_mode_row)
         self._refresh_lite_mode_button_label()
+        box_layout.addSpacing(16)
 
         # ============================================================
         # 6. GPU MODE
         # ============================================================
         box_layout.addWidget(_section_header("GPU Mode"))
 
-        gpu_mode_note = QLabel(
-            "Uses your graphics card to speed up hand tracking when available. "
-            "If your machine can't run it, Touchless quietly falls back to the "
-            "regular path so gestures keep working."
+        gpu_mode_note = self._build_expandable_note(
+            "Uses your graphics card for faster hand tracking when available.",
+            "If your machine can run GPU Mode, Touchless uses the graphics card to speed up hand tracking. If not, Touchless quietly falls back to the regular path so gestures keep working.",
         )
-        gpu_mode_note.setObjectName("cameraNote")
-        gpu_mode_note.setWordWrap(True)
         box_layout.addWidget(gpu_mode_note)
 
         gpu_mode_row = QHBoxLayout()
@@ -6141,6 +7810,7 @@ class MainWindow(QMainWindow):
         self.gpu_mode_button.setChecked(bool(getattr(self.config, "gpu_mode", False)))
         self.gpu_mode_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.gpu_mode_button.clicked.connect(self._on_gpu_mode_button_toggled)
+        self.gpu_mode_button.setStyleSheet(camera_button_style)
         gpu_mode_row.addWidget(self.gpu_mode_button)
         gpu_mode_row.addStretch(1)
         box_layout.addLayout(gpu_mode_row)
@@ -6176,33 +7846,8 @@ class MainWindow(QMainWindow):
             pass
         self._refresh_gpu_mode_button_label()
 
-        # ============================================================
-        # 7. SAVE CAMERA SELECTION (at the bottom)
-        # ============================================================
-        box_layout.addWidget(_section_header("Save Camera Selection"))
-
-        save_hint = QLabel(
-            "Pick a camera from the list above and click Save to remember it. "
-            "Use Auto-Select to let Touchless choose for you each launch."
-        )
-        save_hint.setObjectName("cameraNote")
-        save_hint.setWordWrap(True)
-        box_layout.addWidget(save_hint)
-
-        actions_row = QHBoxLayout()
-        actions_row.setSpacing(8)
-        self.save_camera_button = QPushButton("Save Camera Selection")
-        self.save_camera_button.clicked.connect(self.save_camera_preference_from_settings)
-        self.clear_camera_button = QPushButton("Use Auto-Select")
-        self.clear_camera_button.clicked.connect(self.clear_camera_preference)
-        for btn in (self.save_camera_button, self.clear_camera_button):
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        actions_row.addWidget(self.save_camera_button)
-        actions_row.addWidget(self.clear_camera_button)
-        actions_row.addStretch(1)
-        box_layout.addLayout(actions_row)
-
         self._refresh_phone_camera_controls()
+        self._refresh_camera_settings_save_state()
 
         scroll.setWidget(box)
         self._install_scroll_wheel_forwarder(scroll)
@@ -6348,11 +7993,11 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_camera_already_mirrored_toggled(self, checked: bool) -> None:
-        self.config.camera_source_is_mirrored = bool(checked)
+        self.config.camera_source_is_mirrored = not bool(checked)
         save_config(self.config)
         if hasattr(self, "last_action_label"):
             self.last_action_label.setText(
-                "Last action: source-already-mirrored ON" if checked else "Last action: source-already-mirrored OFF"
+                "Last action: camera flip on" if checked else "Last action: camera flip off"
             )
         # Takes effect on the very next frame the engine reads — no camera
         # restart needed, since the flip decision is re-evaluated every tick.
@@ -6441,6 +8086,7 @@ class MainWindow(QMainWindow):
         self.config.phone_camera_enabled = False
         self.config.phone_camera_qr_paired = True
         self.config.phone_camera_qr_active = True
+        self.config.phone_camera_qr_use_mic = True
         save_config(self.config)
         if hasattr(self, "phone_camera_checkbox"):
             self.phone_camera_checkbox.blockSignals(True)
@@ -6452,18 +8098,20 @@ class MainWindow(QMainWindow):
             self.use_phone_camera_qr_checkbox.setEnabled(True)
             self.use_phone_camera_qr_checkbox.blockSignals(False)
         if hasattr(self, "use_phone_mic_checkbox"):
-            # Pairing the camera does NOT imply the user wants to route
-            # phone audio as well — keep the mic checkbox in whatever
-            # state the user left it, but guarantee it isn't auto-
-            # checked by this flow. The checkbox is an explicit opt-in.
+            # Hidden legacy control — keep it synced so older helper
+            # paths still see the current source choice.
+            self.use_phone_mic_checkbox.blockSignals(True)
+            self.use_phone_mic_checkbox.setChecked(True)
             self.use_phone_mic_checkbox.setEnabled(True)
+            self.use_phone_mic_checkbox.blockSignals(False)
         if hasattr(self, "use_phone_mic_hint"):
             self.use_phone_mic_hint.setText(
                 "Also make sure the phone page's Mic dropdown is set to 'send to PC' — otherwise no audio "
                 "reaches Touchless and voice commands fall back to the local mic."
             )
-        if hasattr(self, "phone_camera_qr_button_mic"):
-            self.phone_camera_qr_button_mic.setText("Show QR Code")
+        self._apply_phone_mic_preference()
+        self._rebuild_microphone_combo()
+        self._refresh_phone_mic_dependent_ui()
         # Keep the manual-pair flow's status label in sync with the
         # connected-device label that the server will emit once the
         # phone loads the page. If the phone already announced itself
@@ -6481,7 +8129,7 @@ class MainWindow(QMainWindow):
         sl = getattr(self._phone_camera_qr_server, "connected_phone_label", None) if self._phone_camera_qr_server is not None else None
         if sl:
             self._phone_connected_label = str(sl)
-        self.phone_camera_qr_status_label.setText(self._phone_paired_status_text())
+        self._set_phone_camera_qr_status_text(self._phone_paired_status_text())
         self.phone_camera_qr_disconnect_button.setVisible(True)
         self.phone_camera_qr_button.setText("Show QR Code")
         # Rebuild camera dropdown so the new "Phone Camera (QR)"
@@ -6534,16 +8182,21 @@ class MainWindow(QMainWindow):
             return f"Paired — {url}"
         return "Paired"
 
+    def _set_phone_camera_qr_status_text(self, text: str) -> None:
+        label_widget = getattr(self, "phone_camera_qr_status_label", None)
+        if label_widget is None:
+            return
+        value = str(text or "").strip()
+        label_widget.setText(value)
+        label_widget.setVisible(bool(value))
+
     def _refresh_phone_status_label(self) -> None:
         """Re-render the QR status label. Safe to call from anywhere on
         the GUI thread; no-op if the label hasn't been built yet (e.g.,
         the user is on the home page and hasn't opened Settings)."""
-        label_widget = getattr(self, "phone_camera_qr_status_label", None)
-        if label_widget is None:
-            return
         if not bool(getattr(self.config, "phone_camera_qr_paired", False)):
             return
-        label_widget.setText(self._phone_paired_status_text())
+        self._set_phone_camera_qr_status_text(self._phone_paired_status_text())
 
     def _on_phone_camera_qr_disconnect_clicked(self) -> None:
         server = getattr(self, "_phone_camera_qr_server", None)
@@ -6555,12 +8208,11 @@ class MainWindow(QMainWindow):
         self._phone_camera_qr_server = None
         self.config.phone_camera_qr_paired = False
         self.config.phone_camera_qr_active = False
+        self.config.phone_camera_qr_use_mic = False
         save_config(self.config)
-        self.phone_camera_qr_status_label.setText("Phone unpaired. The server is stopped.")
+        self._set_phone_camera_qr_status_text("Phone unpaired. The server is stopped.")
         self.phone_camera_qr_disconnect_button.setVisible(False)
         self.phone_camera_qr_button.setText("Connect Phone (QR)")
-        if hasattr(self, "phone_camera_qr_button_mic"):
-            self.phone_camera_qr_button_mic.setText("Connect Phone (QR)")
         if hasattr(self, "use_phone_camera_qr_checkbox"):
             self.use_phone_camera_qr_checkbox.blockSignals(True)
             self.use_phone_camera_qr_checkbox.setChecked(False)
@@ -6575,13 +8227,12 @@ class MainWindow(QMainWindow):
             self.use_phone_mic_hint.setText(
                 "Click 'Connect Phone (QR)' above to pair your phone, then tick the box to use its mic."
             )
-        self._refresh_phone_mic_dependent_ui()
         # Ensure the voice pipeline drops the now-stopped audio source
         # BEFORE the engine restart so the next command goes to the
         # local mic as expected.
-        self.config.phone_camera_qr_use_mic = False
-        save_config(self.config)
         self._apply_phone_mic_preference()
+        self._rebuild_microphone_combo()
+        self._refresh_phone_mic_dependent_ui()
         # Rebuild camera dropdown to drop the now-stale "Phone Camera
         # (QR)" entry and snap selection back to whatever local
         # preference was saved.
@@ -6646,14 +8297,29 @@ class MainWindow(QMainWindow):
             )
 
     def _refresh_phone_mic_dependent_ui(self) -> None:
-        """Visually de-emphasize the local-mic dropdown when phone mic
-        is the chosen source, but KEEP the save/clear buttons clickable
-        so the user can still save their fallback preference and see a
-        confirmation popup. Matches the Camera panel's priority-hint
-        pattern — we don't block the UI, we label it."""
-        phone_active = bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+        """Refresh the QR-mic button and dropdown selection so the
+        visible controls match the saved source choice."""
+        phone_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+        phone_active = phone_paired and bool(getattr(self.config, "phone_camera_qr_use_mic", False))
         if hasattr(self, "microphone_combo"):
-            self.microphone_combo.setEnabled(not phone_active)
+            if phone_active:
+                self._refresh_microphone_combo_selection(self._PHONE_MICROPHONE_DROPDOWN_VALUE)
+            else:
+                self._refresh_microphone_combo_selection(getattr(self.config, "preferred_microphone_name", None))
+            self.microphone_combo.setEnabled(True)
+        button = getattr(self, "phone_camera_qr_button_mic", None)
+        if button is not None:
+            panel_button_style = self._settings_panel_button_stylesheet()
+            if phone_active:
+                button.setText("Using Camera Mic")
+                button.setStyleSheet(panel_button_style)
+            elif phone_paired:
+                button.setText("Show QR Code")
+                button.setStyleSheet(panel_button_style)
+            else:
+                button.setText("Connect Phone (QR)")
+                button.setStyleSheet(panel_button_style)
+        self._refresh_microphone_settings_save_state()
 
     def _on_use_phone_camera_qr_toggled(self, checked: bool) -> None:
         """Switch which camera source the engine reads from.
@@ -6813,8 +8479,24 @@ class MainWindow(QMainWindow):
     def _build_microphone_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Microphone",
-            "Pick the microphone Touchless uses for voice commands and dictation. Auto-select uses the system default.",
+            "",
         )
+        title_item = layout.takeAt(0)
+        title_label = title_item.widget() if title_item is not None else None
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        if title_label is not None:
+            header_row.addWidget(title_label)
+        header_row.addStretch(1)
+        self.save_microphone_button = QPushButton("Save Changes")
+        self.save_microphone_button.setObjectName("settingsSaveButton")
+        self.save_microphone_button.setProperty("pendingSave", False)
+        self.save_microphone_button.clicked.connect(self.save_microphone_preference_from_settings)
+        self.save_microphone_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        header_row.addWidget(self.save_microphone_button, 0, Qt.AlignTop)
+        layout.insertLayout(0, header_row)
+        self.clear_microphone_button = None
 
         # Wrap the panel body in a scroll area so the mic selector +
         # phone-mic toggle + test/gain controls don't get squeezed when
@@ -6870,7 +8552,7 @@ class MainWindow(QMainWindow):
         scroll_container.setStyleSheet("background: transparent;")
         scroll_vbox = QVBoxLayout(scroll_container)
         scroll_vbox.setContentsMargins(0, 0, 0, 0)
-        scroll_vbox.setSpacing(14)
+        scroll_vbox.setSpacing(8)
 
         section_style = (
             f"QLabel#micSectionHeader {{"
@@ -6879,7 +8561,7 @@ class MainWindow(QMainWindow):
             f"  font-weight: 600;"
             f"  letter-spacing: 1px;"
             f"  text-transform: uppercase;"
-            f"  margin-top: 4px;"
+            f"  margin-top: 0px;"
             f"}}"
         )
 
@@ -6891,38 +8573,36 @@ class MainWindow(QMainWindow):
 
         box = QFrame()
         box.setObjectName("innerCard")
+        box.setAttribute(Qt.WA_StyledBackground, True)
+        box.setStyleSheet(self._settings_inner_card_stylesheet())
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(16, 16, 16, 16)
-        box_layout.setSpacing(12)
+        box_layout.setSpacing(8)
 
         # ============================================================
         # LOCAL MICROPHONE
         # ============================================================
         box_layout.addWidget(_section_header("Local Microphone"))
 
-        self.microphone_combo = QComboBox()
-        self.microphone_combo.setObjectName("settingsMicrophoneCombo")
-        box_layout.addWidget(self.microphone_combo)
-
-        note = QLabel(
-            "Choose from the list of microphones connected to your device. "
-            "Auto-select uses whichever input is the system default."
-        )
+        note = QLabel("Choose a device for speaking input")
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
         box_layout.addWidget(note)
+
+        self.microphone_combo = QComboBox()
+        self.microphone_combo.setObjectName("settingsMicrophoneCombo")
+        self.microphone_combo.currentIndexChanged.connect(self._on_microphone_settings_selection_changed)
+        box_layout.addWidget(self.microphone_combo)
 
         # ============================================================
         # PHONE MICROPHONE (QR)
         # ============================================================
         box_layout.addWidget(_section_header("Phone Microphone (QR)"))
 
-        phone_mic_note = QLabel(
-            "Pair your phone via the QR button below, then tick the box to route "
-            "its mic into Touchless. Phone mics are usually cleaner than laptop mics."
+        phone_mic_note = self._build_expandable_note(
+            "Pair your phone with the QR button below to use its microphone in Touchless.",
+            "Once paired, Touchless can route your phone's microphone into voice commands and dictation. Phone mics often sound cleaner than laptop mics, especially on noisy rooms or thin laptops.",
         )
-        phone_mic_note.setObjectName("cameraNote")
-        phone_mic_note.setWordWrap(True)
         box_layout.addWidget(phone_mic_note)
 
         already_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
@@ -6936,6 +8616,7 @@ class MainWindow(QMainWindow):
         )
         self.phone_camera_qr_button_mic.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.phone_camera_qr_button_mic.clicked.connect(self._on_phone_camera_qr_clicked)
+        self.phone_camera_qr_button_mic.setStyleSheet(self._settings_panel_button_stylesheet())
         mic_qr_row.addWidget(self.phone_camera_qr_button_mic)
         mic_qr_row.addStretch(1)
         box_layout.addLayout(mic_qr_row)
@@ -6969,7 +8650,7 @@ class MainWindow(QMainWindow):
         # refuses to turn on without a paired phone (and shows a hint).
         self.use_phone_mic_checkbox.setEnabled(True)
         self.use_phone_mic_checkbox.toggled.connect(self._on_use_phone_mic_toggled)
-        box_layout.addWidget(self.use_phone_mic_checkbox)
+        self.use_phone_mic_checkbox.hide()
 
         self.use_phone_mic_hint = QLabel(
             "Also make sure the phone page's Mic dropdown is set to 'send to PC' — otherwise no audio "
@@ -6979,50 +8660,28 @@ class MainWindow(QMainWindow):
         )
         self.use_phone_mic_hint.setObjectName("cameraNote")
         self.use_phone_mic_hint.setWordWrap(True)
-        box_layout.addWidget(self.use_phone_mic_hint)
-
-        # ============================================================
-        # SAVE MICROPHONE SELECTION (at the bottom)
-        # ============================================================
-        box_layout.addWidget(_section_header("Save Microphone Selection"))
-
-        save_hint = QLabel(
-            "Pick a microphone from the list above and click Save to remember it. "
-            "Use Auto-Select to let Touchless use the system default each launch."
-        )
-        save_hint.setObjectName("cameraNote")
-        save_hint.setWordWrap(True)
-        box_layout.addWidget(save_hint)
-
-        actions_row = QHBoxLayout()
-        self.save_microphone_button = QPushButton("Save Microphone Choice")
-        self.save_microphone_button.clicked.connect(self.save_microphone_preference_from_settings)
-        self.clear_microphone_button = QPushButton("Use Auto-Select")
-        self.clear_microphone_button.clicked.connect(self.clear_microphone_preference)
-        for btn in (self.save_microphone_button, self.clear_microphone_button):
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        actions_row.addWidget(self.save_microphone_button)
-        actions_row.addWidget(self.clear_microphone_button)
-        actions_row.addStretch(1)
-        box_layout.addLayout(actions_row)
+        self.use_phone_mic_hint.hide()
 
         scroll_vbox.addWidget(box)
 
         test_box = QFrame()
         test_box.setObjectName("innerCard")
+        test_box.setAttribute(Qt.WA_StyledBackground, True)
+        test_box.setStyleSheet(self._settings_inner_card_stylesheet())
         test_layout = QVBoxLayout(test_box)
         test_layout.setContentsMargins(16, 16, 16, 16)
-        test_layout.setSpacing(10)
+        test_layout.setSpacing(8)
 
         test_title = QLabel("Test Microphone")
-        test_title.setObjectName("sectionSubtitle")
+        test_title.setStyleSheet(
+            f"color: {self.config.accent_color};"
+            f" font-size: 13px;"
+            f" font-weight: 600;"
+        )
         test_layout.addWidget(test_title)
 
         test_note = QLabel(
-            "Click Start Mic Test to watch the volume bar move while you talk. "
-            "Click Stop, then Playback to hear what was captured. "
-            "The Gain slider boosts voice command audio; dictation reads the system "
-            "input level directly."
+            "Start a quick mic test, speak normally, then stop and play it back."
         )
         test_note.setObjectName("cameraNote")
         test_note.setWordWrap(True)
@@ -7070,8 +8729,10 @@ class MainWindow(QMainWindow):
         test_buttons_row = QHBoxLayout()
         self.mic_test_toggle_button = QPushButton("Start Mic Test")
         self.mic_test_toggle_button.setCheckable(True)
+        self.mic_test_toggle_button.setStyleSheet(self._settings_panel_button_stylesheet())
         self.mic_test_toggle_button.toggled.connect(self._on_mic_test_toggled)
         self.mic_test_playback_button = QPushButton("Playback")
+        self.mic_test_playback_button.setStyleSheet(self._settings_panel_button_stylesheet())
         self.mic_test_playback_button.clicked.connect(self._on_mic_test_playback_clicked)
         test_buttons_row.addWidget(self.mic_test_toggle_button)
         test_buttons_row.addWidget(self.mic_test_playback_button)
@@ -7101,9 +8762,10 @@ class MainWindow(QMainWindow):
         scroll.setWidget(scroll_container)
         self._install_scroll_wheel_forwarder(scroll)
         layout.addWidget(scroll, 1)
-        # Reflect current phone-mic preference on the local dropdown +
-        # save/clear buttons (greyed when phone mic is active).
+        # Reflect the persisted phone-mic source choice in the visible
+        # dropdown + QR button state.
         self._refresh_phone_mic_dependent_ui()
+        self._refresh_microphone_settings_save_state()
         return panel
 
     def _on_mic_test_gain_changed(self, value: int) -> None:
@@ -7111,18 +8773,7 @@ class MainWindow(QMainWindow):
         self._mic_test_gain = gain
         if hasattr(self, "mic_test_gain_value_label"):
             self.mic_test_gain_value_label.setText(f"{gain:.1f}x")
-        self.config.mic_input_gain = gain
-        save_config(self.config)
-        if self._worker is not None:
-            try:
-                self._worker.voice_listener.set_input_gain(gain)
-            except Exception:
-                pass
-        if self.tutorial_window is not None and hasattr(self.tutorial_window, "_voice_listener"):
-            try:
-                self.tutorial_window._voice_listener.set_input_gain(gain)
-            except Exception:
-                pass
+        self._refresh_microphone_settings_save_state()
 
     def _selected_mic_test_device(self):
         combo = getattr(self, "microphone_combo", None)
@@ -7130,6 +8781,8 @@ class MainWindow(QMainWindow):
             return None
         data = combo.currentData()
         if data is None:
+            return None
+        if data == self._PHONE_MICROPHONE_DROPDOWN_VALUE:
             return None
         name = str(data).strip()
         if not name:
@@ -7307,8 +8960,43 @@ class MainWindow(QMainWindow):
     def _build_save_locations_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
             "Save Locations",
-            "Choose the default folders used for drawings, screenshots, screen recordings, and clips. Each output type keeps its own saved location.",
+            "Type a folder path or use Browse to choose the default save location for each output type. If a folder does not exist yet, Touchless will try to create it safely.",
         )
+        save_location_input_style = (
+            "QLineEdit {"
+            " background-color: #DDEEFF;"
+            " color: #0B2A45;"
+            f" selection-background-color: {self.config.accent_color};"
+            " selection-color: #001B24;"
+            " border: 1px solid rgba(123, 167, 217, 0.78);"
+            " border-radius: 10px;"
+            " padding: 10px 12px;"
+            " font-weight: 600;"
+            "}"
+            "QLineEdit:focus {"
+            f" border: 1px solid {self.config.accent_color};"
+            " background-color: #EEF7FF;"
+            "}"
+        )
+        title_item = layout.takeAt(0)
+        title_label = title_item.widget() if title_item is not None else None
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        if title_label is not None:
+            header_row.addWidget(title_label)
+        header_row.addStretch(1)
+        save_locations_button_style = self._settings_panel_button_stylesheet()
+        self.save_locations_button = QPushButton("Save Changes")
+        self.save_locations_button.setObjectName("settingsSaveButton")
+        # Start neutral — only flip to primary blue once the user
+        # actually edits a path or name. Mirrors the camera /
+        # microphone / gesture-binds Save flows.
+        self.save_locations_button.setProperty("pendingSave", False)
+        self.save_locations_button.clicked.connect(self._save_all_save_location_settings)
+        self.save_locations_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        header_row.addWidget(self.save_locations_button, 0, Qt.AlignTop)
+        layout.insertLayout(0, header_row)
 
         scroll = QScrollArea()
         scroll.setObjectName("saveLocationsScroll")
@@ -7328,17 +9016,11 @@ class MainWindow(QMainWindow):
 
         box = QFrame()
         box.setObjectName("innerCard")
+        box.setAttribute(Qt.WA_StyledBackground, True)
+        box.setStyleSheet(self._settings_inner_card_stylesheet())
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(18, 18, 18, 18)
         box_layout.setSpacing(14)
-
-        note = QLabel(
-            "Type a folder path and press Save, or use Browse to choose a folder. "
-            "If a folder does not exist yet, Touchless will try to create it safely."
-        )
-        note.setObjectName("cameraNote")
-        note.setWordWrap(True)
-        box_layout.addWidget(note)
 
         for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
             row_frame = QFrame()
@@ -7349,6 +9031,7 @@ class MainWindow(QMainWindow):
 
             label = QLabel(SAVE_LOCATION_LABELS.get(output_kind, output_kind.title()))
             label.setObjectName("saveLocationLabel")
+            label.setStyleSheet(f"color: {self.config.accent_color}; font-weight: 700;")
             row_layout.addWidget(label)
 
             path_edit = QLineEdit(str(self._save_output_directory(output_kind)))
@@ -7358,7 +9041,14 @@ class MainWindow(QMainWindow):
             path_edit.setMinimumWidth(280)
             path_edit.setMinimumHeight(40)
             path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            path_edit.setStyleSheet(save_location_input_style)
             path_edit.returnPressed.connect(lambda kind=output_kind, editor=path_edit: self._apply_save_location(kind, editor))
+            # Edits to a save-location path mark Save Changes pending
+            # so the user knows to click it for the change to land.
+            # Without this signal the user could re-type a path and
+            # Touchless would silently keep the previous value if the
+            # user navigated away without pressing Enter.
+            path_edit.textChanged.connect(self._refresh_save_locations_save_state)
             self._save_location_inputs[output_kind] = path_edit
             row_layout.addWidget(path_edit)
 
@@ -7367,12 +9057,9 @@ class MainWindow(QMainWindow):
             button_row.setSpacing(10)
             browse_button = QPushButton("Browse")
             browse_button.setMinimumHeight(38)
+            browse_button.setStyleSheet(save_locations_button_style)
             browse_button.clicked.connect(lambda _checked=False, kind=output_kind: self._browse_save_location(kind))
-            save_button = QPushButton("Save")
-            save_button.setMinimumHeight(38)
-            save_button.clicked.connect(lambda _checked=False, kind=output_kind, editor=path_edit: self._apply_save_location(kind, editor))
             button_row.addWidget(browse_button)
-            button_row.addWidget(save_button)
             button_row.addStretch(1)
             row_layout.addLayout(button_row)
 
@@ -7382,6 +9069,8 @@ class MainWindow(QMainWindow):
 
         name_box = QFrame()
         name_box.setObjectName("innerCard")
+        name_box.setAttribute(Qt.WA_StyledBackground, True)
+        name_box.setStyleSheet(self._settings_inner_card_stylesheet())
         name_box_layout = QVBoxLayout(name_box)
         name_box_layout.setContentsMargins(18, 18, 18, 18)
         name_box_layout.setSpacing(14)
@@ -7402,6 +9091,7 @@ class MainWindow(QMainWindow):
 
             name_label = QLabel(SAVE_LOCATION_LABELS.get(output_kind, output_kind.title()))
             name_label.setObjectName("saveLocationLabel")
+            name_label.setStyleSheet(f"color: {self.config.accent_color}; font-weight: 700;")
             name_row_layout.addWidget(name_label)
 
             current_name = configured_save_name(self.config, output_kind)
@@ -7412,33 +9102,173 @@ class MainWindow(QMainWindow):
             name_edit.setMinimumWidth(280)
             name_edit.setMinimumHeight(40)
             name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            name_edit.setStyleSheet(save_location_input_style)
             name_edit.returnPressed.connect(lambda kind=output_kind, editor=name_edit: self._apply_save_name(kind, editor))
+            # Same dirty-tracking signal as the path field above.
+            name_edit.textChanged.connect(self._refresh_save_locations_save_state)
             self._save_name_inputs[output_kind] = name_edit
             name_row_layout.addWidget(name_edit)
-
-            name_button_row = QHBoxLayout()
-            name_button_row.setContentsMargins(0, 0, 0, 0)
-            name_button_row.setSpacing(10)
-            name_save_btn = QPushButton("Save")
-            name_save_btn.setMinimumHeight(38)
-            name_save_btn.clicked.connect(lambda _checked=False, kind=output_kind, editor=name_edit: self._apply_save_name(kind, editor))
-            name_button_row.addWidget(name_save_btn)
-            name_button_row.addStretch(1)
-            name_row_layout.addLayout(name_button_row)
 
             name_box_layout.addWidget(name_row_frame)
 
         scroll_layout.addWidget(name_box)
+
+        # ---- Mouse Control section ------------------------------------
+        # Persistent default for the monitor that mouse-mode controls.
+        # Lives here in Save Locations because there's no dedicated
+        # Mouse settings panel today; the mouse-mode-on activation
+        # popup links here via a "Monitor Choices" button so users
+        # can flip the default and see a visual preview of the
+        # camera-frame split mapping. None / "All Monitors" =
+        # historical full-virtual-desktop behavior.
+        mouse_box = QFrame()
+        mouse_box.setObjectName("innerCard")
+        mouse_box.setAttribute(Qt.WA_StyledBackground, True)
+        mouse_box.setStyleSheet(self._settings_inner_card_stylesheet())
+        mouse_box.setObjectName("saveLocationsMouseControlBox")
+        mouse_box_layout = QVBoxLayout(mouse_box)
+        mouse_box_layout.setContentsMargins(18, 18, 18, 18)
+        mouse_box_layout.setSpacing(14)
+        mouse_header = QLabel("Mouse Control")
+        mouse_header.setObjectName("settingsPanelTitle")
+        mouse_box_layout.addWidget(mouse_header)
+        mouse_note = QLabel(
+            "Choose which monitor mouse-mode controls. Selecting a single "
+            "display restricts the cursor to that screen and reshapes the "
+            "camera-frame mouse box to match its aspect. \"All Monitors\" "
+            "uses the full virtual desktop (the original behavior)."
+        )
+        mouse_note.setObjectName("cameraNote")
+        mouse_note.setWordWrap(True)
+        mouse_box_layout.addWidget(mouse_note)
+
+        # Discover monitors via QGuiApplication. Layout label uses
+        # the same "Monitor 1 (1920x1080 @ 0,0)" shape the
+        # CaptureMonitorDialog uses, so users see consistent
+        # device naming in both places.
+        from PySide6.QtGui import QGuiApplication as _MQGui
+
+        self._save_locations_mouse_monitor_combo = QComboBox()
+        self._save_locations_mouse_monitor_combo.setObjectName("settingsCameraCombo")
+        self._save_locations_mouse_monitor_combo.addItem("All Monitors (full virtual desktop)", None)
+        try:
+            screens = list(_MQGui.screens() or [])
+        except Exception:
+            screens = []
+        for idx, screen in enumerate(screens):
+            try:
+                geo = screen.geometry()
+                label = f"Monitor {idx + 1} ({geo.width()}x{geo.height()} @ {geo.x()},{geo.y()})"
+            except Exception:
+                label = f"Monitor {idx + 1}"
+            self._save_locations_mouse_monitor_combo.addItem(label, idx)
+        # Restore the saved selection.
+        saved_monitor = getattr(self.config, "mouse_active_monitor_index", None)
+        if saved_monitor is None:
+            self._save_locations_mouse_monitor_combo.setCurrentIndex(0)
+        else:
+            for i in range(self._save_locations_mouse_monitor_combo.count()):
+                if self._save_locations_mouse_monitor_combo.itemData(i) == saved_monitor:
+                    self._save_locations_mouse_monitor_combo.setCurrentIndex(i)
+                    break
+        self._save_locations_mouse_monitor_combo.currentIndexChanged.connect(
+            self._on_save_locations_mouse_monitor_changed
+        )
+        mouse_box_layout.addWidget(self._save_locations_mouse_monitor_combo)
+
+        # Visual preview: mini camera-frame with the chosen monitor's
+        # region highlighted in red. Repaints whenever the dropdown
+        # changes (handled in _on_save_locations_mouse_monitor_changed).
+        self._save_locations_mouse_preview = _MouseControlMonitorPreview(self.config)
+        mouse_box_layout.addWidget(self._save_locations_mouse_preview)
+        # Initial paint reflects whatever the dropdown is currently on.
+        self._save_locations_mouse_preview.set_monitor_index(
+            self._save_locations_mouse_monitor_combo.currentData()
+        )
+
+        scroll_layout.addWidget(mouse_box)
+
         scroll_layout.addStretch(1)
 
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll, 1)
         return panel
 
-    def _apply_save_name(self, output_kind: str, editor: QLineEdit | None) -> None:
+    def _on_save_locations_mouse_monitor_changed(self, _index: int) -> None:
+        """Persist the new monitor preference and refresh the preview.
+        Saved immediately (no Save Changes button) since the rest of
+        the dropdown-driven settings in the app behave that way.
+        Touches `last_action_label` so the user sees confirmation."""
+        combo = getattr(self, "_save_locations_mouse_monitor_combo", None)
+        preview = getattr(self, "_save_locations_mouse_preview", None)
+        if combo is None:
+            return
+        chosen = combo.currentData()
+        # itemData returns None for the "All Monitors" entry, which
+        # is exactly the config sentinel we want.
+        self.config.mouse_active_monitor_index = chosen if isinstance(chosen, int) else None
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+        if preview is not None:
+            preview.set_monitor_index(chosen)
+        if hasattr(self, "last_action_label"):
+            label = combo.currentText()
+            self.last_action_label.setText(f"Last action: mouse control monitor set to {label}")
+
+    def _save_all_save_location_settings(self) -> None:
+        all_ok = True
+        for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
+            editor = self._save_location_inputs.get(output_kind)
+            if not self._apply_save_location(output_kind, editor):
+                all_ok = False
+        for output_kind in SAVE_LOCATION_OUTPUT_ORDER:
+            editor = self._save_name_inputs.get(output_kind)
+            if not self._apply_save_name(output_kind, editor):
+                all_ok = False
+        if all_ok:
+            self.last_action_label.setText("Last action: save location settings updated")
+        else:
+            self.last_action_label.setText("Last action: some save location settings could not be updated")
+        # Re-evaluate dirty state — fields that successfully wrote
+        # now match the saved value, so the Save Changes button
+        # should drop back to neutral.
+        self._refresh_save_locations_save_state()
+
+    def _refresh_save_locations_save_state(self, _text: str = "") -> None:
+        """Set the Save Locations button to primary-blue pending
+        when any path or name field differs from its on-disk value,
+        neutral when every field matches. Called from the textChanged
+        signals on each editor and after a successful save."""
+        button = getattr(self, "save_locations_button", None)
+        if button is None:
+            return
+        pending = False
+        try:
+            for output_kind, editor in (self._save_location_inputs or {}).items():
+                if editor is None:
+                    continue
+                saved = str(self._save_output_directory(output_kind))
+                if str(editor.text() or "").strip() != saved.strip():
+                    pending = True
+                    break
+            if not pending:
+                for output_kind, editor in (self._save_name_inputs or {}).items():
+                    if editor is None:
+                        continue
+                    saved = configured_save_name(self.config, output_kind)
+                    if str(editor.text() or "").strip() != str(saved).strip():
+                        pending = True
+                        break
+        except Exception:
+            pending = False
+        self._set_settings_save_button_pending(button, pending)
+
+    def _apply_save_name(self, output_kind: str, editor: QLineEdit | None) -> bool:
         field_name = save_name_config_field(output_kind)
         if not field_name:
-            return
+            return False
         raw_value = str(editor.text() if editor is not None else "").strip()
         if not raw_value:
             raw_value = SAVE_NAME_DEFAULTS.get(output_kind, "Touchless_File")
@@ -7455,6 +9285,7 @@ class MainWindow(QMainWindow):
         self.last_action_label.setText(
             f"Last action: {SAVE_LOCATION_LABELS.get(output_kind, output_kind).lower()} save name updated"
         )
+        return True
 
     def _build_tutorial_panel(self) -> QWidget:
         panel, layout = self._make_content_panel(
@@ -7463,6 +9294,8 @@ class MainWindow(QMainWindow):
         )
         tutorial_box = QFrame()
         tutorial_box.setObjectName("innerCard")
+        tutorial_box.setAttribute(Qt.WA_StyledBackground, True)
+        tutorial_box.setStyleSheet(self._settings_inner_card_stylesheet())
         tutorial_layout = QVBoxLayout(tutorial_box)
         tutorial_layout.setContentsMargins(16, 16, 16, 16)
         tutorial_layout.setSpacing(10)
@@ -7488,6 +9321,7 @@ class MainWindow(QMainWindow):
             tutorial_layout.addWidget(lbl)
 
         open_tutorial_button = QPushButton("Open Tutorial")
+        self._mark_settings_panel_button(open_tutorial_button)
         open_tutorial_button.clicked.connect(lambda: self.open_tutorial(from_settings=True))
         tutorial_layout.addWidget(open_tutorial_button, 0, Qt.AlignLeft)
 
@@ -7513,6 +9347,7 @@ class MainWindow(QMainWindow):
         # ---- Current version + Check button ----
         current_box = QFrame()
         current_box.setObjectName("innerCard")
+        current_box.setAttribute(Qt.WA_StyledBackground, True)
         current_layout = QVBoxLayout(current_box)
         current_layout.setContentsMargins(16, 16, 16, 16)
         current_layout.setSpacing(10)
@@ -7524,6 +9359,7 @@ class MainWindow(QMainWindow):
         version_row.addStretch(1)
 
         self._updates_check_button = QPushButton("Check for Updates")
+        self._mark_settings_panel_button(self._updates_check_button)
         self._updates_check_button.clicked.connect(self._on_updates_panel_check_clicked)
         version_row.addWidget(self._updates_check_button)
         current_layout.addLayout(version_row)
@@ -8086,11 +9922,44 @@ Admin elevation
         row_layout.setSpacing(12)
         label = QLabel(label_text)
         label.setMinimumWidth(110)
-        button = ColorPickerButton(label_text.split()[0], color, lambda c, a=attribute_name: setattr(self.config, a, c))
+
+        def _on_picked(c: str, a: str = attribute_name) -> None:
+            # Update the in-memory config (the picker has always done
+            # this) AND nudge the Apply Changes button so it lights
+            # up primary-blue while there's a pending edit.
+            setattr(self.config, a, c)
+            self._refresh_colors_save_state()
+
+        button = ColorPickerButton(label_text.split()[0], color, _on_picked)
         row_layout.addWidget(label)
         row_layout.addWidget(button, 1)
         parent_layout.addWidget(row)
         return button
+
+    def _snapshot_colors_config(self) -> dict:
+        """Capture the currently-saved color values so we can detect
+        when the user has pending edits in the Colors panel."""
+        return {
+            "primary_color": str(getattr(self.config, "primary_color", "") or ""),
+            "accent_color": str(getattr(self.config, "accent_color", "") or ""),
+            "surface_color": str(getattr(self.config, "surface_color", "") or ""),
+            "text_color": str(getattr(self.config, "text_color", "") or ""),
+        }
+
+    def _refresh_colors_save_state(self) -> None:
+        """Flip the Colors panel's Apply Changes button to primary-
+        blue when any picker value differs from the saved snapshot,
+        neutral when every picker matches the snapshot."""
+        button = getattr(self, "_colors_apply_button", None)
+        if button is None:
+            return
+        snapshot = getattr(self, "_colors_saved_snapshot", None) or {}
+        pending = False
+        for attr, saved in snapshot.items():
+            if str(getattr(self.config, attr, "") or "") != saved:
+                pending = True
+                break
+        self._set_settings_save_button_pending(button, pending)
 
     def _browse_save_location(self, output_kind: str) -> None:
         current_dir = self._save_output_directory(output_kind)
@@ -8104,12 +9973,11 @@ Admin elevation
         editor = self._save_location_inputs.get(output_kind)
         if editor is not None:
             editor.setText(chosen)
-            self._apply_save_location(output_kind, editor)
 
-    def _apply_save_location(self, output_kind: str, editor: QLineEdit | None) -> None:
+    def _apply_save_location(self, output_kind: str, editor: QLineEdit | None) -> bool:
         field_name = save_location_config_field(output_kind)
         if not field_name:
-            return
+            return False
         raw_value = str(editor.text() if editor is not None else "").strip()
         target_dir = Path(raw_value).expanduser() if raw_value else self._save_output_directory(output_kind)
         try:
@@ -8121,7 +9989,7 @@ Admin elevation
             self.last_action_label.setText(
                 f"Last action: could not update {SAVE_LOCATION_LABELS.get(output_kind, output_kind).lower()} folder"
             )
-            return
+            return False
         setattr(self.config, field_name, str(target_dir))
         save_config(self.config)
         if editor is not None:
@@ -8129,6 +9997,7 @@ Admin elevation
         self.last_action_label.setText(
             f"Last action: saved {SAVE_LOCATION_LABELS.get(output_kind, output_kind).lower()} folder {target_dir}"
         )
+        return True
 
     def show_settings_page(self, section_index: int = SECTION_INSTRUCTIONS) -> None:
         self.page_stack.setCurrentWidget(self.settings_page)
@@ -8145,6 +10014,29 @@ Admin elevation
         except Exception:
             pass
         self.page_stack.setCurrentWidget(self.home_page)
+        # Defensive: re-sync the START / END button enabled state
+        # against the worker's actual is_running flag. Fixes a stale
+        # UI state where the engine started via a non-START path
+        # (e.g. tutorial completion auto-start) but the button state
+        # didn't update because the running_state_changed signal got
+        # disconnected during a hot-swap or theme rebuild.
+        self._sync_engine_button_states()
+
+    def _sync_engine_button_states(self) -> None:
+        worker = getattr(self, "_worker", None)
+        is_running = False
+        try:
+            if worker is not None:
+                is_running = bool(getattr(worker, "is_running", False))
+        except Exception:
+            is_running = False
+        try:
+            if hasattr(self, "start_button") and self.start_button is not None:
+                self.start_button.setEnabled(not is_running)
+            if hasattr(self, "end_button") and self.end_button is not None:
+                self.end_button.setEnabled(is_running)
+        except Exception:
+            pass
 
 
     def open_tutorial(self, from_settings: bool = False, start_step_index: int = 0) -> None:
@@ -8190,6 +10082,22 @@ Admin elevation
 
 
     def show_settings_section(self, index: int) -> None:
+        # Walk-through gate: when the guided tour is active, only the
+        # currently-targeted sidebar tab is allowed to switch panels.
+        # Every other click is silently ignored so the user has to
+        # interact with the highlighted target. Clicking the target
+        # itself promotes the walkthrough from "pointing" to "on_page"
+        # and reveals the page-description hint.
+        if getattr(self, "_walkthrough_active", False):
+            target = self._walkthrough_target_section()
+            if index != target:
+                return
+            # Falls through to the normal stack switch below; we'll
+            # signal the on-page transition AFTER the panel is shown
+            # so the new hint paints on top of the right page.
+            walkthrough_targeted_click = True
+        else:
+            walkthrough_targeted_click = False
         # Clear focus before switching so stale focus on a now-hidden line edit
         # doesn't leave the incoming panel unable to receive clicks/wheel events.
         current = self.settings_content_stack.currentWidget()
@@ -8197,6 +10105,20 @@ Admin elevation
             focused = current.focusWidget()
             if focused is not None:
                 focused.clearFocus()
+        # Auto-revert any unsaved edits on the tab the user is leaving.
+        # If the user picked a new camera / mic / save location / color
+        # but didn't click Save Changes (or Apply Changes), navigating
+        # to a different tab discards the in-progress edit so the next
+        # visit to the original tab shows the on-disk state.
+        try:
+            prev_index = self.settings_content_stack.currentIndex()
+        except Exception:
+            prev_index = -1
+        if prev_index != index and prev_index >= 0:
+            try:
+                self._revert_pending_changes_for_section(prev_index)
+            except Exception:
+                pass
         self.settings_content_stack.setCurrentIndex(index)
         for i, button in enumerate(self._settings_nav_buttons):
             button.setChecked(i == index)
@@ -8244,6 +10166,14 @@ Admin elevation
                 layout.activate()
             new_widget.updateGeometry()
             QTimer.singleShot(0, new_widget.update)
+        # Walk-through promotion: now that the target panel is visible,
+        # tell the walkthrough state machine to swap in the page hint
+        # and schedule the Next button.
+        if walkthrough_targeted_click and self._walkthrough_phase == "pointing":
+            try:
+                self._on_walkthrough_target_clicked()
+            except Exception:
+                pass
 
     def revert_to_original_colors(self) -> None:
         self.config.primary_color = ORIGINAL_PRIMARY_COLOR
@@ -8254,7 +10184,9 @@ Admin elevation
         save_config(self.config)
         # Rebuild settings so panel-builder f-strings re-read the
         # palette — the same fix the light/dark toggle uses for
-        # baked-in inline styles.
+        # baked-in inline styles. The rebuild also recreates the
+        # Apply Changes button with a fresh snapshot, so its pending
+        # state drops back to neutral automatically.
         self._rebuild_settings_page_for_theme_change()
         self.apply_theme()
         try:
@@ -8270,6 +10202,10 @@ Admin elevation
         self.config.preferred_camera_index = self.camera_combo.currentData()
         self.apply_new_config(self.config)
         self._refresh_camera_labels()
+        # Colors got committed to disk — refresh the snapshot so the
+        # Apply Changes button drops back to its neutral default.
+        self._colors_saved_snapshot = self._snapshot_colors_config()
+        self._refresh_colors_save_state()
 
     def _update_home_status_card_width(self) -> None:
         if not hasattr(self, "home_status_card") or self.home_status_card is None:
@@ -8299,6 +10235,7 @@ Admin elevation
         self.overlay.set_font_size(self.config.hello_font_size)
         button_hover_color = _with_alpha(QColor(self.config.primary_color).lighter(118), 170).name(QColor.HexArgb)
         nav_hover_color = _with_alpha(QColor(self.config.primary_color).lighter(115), 115).name(QColor.HexArgb)
+        panel_active_bg = _with_alpha(QColor(self.config.primary_color).lighter(122), 205).name(QColor.HexArgb)
         # Light vs dark palette branches used throughout the
         # stylesheet to keep cards / borders / dim text visible in
         # either mode. The originals (rgba(255,255,255,X)) only worked
@@ -8308,9 +10245,20 @@ Admin elevation
         is_light = self._palette_is_light()
         card_bg = "rgba(0,0,0,0.05)" if is_light else "rgba(255,255,255,0.04)"
         card_border = "rgba(11,61,145,0.18)" if is_light else "rgba(29,233,182,0.22)"
+        # Visible grey for the DEFAULT state of settings sidebar nav
+        # buttons + inner-panel action buttons. card_bg above is
+        # nearly transparent (alpha 0.04) and reads as "no fill" on
+        # the dark surface; this dedicated variable keeps the button
+        # clearly visible as a grey pill while still leaving room for
+        # the green outline to dominate. The b5 release used a
+        # similar visible grey — anything fainter and the sidebar
+        # tabs disappear into the page background.
+        settings_button_bg = "rgba(0,0,0,0.18)" if is_light else "rgba(255,255,255,0.08)"
         dim_text = "rgba(15,23,42,0.65)" if is_light else "rgba(229,246,255,0.65)"
         dim_text_strong = "rgba(15,23,42,0.85)" if is_light else "rgba(229,246,255,0.92)"
         soft_text = "rgba(15,23,42,0.55)" if is_light else "rgba(255,255,255,0.55)"
+        accent_outline = _with_alpha(QColor(self.config.accent_color), 170).name(QColor.HexArgb)
+        accent_outline_strong = _with_alpha(QColor(self.config.accent_color), 230).name(QColor.HexArgb)
         # Re-render the settings-search clear-X icon in the latest
         # accent color (in case the user changed the theme).
         try:
@@ -8373,6 +10321,19 @@ Admin elevation
             color: rgba(176,219,252,0.95);
             background: transparent;
         }}
+        QFrame#homeLogPane {{
+            background-color: rgba(130, 187, 255, 0.08);
+            border: 1px solid rgba(130, 187, 255, 0.24);
+            border-radius: 10px;
+        }}
+        QSplitter#homeLogSplitter::handle {{
+            background: rgba(130, 187, 255, 0.16);
+            border-radius: 3px;
+            margin: 6px 0;
+        }}
+        QSplitter#homeLogSplitter::handle:hover {{
+            background: rgba(29, 233, 182, 0.28);
+        }}
         QListWidget#actionHistoryList {{
             background-color: rgba(130, 187, 255, 0.12);
             border: 1px solid rgba(130, 187, 255, 0.40);
@@ -8384,6 +10345,16 @@ Admin elevation
             padding: 3px 6px;
             color: {self.config.text_color};
             background: transparent;
+        }}
+        QPlainTextEdit#homeDebugLog {{
+            background-color: rgba(130, 187, 255, 0.12);
+            border: 1px solid rgba(130, 187, 255, 0.40);
+            border-radius: 10px;
+            color: {self.config.text_color};
+            padding: 6px 8px;
+            selection-background-color: rgba(29, 233, 182, 0.24);
+            font-family: Consolas, 'Courier New', monospace;
+            font-size: 12px;
         }}
         QPushButton#undoActionButton {{
             background-color: rgba(130, 187, 255, 0.18);
@@ -8461,19 +10432,27 @@ Admin elevation
             border-radius: 12px;
             padding: 10px 12px;
         }}
+        QComboBox#homeRuntimeDeviceCombo {{
+            background-color: rgba(255,255,255,0.06);
+            color: {self.config.text_color};
+            border: 1px solid rgba(29,233,182,0.35);
+            border-radius: 9px;
+            padding: 3px 8px;
+            min-height: 18px;
+        }}
         QLineEdit[saveLocationPath="true"] {{
-            background-color: #E3F2FD;
+            background-color: #D8ECFF;
             color: #0B2A45;
             selection-background-color: {self.config.accent_color};
             selection-color: #001B24;
-            border: 1px solid rgba(29,233,182,0.45);
+            border: 1px solid rgba(123, 167, 217, 0.70);
             border-radius: 10px;
             padding: 10px 12px;
             font-weight: 600;
         }}
         QLineEdit[saveLocationPath="true"]:focus {{
             border: 1px solid {self.config.accent_color};
-            background-color: #F1F8FE;
+            background-color: #EAF5FF;
         }}
         QLabel#saveLocationLabel {{
             font-weight: 700;
@@ -8526,7 +10505,7 @@ Admin elevation
         QScrollArea#saveLocationsScroll QScrollBar::sub-page:vertical {{
             background: transparent;
         }}
-        QComboBox#settingsCameraCombo QAbstractItemView, QComboBox#settingsMicrophoneCombo QAbstractItemView {{
+        QComboBox#settingsCameraCombo QAbstractItemView, QComboBox#settingsMicrophoneCombo QAbstractItemView, QComboBox#homeRuntimeDeviceCombo QAbstractItemView {{
             background-color: rgba(15,23,42,0.98);
             color: {self.config.text_color};
             border: 1px solid rgba(29,233,182,0.35);
@@ -8581,28 +10560,185 @@ Admin elevation
             color: #001B24;
             border: 2px solid {self.config.accent_color};
         }}
+        /* Save Changes button states — neutral by default (translucent
+           card_bg, so the user can see when it lights up), primary-
+           blue when there's a pending change to save. The selectors
+           are deliberately wrapped in `QStackedWidget#settingsContentStack`
+           so they out-specify the per-stack descendant rule below
+           that paints other settings buttons primary-blue by default;
+           without the prefix, every save button would also default
+           to primary-blue and the pending-state colour change would
+           be invisible. */
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton {{
+            background-color: {settings_button_bg};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline};
+        }}
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[hgrHover="true"],
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton:hover {{
+            background-color: {button_hover_color};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[hgrPressed="true"],
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton:pressed {{
+            background-color: {panel_active_bg};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[pendingSave="true"] {{
+            /* Pending: solid primary-blue fill so it visibly stands
+               out from the neutral default and from sibling buttons
+               in the panel. The whole BUTTON changes colour — not
+               just the border. */
+            background-color: {self.config.primary_color};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[pendingSave="true"][hgrHover="true"],
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[pendingSave="true"]:hover {{
+            background-color: {button_hover_color};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
+        QStackedWidget#settingsContentStack QPushButton#settingsSaveButton:disabled {{
+            color: {soft_text};
+            background-color: rgba(127, 127, 127, 0.10);
+            border: 1px solid rgba(127, 127, 127, 0.18);
+        }}
+        /* Inner-panel action buttons (Camera Preview / Low FPS /
+           Lite Mode / GPU Mode / Mic Test / Save Locations Browse /
+           Open Tutorial, etc.) match the b5 look: translucent-grey
+           default with green outline, blue-fill hover, accent-tinted
+           pressed. The whole button — not just the border — changes
+           on hover/press. Save Changes (#settingsSaveButton) has its
+           own rules above that keep this default but flip to solid
+           primary-blue when pendingSave="true". */
+        QPushButton[settingsPanelButton="true"],
+        QStackedWidget#settingsContentStack QPushButton {{
+            background-color: {settings_button_bg};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline};
+            border-radius: 14px;
+            padding: 12px 18px;
+            font-weight: 800;
+            min-width: 110px;
+        }}
+        /* Back button: kept primary-blue per the b5 design — it's a
+           "leave this page" affordance so it pops against the rest
+           of the settings buttons. */
+        QPushButton#backButton {{
+            background-color: {self.config.primary_color};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline};
+            border-radius: 14px;
+            padding: 12px 18px;
+            font-weight: 800;
+            min-width: 110px;
+        }}
+        QPushButton[settingsPanelButton="true"][hgrHover="true"],
+        QPushButton[settingsPanelButton="true"]:hover,
+        QStackedWidget#settingsContentStack QPushButton[hgrHover="true"],
+        QStackedWidget#settingsContentStack QPushButton:hover,
+        QPushButton#backButton[hgrHover="true"],
+        QPushButton#backButton:hover {{
+            /* Hover swaps the BACKGROUND of the whole button, not
+               just the border. Both the hgrHover property (set by
+               our event filter for tracked buttons) and the
+               standard :hover pseudo-class are listed so untracked
+               buttons still get the wash. */
+            background-color: {button_hover_color};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
+        QPushButton[settingsPanelButton="true"][hgrPressed="true"],
+        QPushButton[settingsPanelButton="true"]:pressed,
+        QStackedWidget#settingsContentStack QPushButton[hgrPressed="true"],
+        QStackedWidget#settingsContentStack QPushButton:pressed,
+        QPushButton#backButton[hgrPressed="true"],
+        QPushButton#backButton:pressed {{
+            /* Pressed: keep the user's text color. The default
+               global :pressed rule swaps text to a near-black
+               (#001B24) which the user explicitly didn't want. */
+            background-color: {panel_active_bg};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
+        QPushButton[settingsPanelButton="true"]:checked,
+        QStackedWidget#settingsContentStack QPushButton:checked {{
+            background-color: {panel_active_bg};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline_strong};
+        }}
         QPushButton#settingsNavButton {{
+            /* Sidebar tab buttons match the b5 look: visible grey
+               default + green outline, blue-fill hover, translucent
+               accent (green) fill on the currently-selected tab.
+               Each state changes the WHOLE button background, not
+               just the border. */
             min-width: 0px;
             text-align: left;
             padding: 10px 12px;
-            background-color: transparent;
-            border: 1px solid rgba(255,255,255,0.08);
+            background-color: {settings_button_bg};
+            border: 1px solid {accent_outline};
             color: {self.config.text_color};
             border-radius: 12px;
         }}
-        QPushButton#settingsNavButton[hgrHover="true"] {{
-            background-color: {nav_hover_color};
-            border: 1px solid rgba(29,233,182,0.40);
+        QPushButton#settingsNavButton[hgrHover="true"],
+        QPushButton#settingsNavButton:hover {{
+            background-color: {button_hover_color};
+            border: 1px solid {accent_outline_strong};
+            color: {self.config.text_color};
         }}
-        QPushButton#settingsNavButton[hgrPressed="true"] {{
-            background-color: rgba(29,233,182,0.22);
-            border: 1px solid rgba(29,233,182,0.70);
-            color: {self.config.accent_color};
+        QPushButton#settingsNavButton[hgrPressed="true"],
+        QPushButton#settingsNavButton:pressed {{
+            background-color: {panel_active_bg};
+            border: 1px solid {accent_outline_strong};
+            color: {self.config.text_color};
         }}
         QPushButton#settingsNavButton:checked {{
-            background-color: rgba(29,233,182,0.16);
-            border: 1px solid rgba(29,233,182,0.70);
+            /* Active tab: translucent accent over the dark surface
+               reads as the deep teal-green the b5 release showed for
+               the currently-selected tab. Text stays in the brighter
+               accent so it pops against the darker fill (Custom
+               Gesture in the b5 sidebar screenshot). */
+            background-color: rgba(29, 233, 182, 0.40);
+            border: 1px solid {self.config.accent_color};
             color: {self.config.accent_color};
+            font-weight: 800;
+        }}
+        /* Static / Dynamic / Voice-command dropdown headers in the
+           Control Guide: always solid primary-blue with centered
+           text per the b5 look. These header buttons toggle the
+           accordion sections below them, so they need to read as
+           "primary action" rather than as a plain settings button.
+           The selectors are wrapped in `QStackedWidget#settingsContentStack`
+           so they out-specify the stack's default-rule descendant
+           selector — without that prefix, the stack rule wins by
+           specificity (102 vs 101) and the headers default to grey
+           instead of solid primary blue. */
+        QStackedWidget#settingsContentStack QPushButton#gestureGuideSectionButton {{
+            background-color: {self.config.primary_color};
+            color: {self.config.text_color};
+            border: 1px solid {accent_outline};
+            border-radius: 14px;
+            padding: 12px 18px;
+            font-weight: 800;
+            text-align: center;
+            min-width: 110px;
+        }}
+        QStackedWidget#settingsContentStack QPushButton#gestureGuideSectionButton[hgrHover="true"],
+        QStackedWidget#settingsContentStack QPushButton#gestureGuideSectionButton:hover {{
+            background-color: {button_hover_color};
+            border: 1px solid {accent_outline_strong};
+            color: {self.config.text_color};
+        }}
+        QStackedWidget#settingsContentStack QPushButton#gestureGuideSectionButton[hgrPressed="true"],
+        QStackedWidget#settingsContentStack QPushButton#gestureGuideSectionButton:pressed,
+        QStackedWidget#settingsContentStack QPushButton#gestureGuideSectionButton:checked {{
+            background-color: {panel_active_bg};
+            border: 1px solid {accent_outline_strong};
+            color: {self.config.text_color};
         }}
         QPushButton#backButton {{
             min-width: 0px;
@@ -8649,9 +10785,326 @@ Admin elevation
         }}
         """
         self.setStyleSheet(stylesheet)
+        # Force-apply per-widget stylesheets on the sidebar nav and
+        # the Control Guide section headers. Qt's global QSS
+        # descendant selectors weren't reliably propagating through
+        # the sidebar's QScrollArea / the Control Guide's nested
+        # QScrollArea wrapper for these specific widgets — the user
+        # was seeing the stack's grey-default rule on widgets that
+        # should have rendered solid green-or-blue. A direct
+        # widget-level setStyleSheet bypasses that entirely.
+        try:
+            self._apply_settings_nav_button_style()
+        except Exception:
+            pass
+        try:
+            self._apply_gesture_guide_section_styles()
+        except Exception:
+            pass
+        try:
+            self._reapply_marked_panel_button_styles()
+        except Exception:
+            pass
         self.title_bar.refresh()
         if self.debugger_window is not None:
             self.debugger_window.apply_theme(self.config)
+
+    def _apply_settings_nav_button_style(self) -> None:
+        """Force the b5 sidebar look on every Settings nav button via
+        a direct setStyleSheet. The default state is a subtle grey
+        (the user said the previous 0.18 was too bright); the selected
+        state is a translucent green wash over that grey — like a
+        green highlighter mark over a grey base — rather than a solid
+        green fill that overpowered the rest of the sidebar."""
+        is_light = self._palette_is_light()
+        accent = str(self.config.accent_color or "#1DE9B6")
+        accent_outline = _with_alpha(QColor(accent), 170).name(QColor.HexArgb)
+        accent_outline_strong = _with_alpha(QColor(accent), 230).name(QColor.HexArgb)
+        text_color = str(self.config.text_color)
+        primary = str(self.config.primary_color)
+        button_hover = _with_alpha(QColor(primary).lighter(118), 235).name(QColor.HexArgb)
+        button_pressed = _with_alpha(QColor(primary).lighter(125), 245).name(QColor.HexArgb)
+        # Subtle grey base — visible enough to read as a "pill" against
+        # the sidebar surface, but quiet enough not to compete with
+        # the selected tab's accent wash.
+        grey_bg = "rgba(0,0,0,0.10)" if is_light else "rgba(255,255,255,0.06)"
+        # Highlighter-over-grey effect for the selected tab: a low-alpha
+        # accent wash that mixes with the surface beneath rather than
+        # painting solid green over it.
+        highlighter_bg = "rgba(29, 233, 182, 0.18)"
+        # Per user spec: only the currently-selected (:checked) tab
+        # carries the green accent border. Default / hover / pressed
+        # / disabled states all use a fully-transparent border so the
+        # green outline is reserved for "this is the active tab".
+        style = (
+            f"QPushButton#settingsNavButton {{"
+            f"  min-width: 0px;"
+            f"  text-align: left;"
+            f"  padding: 10px 12px;"
+            f"  background-color: {grey_bg};"
+            f"  border: 1px solid transparent;"
+            f"  color: {text_color};"
+            f"  border-radius: 12px;"
+            f"  font-weight: 700;"
+            f"}}"
+            f"QPushButton#settingsNavButton:hover {{"
+            f"  background-color: {button_hover};"
+            f"  border: 1px solid transparent;"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton#settingsNavButton:pressed {{"
+            f"  background-color: {button_pressed};"
+            f"  border: 1px solid transparent;"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton#settingsNavButton:checked {{"
+            f"  background-color: {highlighter_bg};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {accent};"
+            f"  font-weight: 800;"
+            f"}}"
+            # Locked-during-walkthrough buttons get setEnabled(False).
+            # :disabled keeps the same look as default so they read as
+            # 'unclickable' rather than greyed out.
+            f"QPushButton#settingsNavButton:disabled {{"
+            f"  background-color: {grey_bg};"
+            f"  border: 1px solid transparent;"
+            f"  color: {text_color};"
+            f"  font-weight: 700;"
+            f"}}"
+        )
+        for btn in getattr(self, "_settings_nav_buttons", []) or []:
+            try:
+                btn.setStyleSheet(style)
+            except Exception:
+                pass
+
+    def _revert_pending_changes_for_section(self, section_id: int) -> None:
+        """Discard any in-progress edits on a settings tab when the
+        user navigates away without clicking Save Changes / Apply
+        Changes. Mirrors what the user expects from system Settings
+        panels: changes don't take effect unless explicitly saved,
+        and abandoning a tab leaves it in its on-disk state."""
+        if section_id == SECTION_CAMERA:
+            self._revert_camera_panel_edits()
+        elif section_id == SECTION_MICROPHONE:
+            self._revert_microphone_panel_edits()
+        elif section_id == SECTION_SAVE_LOCATIONS:
+            self._revert_save_locations_panel_edits()
+        elif section_id == SECTION_COLORS:
+            self._revert_colors_panel_edits()
+        elif section_id == SECTION_GESTURE_BINDS:
+            self._revert_gesture_binds_panel_edits()
+
+    def _revert_camera_panel_edits(self) -> None:
+        combo = getattr(self, "camera_combo", None)
+        button = getattr(self, "save_camera_button", None)
+        if combo is None or button is None:
+            return
+        try:
+            saved = self._saved_camera_settings_combo_value()
+            if combo.currentData() != saved:
+                self._refresh_camera_combo_selection(saved)
+        except Exception:
+            pass
+        try:
+            self._set_settings_save_button_pending(button, False)
+        except Exception:
+            pass
+
+    def _revert_microphone_panel_edits(self) -> None:
+        combo = getattr(self, "microphone_combo", None)
+        button = getattr(self, "save_microphone_button", None)
+        slider = getattr(self, "mic_test_gain_slider", None)
+        try:
+            if combo is not None and combo.count() > 0:
+                saved = self._saved_microphone_settings_combo_value()
+                if combo.currentData() != saved:
+                    self._refresh_microphone_combo_selection(saved)
+        except Exception:
+            pass
+        try:
+            if slider is not None:
+                saved_gain = float(getattr(self.config, "mic_input_gain", 1.0) or 1.0)
+                saved_gain = max(0.1, min(10.0, saved_gain))
+                target = int(round(saved_gain * 100))
+                if int(slider.value()) != target:
+                    slider.blockSignals(True)
+                    slider.setValue(target)
+                    slider.blockSignals(False)
+                    self._mic_test_gain = saved_gain
+                    label = getattr(self, "mic_test_gain_value_label", None)
+                    if label is not None:
+                        label.setText(f"{saved_gain:.1f}x")
+        except Exception:
+            pass
+        try:
+            if button is not None:
+                self._set_settings_save_button_pending(button, False)
+        except Exception:
+            pass
+
+    def _revert_save_locations_panel_edits(self) -> None:
+        button = getattr(self, "save_locations_button", None)
+        try:
+            for output_kind, editor in (self._save_location_inputs or {}).items():
+                if editor is None:
+                    continue
+                saved = str(self._save_output_directory(output_kind))
+                if str(editor.text() or "") != saved:
+                    editor.blockSignals(True)
+                    editor.setText(saved)
+                    editor.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            for output_kind, editor in (self._save_name_inputs or {}).items():
+                if editor is None:
+                    continue
+                saved = configured_save_name(self.config, output_kind)
+                if str(editor.text() or "") != str(saved):
+                    editor.blockSignals(True)
+                    editor.setText(str(saved))
+                    editor.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            if button is not None:
+                self._set_settings_save_button_pending(button, False)
+        except Exception:
+            pass
+
+    def _revert_gesture_binds_panel_edits(self) -> None:
+        """Drop any in-progress rebinds when leaving the Gesture Binds
+        tab. Cancels an active pose-selection (the "click a pose to
+        rebind" pill) AND rolls back any already-clicked pending
+        changes, so the table re-reads the on-disk gesture_bindings
+        map. Mirrors the auto-revert other settings tabs do."""
+        try:
+            if getattr(self, "_gesture_binds_pending_action", None):
+                self._clear_gesture_bind_pending()
+        except Exception:
+            pass
+        pending = getattr(self, "_gesture_binds_pending_changes", None)
+        had_changes = bool(pending)
+        if pending:
+            try:
+                pending.clear()
+            except Exception:
+                pass
+        # Repopulate the table so the action buttons show the saved
+        # bindings again — no pending overlay, no green pose preview.
+        if had_changes:
+            try:
+                self._populate_gesture_binds_table()
+            except Exception:
+                pass
+            try:
+                self._refresh_gesture_binds_warnings()
+            except Exception:
+                pass
+        button = getattr(self, "_gesture_binds_save_button", None)
+        if button is not None:
+            try:
+                self._set_settings_save_button_pending(button, False)
+            except Exception:
+                pass
+
+    def _revert_colors_panel_edits(self) -> None:
+        # Colors are special: ColorPickerButton writes to self.config
+        # immediately on pick, so reverting means rolling each config
+        # attribute back to the snapshot taken when the panel was
+        # last built (or last successfully applied).
+        snapshot = getattr(self, "_colors_saved_snapshot", None) or {}
+        if not snapshot:
+            return
+        changed = False
+        for attr, saved in snapshot.items():
+            if str(getattr(self.config, attr, "") or "") != saved:
+                setattr(self.config, attr, saved)
+                changed = True
+        if not changed:
+            return
+        # Sync the picker swatches to the restored config values.
+        for attr, saved in snapshot.items():
+            picker_name = {
+                "primary_color": "primary_picker",
+                "accent_color": "accent_picker",
+                "surface_color": "surface_picker",
+                "text_color": "text_picker",
+            }.get(attr)
+            if picker_name is None:
+                continue
+            picker = getattr(self, picker_name, None)
+            if picker is not None and hasattr(picker, "set_color"):
+                try:
+                    picker.set_color(saved)
+                except Exception:
+                    pass
+        button = getattr(self, "_colors_apply_button", None)
+        if button is not None:
+            try:
+                self._set_settings_save_button_pending(button, False)
+            except Exception:
+                pass
+
+    def _reapply_marked_panel_button_styles(self) -> None:
+        """After a theme change, refresh the inline stylesheet on every
+        button that was tagged via `_mark_settings_panel_button` so
+        their primary / accent colors track the new palette. Without
+        this, the previous theme's stylesheet stays baked in and the
+        button's hover blue / outline green don't follow apply_theme."""
+        from PySide6.QtWidgets import QPushButton as _QPushButton
+        sheet = self._settings_panel_button_stylesheet()
+        for btn in self.findChildren(_QPushButton):
+            try:
+                if btn.property("settingsPanelButton"):
+                    btn.setStyleSheet(sheet)
+            except Exception:
+                pass
+
+    def _apply_gesture_guide_section_styles(self) -> None:
+        """Force solid primary-blue + centered text on every Static /
+        Dynamic / Voice Commands dropdown header, with a lighter blue
+        hover and an active-state tint when expanded. Direct
+        setStyleSheet so the styling lands regardless of which
+        ScrollArea the headers happen to live under."""
+        primary = str(self.config.primary_color)
+        text_color = str(self.config.text_color)
+        accent = str(self.config.accent_color or "#1DE9B6")
+        accent_outline = _with_alpha(QColor(accent), 170).name(QColor.HexArgb)
+        accent_outline_strong = _with_alpha(QColor(accent), 230).name(QColor.HexArgb)
+        button_hover = _with_alpha(QColor(primary).lighter(118), 235).name(QColor.HexArgb)
+        button_pressed = _with_alpha(QColor(primary).lighter(125), 245).name(QColor.HexArgb)
+        style = (
+            f"QPushButton#gestureGuideSectionButton {{"
+            f"  background-color: {primary};"
+            f"  color: {text_color};"
+            f"  border: 1px solid {accent_outline};"
+            f"  border-radius: 14px;"
+            f"  padding: 12px 18px;"
+            f"  font-weight: 800;"
+            f"  text-align: center;"
+            f"  min-width: 110px;"
+            f"}}"
+            f"QPushButton#gestureGuideSectionButton:hover {{"
+            f"  background-color: {button_hover};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+            f"QPushButton#gestureGuideSectionButton:pressed,"
+            f"QPushButton#gestureGuideSectionButton:checked {{"
+            f"  background-color: {button_pressed};"
+            f"  border: 1px solid {accent_outline_strong};"
+            f"  color: {text_color};"
+            f"}}"
+        )
+        from PySide6.QtWidgets import QPushButton as _QPushButton
+        for btn in self.findChildren(_QPushButton, "gestureGuideSectionButton"):
+            try:
+                btn.setStyleSheet(style)
+            except Exception:
+                pass
 
     def _target_screen_geometry(self):
         handle = self.windowHandle()
@@ -8698,7 +11151,662 @@ Admin elevation
             return "start"
         return "cancel"
 
-    def _ensure_mini_debugger(self) -> None:
+    # ============================================================
+    # Walk-through (guided settings tour)
+    # ============================================================
+
+    def _maybe_prompt_for_walkthrough(self) -> str:
+        """Show the walk-through Y/N prompt. Honours the same
+        do-not-show-again flag the tutorial prompt uses, so a user
+        who's opted out of one is opted out of both."""
+        if not getattr(self.config, "show_start_instructions_prompt", True):
+            return "start"
+        prompt = WalkthroughStartDialog(self.config, self)
+        prompt.exec()
+        if prompt.do_not_show_again:
+            self.config.show_start_instructions_prompt = False
+            save_config(self.config)
+        if prompt.choice == "walkthrough":
+            return "walkthrough"
+        if prompt.choice == "start":
+            return "start"
+        return "cancel"
+
+    def _start_walkthrough(self) -> None:
+        """Enter the guided walk-through. Switches to the Settings
+        page on the Instructions tab so the user has a familiar
+        landing surface, then activates the walkthrough state and
+        attaches all visual cues. Setting `_walkthrough_active`
+        AFTER the initial navigation is intentional — the gate in
+        `show_settings_section` would otherwise silently swallow
+        the Instructions click because the first walkthrough target
+        is Control Guide, not Instructions."""
+        self._walkthrough_active = False
+        self._walkthrough_step_index = 0
+        self._walkthrough_phase = "pointing"
+        self.show_settings_page(SECTION_INSTRUCTIONS)
+        self._walkthrough_active = True
+        self._enter_walkthrough_state()
+
+    def _enter_walkthrough_state(self) -> None:
+        # Title bar "Tutorial" indicator
+        try:
+            self.title_bar.set_walkthrough_active(True)
+        except Exception:
+            pass
+        # Show + raise the edge-glow overlay so the halo wraps the
+        # entire window perimeter on top of every other widget.
+        try:
+            overlay = getattr(self, "_walkthrough_edge_glow", None)
+            if overlay is not None:
+                overlay.set_accent(self.config.accent_color)
+                self._reposition_walkthrough_edge_glow()
+                overlay.setVisible(True)
+                overlay.raise_()
+        except Exception:
+            pass
+        # Re-paint to clear any stale edge-glow strokes drawn by the
+        # old MainWindow paintEvent path.
+        self.update()
+        # Back button → "Exit Walk-through"
+        if hasattr(self, "back_button") and self.back_button is not None:
+            self.back_button.setText("Exit Walk-through")
+        # Skip button visible
+        if self._walkthrough_skip_button is not None:
+            self._walkthrough_skip_button.setVisible(True)
+        # Disable the settings search bar so the user can't shortcut
+        # past the guided steps via search.
+        try:
+            si = getattr(self, "_settings_search_input", None)
+            if si is not None:
+                si.clear()
+                si.setEnabled(False)
+        except Exception:
+            pass
+        # Walk-through pill overlay visible. Position is computed by
+        # _position_walkthrough_overlay; the pill itself has Qt
+        # WA_TransparentForMouseEvents so it can sit over the panel
+        # without intercepting clicks.
+        if self._walkthrough_hint_label is not None:
+            self._walkthrough_hint_label.setVisible(True)
+            self._walkthrough_hint_label.raise_()
+        # Drive the first step's pointing visuals.
+        self._apply_walkthrough_pointing_visuals()
+        # Anchor the overlay over the active panel.
+        try:
+            self._position_walkthrough_overlay()
+        except Exception:
+            pass
+
+    def _exit_walkthrough(self, *, open_tutorial: bool = False) -> None:
+        """Tear down every walk-through visual and return to the
+        normal settings UI. If `open_tutorial=True`, route the user
+        to the live gesture tutorial right after returning home —
+        used by both 'Skip to Gesture Tutorial' and the final
+        Save Locations 'Gesture Tutorial' button.
+
+        Important: when `open_tutorial=False` we DEFENSIVELY stop the
+        engine even if it isn't supposed to be running — the user
+        reported that hitting Exit Walk-through occasionally left the
+        app in a state where gestures were firing actions even though
+        the START button still looked clickable. Cleanly stopping
+        guarantees the engine is fully off after Exit, matching the
+        user's expectation ('just bring us back to start page')."""
+        self._walkthrough_active = False
+        self._walkthrough_phase = "pointing"
+        # Stop bounce / glow on whichever button was the current target.
+        self._detach_walkthrough_target_visuals()
+        # Re-enable every sidebar tab — _detach intentionally leaves
+        # locks in place across step transitions and the on-page
+        # phase, so the only place we restore normal click/hover
+        # behaviour is here on full exit.
+        self._unlock_nav_buttons()
+        # Tear down the next-button fade timer if it's pending.
+        timer = self._walkthrough_next_timer
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._walkthrough_next_timer = None
+        # Hide overlay pill + Next button.
+        if self._walkthrough_hint_label is not None:
+            self._walkthrough_hint_label.setVisible(False)
+            self._walkthrough_hint_label.setText("")
+        if self._walkthrough_next_button is not None:
+            self._walkthrough_next_button.setVisible(False)
+            self._walkthrough_next_button.setText("Next")
+        # Hide skip button + restore Back label.
+        if self._walkthrough_skip_button is not None:
+            self._walkthrough_skip_button.setVisible(False)
+        if hasattr(self, "back_button") and self.back_button is not None:
+            self.back_button.setText("Back")
+        # Re-enable the search bar.
+        try:
+            si = getattr(self, "_settings_search_input", None)
+            if si is not None:
+                si.setEnabled(True)
+        except Exception:
+            pass
+        # Title-bar indicator off + hide the edge-glow overlay.
+        try:
+            self.title_bar.set_walkthrough_active(False)
+        except Exception:
+            pass
+        try:
+            overlay = getattr(self, "_walkthrough_edge_glow", None)
+            if overlay is not None:
+                overlay.setVisible(False)
+        except Exception:
+            pass
+        self.update()
+        # Always return home before opening the tutorial — keeps the
+        # navigation simple ("Walk-through ends, then we hand off to
+        # the live tutorial") and avoids transient settings flicker.
+        self.show_home_page()
+        if open_tutorial:
+            QTimer.singleShot(150, lambda: self.open_tutorial(from_settings=False))
+        else:
+            # Defensive: ensure the engine is fully stopped on a plain
+            # Exit Walk-through. Catches the user-reported case of
+            # gestures firing without the live viewer / button state
+            # matching reality.
+            try:
+                if getattr(self, "_worker", None) is not None:
+                    self.stop_engine()
+            except Exception:
+                pass
+
+    # ---- pointing-phase visuals --------------------------------------
+
+    def _walkthrough_target_section(self) -> int:
+        idx = max(0, min(self._walkthrough_step_index, len(WALKTHROUGH_PAGES) - 1))
+        return WALKTHROUGH_PAGES[idx]
+
+    def _walkthrough_target_button_widget(self):
+        target = self._walkthrough_target_section()
+        nav = getattr(self, "_settings_nav_buttons", []) or []
+        for btn in nav:
+            try:
+                if getattr(btn, "page_index", None) == target:
+                    return btn
+            except Exception:
+                continue
+        return None
+
+    def _apply_walkthrough_pointing_visuals(self) -> None:
+        """Pointing phase: paint the 'click X' hint, lock every
+        non-target sidebar tab, and attach a bouncing+glowing animation
+        to the target tab. The glow is rendered as a separate overlay
+        on the settings page (NOT a child of the sidebar) so it can
+        extend past the sidebar's left/right edges without being
+        clipped."""
+        target_section = self._walkthrough_target_section()
+        if self._walkthrough_hint_label is not None:
+            self._walkthrough_hint_label.setText(
+                WALKTHROUGH_POINTING_HINTS.get(target_section, "")
+            )
+        if self._walkthrough_next_button is not None:
+            self._walkthrough_next_button.setVisible(False)
+        if self._walkthrough_next_fade_effect is not None:
+            self._walkthrough_next_fade_effect.setOpacity(1.0)
+        self._detach_walkthrough_target_visuals()
+        target_button = self._walkthrough_target_button_widget()
+        if target_button is None:
+            return
+        self._walkthrough_target_button = target_button
+        self._lock_non_target_nav_buttons(target_button)
+        self._show_walkthrough_target_glow(target_button)
+        self._start_walkthrough_bounce(target_button)
+        self._position_walkthrough_overlay()
+
+    def _attach_walkthrough_glow(self, button) -> None:
+        try:
+            effect = QGraphicsDropShadowEffect(button)
+            effect.setBlurRadius(28.0)
+            effect.setOffset(0.0, 0.0)
+            effect.setColor(QColor(self.config.accent_color or "#1DE9B6"))
+            button.setGraphicsEffect(effect)
+            self._walkthrough_target_glow_effect = effect
+        except Exception:
+            self._walkthrough_target_glow_effect = None
+
+    # --- Bounce animation + glow overlay ------------------------------
+
+    def _start_walkthrough_bounce(self, button) -> None:
+        """1 Hz vertical bounce on the target sidebar button. Per the
+        user's spec, the amplitude is 1.5x the previous version
+        (±9 / ±6 instead of ±6 / ±4) so the motion reads more
+        clearly. Stored baseline_y so we can ease back to rest on
+        first hover."""
+        try:
+            self._walkthrough_bounce_baseline_y = int(button.y())
+            anim = QPropertyAnimation(button, b"pos", self)
+            anim.setDuration(900)
+            anim.setLoopCount(-1)
+            x = int(button.x())
+            base_y = int(button.y())
+            anim.setKeyValueAt(0.0, QPoint(x, base_y))
+            anim.setKeyValueAt(0.25, QPoint(x, base_y - 9))
+            anim.setKeyValueAt(0.50, QPoint(x, base_y))
+            anim.setKeyValueAt(0.75, QPoint(x, base_y + 6))
+            anim.setKeyValueAt(1.0, QPoint(x, base_y))
+            anim.setEasingCurve(QEasingCurve.InOutSine)
+            anim.start()
+            self._walkthrough_bounce_anim = anim
+            try:
+                button.setAttribute(Qt.WA_Hover, True)
+            except Exception:
+                pass
+            button.installEventFilter(self)
+        except Exception:
+            self._walkthrough_bounce_anim = None
+
+    def _settle_walkthrough_bounce(self) -> None:
+        """Run a 1 s ease-out animation that returns the bouncing
+        button to its baseline y. Called the first time the user
+        hovers the target."""
+        button = self._walkthrough_target_button
+        anim = self._walkthrough_bounce_anim
+        if button is None:
+            return
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+            self._walkthrough_bounce_anim = None
+        try:
+            settle = QPropertyAnimation(button, b"pos", self)
+            settle.setDuration(1000)
+            settle.setStartValue(button.pos())
+            settle.setEndValue(QPoint(int(button.x()), self._walkthrough_bounce_baseline_y))
+            settle.setEasingCurve(QEasingCurve.OutCubic)
+            settle.start()
+            self._walkthrough_bounce_settle_anim = settle
+        except Exception:
+            try:
+                button.move(int(button.x()), self._walkthrough_bounce_baseline_y)
+            except Exception:
+                pass
+
+    def _show_walkthrough_target_glow(self, button) -> None:
+        """Paint a soft accent halo around the target sidebar tab. The
+        halo is rendered as a free-floating child of `settings_page`
+        so it can extend past the sidebar's left/right borders without
+        being clipped. The actual target button is unchanged — clicks
+        still go straight to it because the glow is mouse-transparent."""
+        self._remove_walkthrough_target_glow()
+        page = getattr(self, "settings_page", None) or self
+        try:
+            glow = _WalkthroughTargetGlow(page, button, self.config.accent_color)
+            glow.update_position()
+            glow.show()
+            glow.lower()  # under the target button so the button reads cleanly
+            self._walkthrough_target_glow_widget = glow
+        except Exception:
+            self._walkthrough_target_glow_widget = None
+
+    def _remove_walkthrough_target_glow(self) -> None:
+        glow = getattr(self, "_walkthrough_target_glow_widget", None)
+        if glow is not None:
+            try:
+                glow.hide()
+                glow.setParent(None)
+                glow.deleteLater()
+            except Exception:
+                pass
+            self._walkthrough_target_glow_widget = None
+
+    def _update_walkthrough_glow_position(self) -> None:
+        """Re-anchor the target sidebar glow to its target button.
+        Wired to nav-sidebar scroll events so the halo follows the
+        button when the user scrolls the nav list."""
+        glow = getattr(self, "_walkthrough_target_glow_widget", None)
+        if glow is None:
+            return
+        try:
+            glow.update_position()
+        except Exception:
+            pass
+
+    def _reposition_walkthrough_edge_glow(self) -> None:
+        """Snap the walk-through edge-glow overlay to the central
+        widget's full rect. Called on every resize, on entry into the
+        walk-through, and after _build_ui finishes constructing the
+        overlay. Safe to call before the overlay exists."""
+        overlay = getattr(self, "_walkthrough_edge_glow", None)
+        outer = getattr(self, "_root_outer", None)
+        if overlay is None or outer is None:
+            return
+        try:
+            overlay.setGeometry(outer.rect())
+            overlay.raise_()
+        except Exception:
+            pass
+
+    # --- Non-target sidebar lock --------------------------------------
+
+    def _lock_non_target_nav_buttons(self, target_button) -> None:
+        """During walkthrough pointing phase, every sidebar tab that
+        ISN'T the current target gets disabled so its hover / pressed
+        / checked stylesheet rules can't fire. Stylesheet override on
+        :disabled keeps them looking like the default state instead
+        of the usual greyed-out treatment.
+
+        Restored to enabled by `_unlock_nav_buttons` whenever the
+        walkthrough advances or exits."""
+        nav = getattr(self, "_settings_nav_buttons", []) or []
+        locked: list = []
+        for btn in nav:
+            if btn is target_button:
+                btn.setEnabled(True)
+                continue
+            try:
+                btn.setEnabled(False)
+                btn.setChecked(False)
+                locked.append(btn)
+            except Exception:
+                pass
+        self._walkthrough_locked_buttons = locked
+
+    def _unlock_nav_buttons(self) -> None:
+        for btn in getattr(self, "_walkthrough_locked_buttons", []) or []:
+            try:
+                btn.setEnabled(True)
+            except Exception:
+                pass
+        self._walkthrough_locked_buttons = []
+
+    def _detach_walkthrough_target_visuals(self) -> None:
+        """Stop bounce, restore button position, drop the glow
+        overlay. Does NOT unlock non-target sidebar buttons — locks
+        must persist across step transitions and the on-page phase
+        so the user can ONLY click whichever tab is currently being
+        prompted. Locks are released only on full exit via
+        `_unlock_nav_buttons` in `_exit_walkthrough`."""
+        anim = self._walkthrough_bounce_anim
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+            self._walkthrough_bounce_anim = None
+        settle = self._walkthrough_bounce_settle_anim
+        if settle is not None:
+            try:
+                settle.stop()
+            except Exception:
+                pass
+            self._walkthrough_bounce_settle_anim = None
+        self._remove_walkthrough_target_glow()
+        button = self._walkthrough_target_button
+        if button is not None:
+            try:
+                button.removeEventFilter(self)
+            except Exception:
+                pass
+            try:
+                button.move(int(button.x()), self._walkthrough_bounce_baseline_y)
+            except Exception:
+                pass
+            try:
+                button.setGraphicsEffect(None)
+            except Exception:
+                pass
+        self._walkthrough_target_button = None
+        self._walkthrough_target_glow_effect = None
+
+    # --- Next button positioning + bounce-in --------------------------
+
+    def _position_walkthrough_overlay(self) -> None:
+        """Anchor the pill at the top-right of the active panel and
+        the Next button at the BOTTOM-RIGHT of the settings page.
+        The pill's vertical position is computed dynamically so its
+        bottom always sits ABOVE the panel description text (the
+        sizeHint can grow if a long hint wraps to two lines, so we
+        push the pill upward to compensate)."""
+        if not getattr(self, "_walkthrough_active", False):
+            return
+        page = getattr(self, "settings_page", None)
+        stack = getattr(self, "settings_content_stack", None)
+        hint = self._walkthrough_hint_label
+        button = self._walkthrough_next_button
+        if page is None or stack is None or hint is None or button is None:
+            return
+        panel = stack.currentWidget()
+        if panel is None:
+            return
+        try:
+            panel_top_left_in_page = panel.mapTo(page, QPoint(0, 0))
+            panel_w = panel.width()
+            # ---- Pill (hint) ---------------------------------------
+            pill_x_offset = 210
+            # Reserved right-side margin keeps the pill from running
+            # under any panel-header save buttons (Camera / Microphone
+            # / Save Locations / Colors all park "Save Changes" or
+            # "Apply Changes" at the top-right of their panel header).
+            right_margin = 160
+            available_pill_w = panel_w - pill_x_offset - right_margin
+            # Auto-size the pill to its actual text rather than always
+            # filling the available width. Otherwise short hints sit
+            # inside a giant mostly-empty pill that the user reported
+            # as 'too much empty space'. QFontMetrics on the label's
+            # configured font gives the precise rendered text width;
+            # add 48 px (24 each side) for visual padding.
+            try:
+                from PySide6.QtGui import QFontMetrics
+                fm = QFontMetrics(hint.font())
+                text_w = fm.horizontalAdvance(hint.text() or "")
+            except Exception:
+                text_w = 0
+            desired_pill_w = text_w + 48
+            pill_w = max(200, min(desired_pill_w, available_pill_w))
+            # Cap pill height so it doesn't dip into the description
+            # text. Anchor pill BOTTOM to a fixed offset (40 px) below
+            # the panel top — sits in the gap between the title and
+            # the panel's description text. Anything taller (long-hint
+            # two-line wrap) grows UPWARDS past the panel's top edge
+            # into the page padding instead.
+            target_pill_bottom = 40
+            pill_h_natural = hint.sizeHint().height()
+            pill_h = min(max(50, pill_h_natural), 96)
+            pill_x = panel_top_left_in_page.x() + pill_x_offset
+            pill_y = panel_top_left_in_page.y() + (target_pill_bottom - pill_h)
+            # Don't punch through the page's top edge.
+            pill_y = max(0, pill_y)
+            hint.setGeometry(pill_x, pill_y, pill_w, pill_h)
+            # ---- Next button (bottom-right of the WINDOW) -----------
+            next_btn_size = button.sizeHint()
+            next_btn_w = max(next_btn_size.width(), 110)
+            next_btn_h = max(next_btn_size.height(), 44)
+            page_w = page.width()
+            page_h = page.height()
+            # Tight margins so the button hugs the window's bottom-
+            # right corner. Exit / Skip live in the bottom row's LEFT
+            # half (with a stretch on the right), so the right side
+            # of the bottom row is empty — Next slots into that gap
+            # without overlapping either of them.
+            btn_margin_right = 22
+            btn_margin_bottom = 22
+            btn_x = page_w - next_btn_w - btn_margin_right
+            btn_y = page_h - next_btn_h - btn_margin_bottom
+            # If the button is mid-bounce-in animation, leave its
+            # geometry alone — _show_walkthrough_next_button drives
+            # the animation. We just stash the resting target on the
+            # button via dynamic property so the animation's end
+            # value can pick it up if a resize happens mid-flight.
+            button.setProperty("walkthroughTargetGeom", QRect(btn_x, btn_y, next_btn_w, next_btn_h))
+            anim = self._walkthrough_next_fade_anim
+            if anim is None or anim.state() != QPropertyAnimation.Running:
+                button.setGeometry(btn_x, btn_y, next_btn_w, next_btn_h)
+            hint.raise_()
+            button.raise_()
+        except Exception:
+            pass
+
+    # Backwards-compat alias — older code paths still call this name.
+    def _position_walkthrough_next(self) -> None:
+        self._position_walkthrough_overlay()
+
+    # ---- on-page phase + Next button ---------------------------------
+
+    def _apply_walkthrough_on_page_visuals(self) -> None:
+        """User landed on the target page. Swap pointing hint for
+        the page-description hint and schedule the Next button fade-
+        in 3 s later. Locks on non-target sidebar buttons stay in
+        place — the user can ONLY click the currently-targeted tab
+        even after landing on its page; everything else stays
+        unhoverable / unclickable until the walkthrough advances or
+        exits."""
+        target_section = self._walkthrough_target_section()
+        self._detach_walkthrough_target_visuals()
+        # Re-assert locks: in the on-page phase the only enabled tab
+        # is the current target (so its :checked green styling reads
+        # cleanly). Every other sidebar tab stays disabled.
+        target_button = self._walkthrough_target_button_widget()
+        if target_button is not None:
+            self._lock_non_target_nav_buttons(target_button)
+        if self._walkthrough_hint_label is not None:
+            self._walkthrough_hint_label.setText(
+                WALKTHROUGH_PAGE_HINTS.get(target_section, "")
+            )
+        if self._walkthrough_next_button is not None:
+            self._walkthrough_next_button.setVisible(False)
+            # Final step uses a different label; everything else says "Next".
+            is_final = self._walkthrough_step_index >= len(WALKTHROUGH_PAGES) - 1
+            self._walkthrough_next_button.setText("Gesture Tutorial" if is_final else "Next")
+        if self._walkthrough_next_fade_effect is not None:
+            self._walkthrough_next_fade_effect.setOpacity(0.0)
+        # Schedule the fade-in.
+        timer = self._walkthrough_next_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._show_walkthrough_next_button)
+            self._walkthrough_next_timer = timer
+        timer.stop()
+        timer.start(3000)
+
+    def _show_walkthrough_next_button(self) -> None:
+        """Drop the Next button into the bottom-right with a ball-
+        bounce. Per the user's spec it doesn't fall from the top of
+        the window — it starts ~25 % of the page height ABOVE its
+        landing position, fades in, and bounces a few times before
+        settling. Drives both the geometry animation (OutBounce) and
+        the opacity animation in parallel."""
+        if not self._walkthrough_active or self._walkthrough_phase != "on_page":
+            return
+        button = self._walkthrough_next_button
+        page = getattr(self, "settings_page", None)
+        if button is None or page is None:
+            return
+        self._walkthrough_phase = "next_visible"
+        button.setVisible(True)
+        # First call positions the button at its landing geometry.
+        self._position_walkthrough_overlay()
+        try:
+            target_geom = button.geometry()
+            page_h = max(1, page.height())
+            # Start position: same X, but Y is 25% of the page height
+            # above the landing Y so the drop is short and snappy
+            # rather than falling from the top of the window.
+            drop_distance = max(60, int(page_h * 0.25))
+            start_geom = QRect(
+                target_geom.x(),
+                max(0, target_geom.y() - drop_distance),
+                target_geom.width(),
+                target_geom.height(),
+            )
+            button.setGeometry(start_geom)
+            # OutBounce ease for the ball-bounce settle ("one large
+            # bounce, then smaller and smaller, then still").
+            geom_anim = QPropertyAnimation(button, b"geometry", self)
+            geom_anim.setDuration(1100)
+            geom_anim.setStartValue(start_geom)
+            geom_anim.setEndValue(target_geom)
+            geom_anim.setEasingCurve(QEasingCurve.OutBounce)
+            geom_anim.start()
+            self._walkthrough_next_fade_anim = geom_anim
+            # Opacity 0 → 1 in parallel; finishes ~half-way through
+            # the bounce so the button is fully visible before it
+            # settles.
+            if self._walkthrough_next_fade_effect is not None:
+                self._walkthrough_next_fade_effect.setOpacity(0.0)
+                opacity_anim = QPropertyAnimation(self._walkthrough_next_fade_effect, b"opacity", self)
+                opacity_anim.setDuration(550)
+                opacity_anim.setStartValue(0.0)
+                opacity_anim.setEndValue(1.0)
+                opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
+                opacity_anim.start()
+                self._walkthrough_next_opacity_anim = opacity_anim
+        except Exception:
+            try:
+                self._position_walkthrough_overlay()
+                if self._walkthrough_next_fade_effect is not None:
+                    self._walkthrough_next_fade_effect.setOpacity(1.0)
+            except Exception:
+                pass
+
+    def _on_walkthrough_next_clicked(self) -> None:
+        if not self._walkthrough_active:
+            return
+        is_final = self._walkthrough_step_index >= len(WALKTHROUGH_PAGES) - 1
+        if is_final:
+            # Final step → close walkthrough, route to gesture tutorial.
+            self._exit_walkthrough(open_tutorial=True)
+            return
+        # Advance to the next page's pointing phase.
+        self._walkthrough_step_index += 1
+        self._walkthrough_phase = "pointing"
+        self._apply_walkthrough_pointing_visuals()
+
+    def _on_walkthrough_target_clicked(self) -> None:
+        """Called from show_settings_section when the user clicked
+        the currently-targeted sidebar tab. Transitions phase from
+        'pointing' to 'on_page' and schedules the Next button."""
+        if not self._walkthrough_active:
+            return
+        self._walkthrough_phase = "on_page"
+        self._apply_walkthrough_on_page_visuals()
+
+    def _on_back_button_clicked(self) -> None:
+        """Back / Exit Walk-through handler.
+
+        Walkthrough exit (initial-setup flow): keep the multi-stage
+        defensive engine-stop because that path's whole point is to
+        bail out of setup entirely.
+
+        Regular Back from Settings: USED to also force-stop the
+        engine on a 'strict go-to-start' spec, but the user
+        reported that exiting Settings while gesture control is
+        running shouldn't kill it. Now plain Back just navigates
+        back to the home page and leaves the worker alone — the
+        engine keeps processing frames, the user just sees the
+        start page again."""
+        if self._walkthrough_active:
+            self._exit_walkthrough(open_tutorial=False)
+            QTimer.singleShot(50, self._defensive_stop_engine)
+            QTimer.singleShot(300, self._defensive_stop_engine)
+            QTimer.singleShot(1500, self._defensive_stop_engine)
+            return
+        self.show_home_page()
+
+    def _defensive_stop_engine(self) -> None:
+        """Stop the engine if a worker has appeared. No-op when no
+        worker exists. Used by the post-Back navigation guard."""
+        try:
+            worker = getattr(self, "_worker", None)
+            if worker is None:
+                return
+            # Only stop if it's actually doing something — avoids
+            # tearing down a worker that's mid-init via a legitimate
+            # path.
+            is_running = bool(getattr(worker, "is_running", False))
+            if is_running:
+                self.stop_engine()
+        except Exception:
+            pass
         if self.debugger_window is None:
             self.debugger_window = StandaloneDebugWindow(self.config)
             self.debugger_window.destroyed.connect(self._clear_debugger_reference)
@@ -8782,7 +11890,7 @@ Admin elevation
             self._discovered_cameras = []
             self._rebuild_camera_combo()
             if update_status:
-                self.camera_label.setText("Camera: permission required")
+                self._set_home_camera_display_text("Permission required", enabled=False)
                 self.camera_page_status.setText(access_message)
             if notify:
                 QMessageBox.warning(self, "Touchless", access_message)
@@ -8831,17 +11939,48 @@ Admin elevation
     # int camera index. The save handler dispatches on type: int =
     # local camera, "phone_qr" = phone QR source, None = auto-select.
     _PHONE_CAMERA_DROPDOWN_VALUE = "phone_qr"
+    _PHONE_MICROPHONE_DROPDOWN_VALUE = "phone_qr_mic"
+    # Sentinel for "Connect Phone (QR)" — only injected into HOME
+    # combos so the user can pair a phone straight from the start
+    # screen without diving into Settings. Selecting this entry opens
+    # the QR pair dialog and reverts the dropdown to its previous
+    # selection (the entry is an action, not a saveable preference).
+    # Settings panels keep their own dedicated "Connect Phone (QR)"
+    # button and intentionally do NOT carry this sentinel.
+    _CONNECT_PHONE_QR_CAMERA_VALUE = "connect_phone_qr_camera"
+    _CONNECT_PHONE_QR_MIC_VALUE = "connect_phone_qr_mic"
+
+    def _iter_camera_combos(self) -> list[QComboBox]:
+        combos: list[QComboBox] = []
+        for attr_name in ("home_camera_combo", "camera_combo"):
+            combo = getattr(self, attr_name, None)
+            if isinstance(combo, QComboBox):
+                combos.append(combo)
+        return combos
+
+    def _iter_microphone_combos(self) -> list[QComboBox]:
+        combos: list[QComboBox] = []
+        for attr_name in ("home_microphone_combo", "microphone_combo"):
+            combo = getattr(self, attr_name, None)
+            if isinstance(combo, QComboBox):
+                combos.append(combo)
+        return combos
+
+    @staticmethod
+    def _set_combo_selection_by_data(combo: QComboBox, selected_data) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) == selected_data:
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
 
     def _rebuild_camera_combo(self) -> None:
-        if not hasattr(self, "camera_combo"):
+        combos = self._iter_camera_combos()
+        if not combos:
             return
-        self._camera_combo_lookup = {}
-        self.camera_combo.blockSignals(True)
-        self.camera_combo.clear()
-        self.camera_combo.addItem("Auto-select first available camera", None)
-        for camera in self._discovered_cameras:
-            self._camera_combo_lookup[camera.index] = self.camera_combo.count()
-            self.camera_combo.addItem(camera.display_name, camera.index)
+        self._camera_combo_lookup = {
+            camera.index: position for position, camera in enumerate(self._discovered_cameras, start=1)
+        }
         # Phone camera (QR) is treated as just another camera source
         # in this dropdown — only listed once a phone has been paired
         # via the Connect Phone (QR) button. Selecting it and clicking
@@ -8849,36 +11988,67 @@ Admin elevation
         # device or Auto-select sets it back to False. This replaces
         # the older "Use phone camera (QR) as source" checkbox so
         # there's only one canonical "which camera am I using" control.
-        if bool(getattr(self.config, "phone_camera_qr_paired", False)):
-            self.camera_combo.addItem("Phone Camera (QR)", self._PHONE_CAMERA_DROPDOWN_VALUE)
-        # Honor an active phone selection when rebuilding (e.g. on
-        # combo refresh after the user just paired). If phone is
-        # active, select that entry; otherwise show preferred local
-        # index (or auto).
-        if (
-            bool(getattr(self.config, "phone_camera_qr_active", False))
-            and bool(getattr(self.config, "phone_camera_qr_paired", False))
-        ):
-            self._refresh_camera_combo_selection(self._PHONE_CAMERA_DROPDOWN_VALUE)
-        else:
-            self._refresh_camera_combo_selection(self.config.preferred_camera_index)
-        self.camera_combo.blockSignals(False)
+        phone_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+        selected_value = (
+            self._PHONE_CAMERA_DROPDOWN_VALUE
+            if bool(getattr(self.config, "phone_camera_qr_active", False)) and phone_paired
+            else self.config.preferred_camera_index
+        )
+        home_combo = getattr(self, "home_camera_combo", None)
+        for combo in combos:
+            is_home = combo is home_combo
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("Auto-select first available camera", None)
+            for camera in self._discovered_cameras:
+                combo.addItem(camera.display_name, camera.index)
+            if phone_paired:
+                combo.addItem("Phone Camera (QR)", self._PHONE_CAMERA_DROPDOWN_VALUE)
+            # Home-only "pair a phone" shortcut. Lives at the bottom
+            # of the list so the existing Auto-select / local-device
+            # ordering doesn't shift around.
+            if is_home:
+                combo.addItem("Connect Phone (QR)", self._CONNECT_PHONE_QR_CAMERA_VALUE)
+            self._set_combo_selection_by_data(combo, selected_value)
+            combo.blockSignals(False)
+        self._refresh_camera_labels()
+        self._refresh_camera_settings_save_state()
 
     def _refresh_camera_combo_selection(self, camera_index) -> None:
         """Move the combo cursor to the entry whose data matches
         camera_index. Accepts an int local index, the
         _PHONE_CAMERA_DROPDOWN_VALUE sentinel, or None for auto."""
-        if not hasattr(self, "camera_combo"):
+        combos = self._iter_camera_combos()
+        if not combos:
             return
-        if isinstance(camera_index, str) and camera_index == self._PHONE_CAMERA_DROPDOWN_VALUE:
-            for i in range(self.camera_combo.count()):
-                if self.camera_combo.itemData(i) == self._PHONE_CAMERA_DROPDOWN_VALUE:
-                    self.camera_combo.setCurrentIndex(i)
-                    return
-            self.camera_combo.setCurrentIndex(0)
+        for combo in combos:
+            combo.blockSignals(True)
+            self._set_combo_selection_by_data(combo, camera_index)
+            combo.blockSignals(False)
+        self._refresh_camera_labels()
+        self._refresh_camera_settings_save_state()
+
+    def _saved_camera_settings_combo_value(self):
+        phone_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+        if bool(getattr(self.config, "phone_camera_qr_active", False)) and phone_paired:
+            return self._PHONE_CAMERA_DROPDOWN_VALUE
+        return self.config.preferred_camera_index
+
+    def _refresh_camera_settings_save_state(self) -> None:
+        combo = getattr(self, "camera_combo", None)
+        button = getattr(self, "save_camera_button", None)
+        if combo is None or button is None:
             return
-        combo_index = 0 if camera_index is None else self._camera_combo_lookup.get(camera_index, 0)
-        self.camera_combo.setCurrentIndex(combo_index)
+        pending = False
+        try:
+            if combo.count() > 0:
+                pending = combo.currentData() != self._saved_camera_settings_combo_value()
+        except Exception:
+            pending = False
+        self._set_settings_save_button_pending(button, pending)
+
+    def _on_camera_settings_selection_changed(self, _index: int) -> None:
+        self._refresh_camera_settings_save_state()
 
     def _preferred_camera_info(self) -> Optional[CameraInfo]:
         if self.config.preferred_camera_index is None:
@@ -8888,20 +12058,107 @@ Admin elevation
                 return camera
         return None
 
+    def _set_home_device_combo_text(self, attr_name: str, text: str, *, enabled: bool = True) -> None:
+        combo = getattr(self, attr_name, None)
+        if not isinstance(combo, _DisplayOverrideCombo):
+            return
+        value = str(text or "").strip()
+        combo.set_display_text_override(value)
+        combo.setToolTip(value)
+        combo.setEnabled(enabled)
+        self._resize_home_device_combo(combo, value)
+
+    def _resize_home_device_combo(self, combo: QComboBox, text: str) -> None:
+        value = str(text or combo.currentText() or "").strip()
+        metrics = combo.fontMetrics()
+        text_width = metrics.horizontalAdvance(value) if value else metrics.horizontalAdvance("Device")
+        arrow_width = 34
+        horizontal_padding = 28
+        width = max(150, min(460, text_width + arrow_width + horizontal_padding))
+        combo.setFixedWidth(width)
+
+    def _on_home_status_text_changed(self, text: str) -> None:
+        value = str(text or "").strip()
+        if not value:
+            return
+        self._append_home_debug_log(value)
+
+    def _on_home_last_action_text_changed(self, text: str) -> None:
+        value = str(text or "").strip()
+        if not value or value.lower() == "last action: none":
+            return
+        if bool(getattr(self, "_skip_home_last_action_debug", False)):
+            return
+        self._append_home_debug_log(value)
+
+    def _append_home_debug_log(self, text: str) -> None:
+        value = str(text or "").strip()
+        if not value:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        line = f"[{stamp}] {value}"
+        entries = getattr(self, "_home_debug_log_entries", None)
+        if not isinstance(entries, list):
+            entries = []
+            self._home_debug_log_entries = entries
+        entries.append(line)
+        max_entries = max(20, int(getattr(self, "_home_debug_log_max_entries", 250) or 250))
+        if len(entries) > max_entries:
+            del entries[:-max_entries]
+        widget = getattr(self, "home_debug_log", None)
+        if isinstance(widget, QPlainTextEdit):
+            scrollbar = widget.verticalScrollBar()
+            should_follow = scrollbar.value() >= max(0, scrollbar.maximum() - 8)
+            widget.appendPlainText(line)
+            if should_follow:
+                scrollbar.setValue(scrollbar.maximum())
+
+    def _sync_home_debug_log_widget(self) -> None:
+        widget = getattr(self, "home_debug_log", None)
+        if not isinstance(widget, QPlainTextEdit):
+            return
+        entries = list(getattr(self, "_home_debug_log_entries", []) or [])
+        scrollbar = widget.verticalScrollBar()
+        should_follow = scrollbar.value() >= max(0, scrollbar.maximum() - 8)
+        widget.setPlainText("\n".join(entries))
+        if should_follow:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _set_home_camera_display_text(self, text: str, *, enabled: bool = True) -> None:
+        self._set_home_device_combo_text("home_camera_combo", text, enabled=enabled)
+
+    def _set_home_microphone_display_text(self, text: str, *, enabled: bool = True) -> None:
+        self._set_home_device_combo_text("home_microphone_combo", text, enabled=enabled)
+
     def _refresh_camera_labels(self) -> None:
+        phone_qr_active = (
+            bool(getattr(self.config, "phone_camera_qr_active", False))
+            and bool(getattr(self.config, "phone_camera_qr_paired", False))
+        )
+        phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(
+            str(getattr(self.config, "phone_camera_url", "") or "").strip()
+        )
         preferred = self._preferred_camera_info()
-        if preferred is not None:
-            self.camera_label.setText(f"Camera: {preferred.display_name} (saved)")
+        if phone_qr_active:
+            self._set_home_camera_display_text("Phone Camera (QR)")
+        elif phone_url_active:
+            self._set_home_camera_display_text("Phone Camera (URL)")
+        elif preferred is not None:
+            self._set_home_camera_display_text(f"{preferred.display_name} (saved)")
         elif self._discovered_cameras:
             if len(self._discovered_cameras) == 1:
-                self.camera_label.setText(f"Camera: {self._discovered_cameras[0].display_name}")
+                self._set_home_camera_display_text(self._discovered_cameras[0].display_name)
             else:
-                self.camera_label.setText(f"Camera: {len(self._discovered_cameras)} available — choose in Settings")
+                self._set_home_camera_display_text(f"{len(self._discovered_cameras)} available - choose here")
         else:
-            self.camera_label.setText("Camera: no camera found")
+            self._set_home_camera_display_text("No camera found", enabled=False)
         # Settings → Camera status line, mirrored from the home card.
         if hasattr(self, "camera_page_status"):
-            if preferred is not None:
+            if phone_qr_active:
+                self.camera_page_status.setText("Saved camera: Phone Camera (QR)")
+            elif phone_url_active:
+                self.camera_page_status.setText("Saved camera: Phone Camera (URL)")
+            elif preferred is not None:
                 self.camera_page_status.setText(f"Saved camera: {preferred.display_name}")
             elif self._discovered_cameras:
                 names = ", ".join(camera.display_name for camera in self._discovered_cameras)
@@ -8945,67 +12202,61 @@ Admin elevation
         return ""
 
     def _refresh_microphone_label(self) -> None:
-        """Update the home-page Microphone line. Pulls the active
+        """Update the home-page Microphone dropdown text. Pulls the active
         choice from config.preferred_microphone_name + the discovered
-        list. In Auto-select mode (no preferred name) the label shows
+        list. In Auto-select mode (no preferred name) the field shows
         the actual default device the OS would hand sounddevice, so
         the user sees a real name instead of a count."""
-        if not hasattr(self, "microphone_label"):
-            return
         # Phone-mic source wins when actively routed.
         if (
             bool(getattr(self.config, "phone_camera_qr_use_mic", False))
             and bool(getattr(self.config, "phone_camera_qr_paired", False))
         ):
-            self.microphone_label.setText("Microphone: Phone (QR)")
+            self._set_home_microphone_display_text("Phone Microphone (QR)")
             return
         preferred = str(getattr(self.config, "preferred_microphone_name", "") or "").strip()
         mics = list(getattr(self, "_discovered_microphones", []) or [])
         if preferred and (not mics or preferred in mics):
-            self.microphone_label.setText(f"Microphone: {preferred} (saved)")
+            self._set_home_microphone_display_text(f"{preferred} (saved)")
             return
         # Auto-select mode (no saved preference). Resolve the device
         # sounddevice would actually open and surface that name.
         default_name = self._resolve_default_microphone_name()
         if default_name:
-            self.microphone_label.setText(f"Microphone: {default_name} (auto)")
+            self._set_home_microphone_display_text(f"{default_name} (auto)")
             return
         if mics:
-            self.microphone_label.setText(f"Microphone: {mics[0]} (auto)")
+            self._set_home_microphone_display_text(f"{mics[0]} (auto)")
             return
-        self.microphone_label.setText("Microphone: none found")
+        self._set_home_microphone_display_text("No microphone found", enabled=False)
 
     def _on_action_history_expand_toggled(self, expanded: bool) -> None:
-        """Expand Recent Actions to fill whatever vertical room the
+        """Expand the home Log panel to fill whatever vertical room the
         home page has left after the buttons / hero / legend, or
-        collapse back to the default ~140 px slot.
+        collapse back to the default compact slot.
 
         Implementation note: instead of forcing a hard min-height on
-        the list, we swap the body layout's stretch factor between
-        the Runtime Status card and the bottom spacer. With stretch=1
-        on the card, it absorbs all available space; the list (which
-        is the only Expanding child of the card) grows with it. The
-        bottom-of-window margin and the legend stay reachable because
-        the card never goes past the available space — Qt's layout
-        respects the window height as a hard cap.
+        one child widget, we swap the body layout's stretch factor
+        between the Runtime Status card and the bottom spacer.
+        With stretch=1 on the card, the splitter can absorb the
+        available space while the bottom legend/debug row stay
+        reachable.
         """
-        if not hasattr(self, "action_history_list"):
+        if not hasattr(self, "home_log_splitter"):
             return
         for widget in getattr(self, "_action_history_collapsible", []) or []:
             try:
                 widget.setVisible(not expanded)
             except Exception:
                 pass
-        # Drop both height caps so the list is purely layout-driven.
-        # The list itself is QSizePolicy.Expanding, and inside the
-        # card it's the only widget that wants to grow vertically,
-        # so it claims whatever room the card has.
+        splitter = self.home_log_splitter
         if expanded:
-            self.action_history_list.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
-            self.action_history_list.setMinimumHeight(120)
+            splitter.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+            splitter.setMinimumHeight(180)
         else:
-            self.action_history_list.setMaximumHeight(140)
-            self.action_history_list.setMinimumHeight(0)
+            default_height = int(getattr(self, "_home_log_default_height", 156) or 156)
+            splitter.setMinimumHeight(default_height)
+            splitter.setMaximumHeight(default_height)
         # Swap the body layout's stretch factors. body_layout has:
         #   hero, subtitle, button_row, info_card, legend, debug_row,
         #   final addStretch(1)
@@ -9024,10 +12275,10 @@ Admin elevation
             except Exception:
                 pass
         if hasattr(self, "action_history_expand_button"):
-            self.action_history_expand_button.setText("⤡" if expanded else "⤢")
             self.action_history_expand_button.setToolTip(
-                "Collapse Recent Actions" if expanded else "Expand Recent Actions"
+                "Collapse panel" if expanded else "Expand panel"
             )
+            self.action_history_expand_button.update()
 
     def _build_action_history_legend(self) -> QWidget:
         """Single-row legend widget showing each category dot beside
@@ -9114,61 +12365,58 @@ Admin elevation
             self._refresh_camera_labels()
         return selected_index
 
-    def save_camera_preference_from_settings(self) -> None:
-        selected_data = self.camera_combo.currentData()
-        # Capture the friendly name from the combo BEFORE we lose
-        # easy access to it, so the confirmation popup tells the user
-        # exactly which camera is now their saved choice.
+    def _save_camera_preference_from_home(self, _index: int) -> None:
+        combo = getattr(self, "home_camera_combo", None)
+        if combo is None:
+            return
+        selected_data = combo.currentData()
+        # "Connect Phone (QR)" sentinel: open the pair dialog instead
+        # of saving a preference, and revert the combo to whatever
+        # was previously chosen so it doesn't stick on the action
+        # entry. The pair flow itself rebuilds the combo on success.
+        if isinstance(selected_data, str) and selected_data == self._CONNECT_PHONE_QR_CAMERA_VALUE:
+            previous = self._saved_camera_settings_combo_value()
+            self._refresh_camera_combo_selection(previous)
+            self._on_phone_camera_qr_clicked()
+            return
+        self._save_camera_preference_from_combo(combo, show_notice=False)
+
+    def _save_camera_preference_from_combo(self, combo: QComboBox, *, show_notice: bool) -> None:
+        selected_data = combo.currentData()
         selected_name = ""
         try:
-            selected_name = str(self.camera_combo.currentText() or "").strip()
+            selected_name = str(combo.currentText() or "").strip()
         except Exception:
             selected_name = ""
 
-        # Dispatch on combo data type:
-        #   string == _PHONE_CAMERA_DROPDOWN_VALUE → phone QR source
-        #   int                                    → local camera index
-        #   None                                   → auto-select
-        # Setting phone_camera_qr_active here is the new canonical
-        # control replacing the old "Use phone camera (QR) as
-        # source" checkbox.
         chose_phone_qr = (
             isinstance(selected_data, str)
             and selected_data == self._PHONE_CAMERA_DROPDOWN_VALUE
         )
         if chose_phone_qr:
             self.config.phone_camera_qr_active = True
-            # Leave preferred_camera_index unchanged so it can serve
-            # as fallback if the phone is turned off / unpaired.
         else:
             self.config.phone_camera_qr_active = False
             self.config.preferred_camera_index = selected_data if isinstance(selected_data, int) else None
 
-        # Cache for confirmation popup wording.
         phone_qr_active = chose_phone_qr and self._current_phone_camera_qr_server() is not None
         phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
 
         save_config(self.config)
+        self._refresh_camera_combo_selection(
+            self._PHONE_CAMERA_DROPDOWN_VALUE if chose_phone_qr else self.config.preferred_camera_index
+        )
         self._refresh_camera_labels()
-        # Sync the legacy checkbox UI to whatever we just decided so
-        # both controls stay coherent until we remove the checkbox
-        # in a future cleanup pass.
         if hasattr(self, "use_phone_camera_qr_checkbox"):
             self.use_phone_camera_qr_checkbox.blockSignals(True)
             self.use_phone_camera_qr_checkbox.setChecked(chose_phone_qr)
             self.use_phone_camera_qr_checkbox.blockSignals(False)
 
-        # Hot-swap: if the engine is currently running, restart the
-        # worker against the new camera so the user doesn't have to
-        # End then Start manually. The 1-3 second blip during the
-        # restart is acceptable per the requested behavior.
         engine_was_running = self._worker is not None
         if engine_was_running:
             try:
                 self.start_engine(skip_tutorial_prompt=True)
             except Exception:
-                # If restart fails for any reason, fall back to the
-                # old behavior (user can manually restart).
                 pass
 
         if phone_qr_active:
@@ -9191,7 +12439,6 @@ Admin elevation
                 "Camera preference saved. Touchless will pick the best available camera at startup."
             )
         else:
-            # selected_data here is an int (local camera index).
             label = selected_name if selected_name else f"index {selected_data}"
             self.last_action_label.setText(f"Last action: saved camera {label}")
             confirmation = (
@@ -9199,7 +12446,12 @@ Admin elevation
             )
         if engine_was_running:
             confirmation += "\n\nThe camera is being switched live — gestures may pause for 1-3 seconds while the new camera initializes."
-        TouchlessNotice.show_info(self, "Camera Saved", confirmation)
+        if show_notice:
+            TouchlessNotice.show_info(self, "Camera Saved", confirmation)
+
+    def save_camera_preference_from_settings(self) -> None:
+        self._save_camera_preference_from_combo(self.camera_combo, show_notice=True)
+        self._refresh_camera_settings_save_state()
 
     def clear_camera_preference(self) -> None:
         self.config.preferred_camera_index = None
@@ -9221,23 +12473,79 @@ Admin elevation
         return self._discovered_microphones
 
     def _rebuild_microphone_combo(self) -> None:
-        if not hasattr(self, "microphone_combo"):
+        combos = self._iter_microphone_combos()
+        if not combos:
             return
-        self._microphone_combo_lookup = {}
-        self.microphone_combo.blockSignals(True)
-        self.microphone_combo.clear()
-        self.microphone_combo.addItem("Auto-select default microphone", None)
-        for device_name in self._discovered_microphones:
-            self._microphone_combo_lookup[device_name] = self.microphone_combo.count()
-            self.microphone_combo.addItem(device_name, device_name)
-        self._refresh_microphone_combo_selection(getattr(self.config, "preferred_microphone_name", None))
-        self.microphone_combo.blockSignals(False)
+        self._microphone_combo_lookup = {
+            device_name: position for position, device_name in enumerate(self._discovered_microphones, start=1)
+        }
+        phone_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+        selected_value = (
+            self._PHONE_MICROPHONE_DROPDOWN_VALUE
+            if phone_paired and bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+            else getattr(self.config, "preferred_microphone_name", None)
+        )
+        home_combo = getattr(self, "home_microphone_combo", None)
+        for combo in combos:
+            is_home = combo is home_combo
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("Auto-select default microphone", None)
+            if phone_paired:
+                combo.addItem("Phone Microphone (QR)", self._PHONE_MICROPHONE_DROPDOWN_VALUE)
+            for device_name in self._discovered_microphones:
+                combo.addItem(device_name, device_name)
+            # Home-only "pair a phone" shortcut so users can connect
+            # the phone mic straight from the start screen. Routes
+            # through the same QR pair dialog as the camera option.
+            if is_home:
+                combo.addItem("Connect Phone (QR)", self._CONNECT_PHONE_QR_MIC_VALUE)
+            self._set_combo_selection_by_data(combo, selected_value)
+            combo.blockSignals(False)
+        self._refresh_microphone_label()
+        self._refresh_microphone_settings_save_state()
 
     def _refresh_microphone_combo_selection(self, device_name: Optional[str]) -> None:
-        if not hasattr(self, "microphone_combo"):
+        combos = self._iter_microphone_combos()
+        if not combos:
             return
-        combo_index = 0 if device_name is None else self._microphone_combo_lookup.get(device_name, 0)
-        self.microphone_combo.setCurrentIndex(combo_index)
+        for combo in combos:
+            combo.blockSignals(True)
+            self._set_combo_selection_by_data(combo, device_name)
+            combo.blockSignals(False)
+        self._refresh_microphone_label()
+        self._refresh_microphone_settings_save_state()
+
+    def _saved_microphone_settings_combo_value(self):
+        phone_paired = bool(getattr(self.config, "phone_camera_qr_paired", False))
+        if phone_paired and bool(getattr(self.config, "phone_camera_qr_use_mic", False)):
+            return self._PHONE_MICROPHONE_DROPDOWN_VALUE
+        return getattr(self.config, "preferred_microphone_name", None)
+
+    def _microphone_settings_gain_matches_saved(self) -> bool:
+        slider = getattr(self, "mic_test_gain_slider", None)
+        if slider is None:
+            return True
+        saved_gain = float(getattr(self.config, "mic_input_gain", 1.0) or 1.0)
+        saved_gain = max(0.1, min(10.0, saved_gain))
+        return int(round(saved_gain * 100)) == int(slider.value())
+
+    def _refresh_microphone_settings_save_state(self) -> None:
+        combo = getattr(self, "microphone_combo", None)
+        button = getattr(self, "save_microphone_button", None)
+        if combo is None or button is None:
+            return
+        selection_dirty = False
+        try:
+            if combo.count() > 0:
+                selection_dirty = combo.currentData() != self._saved_microphone_settings_combo_value()
+        except Exception:
+            selection_dirty = False
+        pending = bool(selection_dirty or not self._microphone_settings_gain_matches_saved())
+        self._set_settings_save_button_pending(button, pending)
+
+    def _on_microphone_settings_selection_changed(self, _index: int) -> None:
+        self._refresh_microphone_settings_save_state()
 
     def _refresh_microphone_labels(self) -> None:
         # Plural alias kept for backwards compat with existing callers
@@ -9245,22 +12553,52 @@ Admin elevation
         # home-card label refresher.
         self._refresh_microphone_label()
 
-    def save_microphone_preference_from_settings(self) -> None:
-        selected_name = self.microphone_combo.currentData()
-        self.config.preferred_microphone_name = selected_name
+    def _save_microphone_preference_from_home(self, _index: int) -> None:
+        combo = getattr(self, "home_microphone_combo", None)
+        if combo is None:
+            return
+        selected_data = combo.currentData()
+        # "Connect Phone (QR)" sentinel: open the pair dialog instead
+        # of saving a preference, and revert the combo to whatever
+        # was previously chosen so it doesn't stick on the action
+        # entry. Reuses the camera QR pair flow because phone audio
+        # rides over the same WebSocket once paired.
+        if isinstance(selected_data, str) and selected_data == self._CONNECT_PHONE_QR_MIC_VALUE:
+            previous = self._saved_microphone_settings_combo_value()
+            self._refresh_microphone_combo_selection(previous)
+            self._on_phone_camera_qr_clicked()
+            return
+        self._save_microphone_preference_from_combo(combo, show_notice=False)
+
+    def _save_microphone_preference_from_combo(self, combo: QComboBox, *, show_notice: bool) -> None:
+        selected_name = combo.currentData()
+        using_phone_mic = (
+            isinstance(selected_name, str)
+            and selected_name == self._PHONE_MICROPHONE_DROPDOWN_VALUE
+        )
+        if using_phone_mic:
+            self.config.phone_camera_qr_use_mic = True
+        else:
+            self.config.phone_camera_qr_use_mic = False
+            self.config.preferred_microphone_name = selected_name
         save_config(self.config)
+        self._refresh_microphone_combo_selection(
+            self._PHONE_MICROPHONE_DROPDOWN_VALUE if using_phone_mic else selected_name
+        )
         self._refresh_microphone_labels()
-        if self._worker is not None:
+        if self._worker is not None and not using_phone_mic:
             self._worker.voice_listener.set_input_device_name(selected_name)
-        if self.tutorial_window is not None and hasattr(self.tutorial_window, "_voice_listener"):
+        if self.tutorial_window is not None and hasattr(self.tutorial_window, "_voice_listener") and not using_phone_mic:
             try:
                 self.tutorial_window._voice_listener.set_input_device_name(selected_name)
             except Exception:
                 pass
-        # If phone mic is the active source, the local dropdown choice
-        # is effectively bypassed — surface that in the confirmation
-        # text so the user doesn't think we ignored the phone setting.
-        using_phone_mic = bool(getattr(self.config, "phone_camera_qr_use_mic", False))
+        if hasattr(self, "use_phone_mic_checkbox"):
+            self.use_phone_mic_checkbox.blockSignals(True)
+            self.use_phone_mic_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_use_mic", False)))
+            self.use_phone_mic_checkbox.blockSignals(False)
+        self._apply_phone_mic_preference()
+        self._refresh_phone_mic_dependent_ui()
         if using_phone_mic:
             self.last_action_label.setText("Last action: saved phone microphone as source")
             confirmation = (
@@ -9276,13 +12614,60 @@ Admin elevation
             confirmation = (
                 f"Microphone preference saved. Voice commands and dictation will now use:\n\n{selected_name}"
             )
-        TouchlessNotice.show_info(self, "Microphone Saved", confirmation)
+        if show_notice:
+            TouchlessNotice.show_info(self, "Microphone Saved", confirmation)
+
+    def save_microphone_preference_from_settings(self) -> None:
+        selection_dirty = False
+        try:
+            selection_dirty = (
+                getattr(self, "microphone_combo", None) is not None
+                and self.microphone_combo.count() > 0
+                and self.microphone_combo.currentData() != self._saved_microphone_settings_combo_value()
+            )
+        except Exception:
+            selection_dirty = False
+        gain_dirty = not self._microphone_settings_gain_matches_saved()
+        if selection_dirty or not gain_dirty:
+            self._save_microphone_preference_from_combo(self.microphone_combo, show_notice=not gain_dirty)
+        if gain_dirty:
+            gain = max(0.1, min(10.0, float(self.mic_test_gain_slider.value()) / 100.0))
+            self.config.mic_input_gain = gain
+            save_config(self.config)
+            if self._worker is not None:
+                try:
+                    self._worker.voice_listener.set_input_gain(gain)
+                except Exception:
+                    pass
+            if self.tutorial_window is not None and hasattr(self.tutorial_window, "_voice_listener"):
+                try:
+                    self.tutorial_window._voice_listener.set_input_gain(gain)
+                except Exception:
+                    pass
+            if selection_dirty:
+                self.last_action_label.setText("Last action: microphone settings saved")
+                TouchlessNotice.show_info(
+                    self,
+                    "Microphone Saved",
+                    "Microphone preference and gain saved successfully.",
+                )
+            else:
+                self.last_action_label.setText(f"Last action: saved microphone gain {gain:.1f}x")
+                TouchlessNotice.show_info(
+                    self,
+                    "Microphone Saved",
+                    f"Microphone gain saved. Voice commands and dictation will now use {gain:.1f}x gain.",
+                )
+        self._refresh_microphone_settings_save_state()
 
     def clear_microphone_preference(self) -> None:
         self.config.preferred_microphone_name = None
+        self.config.phone_camera_qr_use_mic = False
         save_config(self.config)
         self._refresh_microphone_combo_selection(None)
         self._refresh_microphone_labels()
+        self._apply_phone_mic_preference()
+        self._refresh_phone_mic_dependent_ui()
         if self._worker is not None:
             self._worker.voice_listener.set_input_device_name(None)
         if self.tutorial_window is not None and hasattr(self.tutorial_window, "_voice_listener"):
@@ -9292,9 +12677,68 @@ Admin elevation
                 pass
         self.last_action_label.setText("Last action: cleared saved microphone")
 
+    def _on_connect_spotify_clicked(self) -> None:
+        """Open the Spotify OAuth flow on a background thread so the
+        UI doesn't freeze for ~3 minutes while the user authorises.
+
+        Each user gets their own access + refresh token written to
+        %APPDATA%\\Touchless\\spotify_tokens.json — no shared account.
+        Runs against the worker's existing controller when the engine
+        is up; otherwise spins up a one-shot SpotifyController so the
+        user can authorise from a cold launch."""
+        from ..integration.noop_engine import SpotifyController as _SpotifyController
+        worker = getattr(self, "_worker", None)
+        controller = getattr(worker, "spotify_controller", None) if worker is not None else None
+        if controller is None:
+            controller = _SpotifyController()
+        if hasattr(self, "last_action_label"):
+            self.last_action_label.setText("Last action: opening Spotify authorisation in your browser…")
+
+        def _run_auth():
+            try:
+                ok = controller.authorize_full_scopes()
+            except Exception as exc:
+                ok = False
+                try:
+                    print(f"[spotify] authorize_full_scopes raised: {exc}")
+                except Exception:
+                    pass
+            QTimer.singleShot(0, lambda: self._on_spotify_auth_done(ok, getattr(controller, "message", "")))
+
+        threading.Thread(target=_run_auth, name="spotify-authorize", daemon=True).start()
+
+    def _on_spotify_auth_done(self, ok: bool, message: str) -> None:
+        if hasattr(self, "last_action_label"):
+            if ok:
+                self.last_action_label.setText("Last action: Spotify connected")
+            else:
+                self.last_action_label.setText(f"Last action: Spotify connect failed — {message or 'see browser'}")
+
     def start_engine(self, checked: bool = False, skip_tutorial_prompt: bool = False) -> None:
-            prompt_result = "start" if skip_tutorial_prompt else self._maybe_prompt_for_tutorial()
+            # Diagnostic trace — written to stderr (same stream as
+            # MediaPipe's TFLite/INFO lines) so it lines up with the
+            # other engine-init noise the user pastes from terminal.
+            # Forced flush in case stdout buffering was eating the
+            # message in earlier reproductions.
+            try:
+                import sys as _sys
+                import traceback as _tb
+                stack = _tb.format_stack(limit=8)
+                _sys.stderr.write(
+                    f"[engine] start_engine called "
+                    f"(skip_tutorial_prompt={skip_tutorial_prompt}) — caller stack:\n"
+                )
+                for frame in stack[:-1]:
+                    for line in frame.rstrip().splitlines():
+                        _sys.stderr.write(f"[engine]   {line}\n")
+                _sys.stderr.flush()
+            except Exception:
+                pass
+            prompt_result = "start" if skip_tutorial_prompt else self._maybe_prompt_for_walkthrough()
             if prompt_result != "start":
+                if prompt_result == "walkthrough":
+                    self._start_walkthrough()
+                    return
                 if prompt_result == "tutorial":
                     self.open_tutorial(from_settings=False)
                     return
@@ -9401,6 +12845,11 @@ Admin elevation
             self._worker.debug_frame_ready.connect(self._on_worker_debug_frame)
             self._worker.save_prompt_completed.connect(self._on_save_prompt_completed)
             self._worker.action_history_changed.connect(self._on_action_history_changed)
+            if hasattr(self._worker, "mouse_mode_activated"):
+                try:
+                    self._worker.mouse_mode_activated.connect(self._on_mouse_mode_activated)
+                except Exception:
+                    pass
             if hasattr(self._worker, "drawing_overlay_toggle_requested"):
                 try:
                     self._worker.drawing_overlay_toggle_requested.connect(
@@ -9445,11 +12894,11 @@ Admin elevation
             self._apply_phone_mic_preference()
 
             if phone_qr_active and selected_camera_index is None:
-                self.camera_label.setText("Camera: Phone (QR)")
+                self._set_home_camera_display_text("Phone Camera (QR)")
             elif phone_url_active and selected_camera_index is None:
-                self.camera_label.setText("Camera: Phone (URL)")
+                self._set_home_camera_display_text("Phone Camera (URL)")
             else:
-                self.camera_label.setText(f"Camera: Camera {selected_camera_index}")
+                self._set_home_camera_display_text(f"Camera {selected_camera_index}")
             self.status_label.setText("Status: starting...")
             self.last_action_label.setText("Last action: starting gesture and voice control")
             self.start_button.setEnabled(False)
@@ -9607,7 +13056,7 @@ Admin elevation
         self.status_label.setText(f"Status: {text}")
 
     def _on_camera_selected(self, text: str) -> None:
-        self.camera_label.setText(f"Camera: {text}")
+        self._set_home_camera_display_text(text)
 
     def _on_running_state_changed(self, is_running: bool) -> None:
             self.start_button.setEnabled(not is_running)
@@ -9616,7 +13065,12 @@ Admin elevation
 
     def _on_command_detected(self, command: str) -> None:
         action_text = str(command or "").strip() or "none"
-        self.last_action_label.setText(f"Last action: {action_text}")
+        self._skip_home_last_action_debug = True
+        try:
+            self.last_action_label.setText(f"Last action: {action_text}")
+        finally:
+            self._skip_home_last_action_debug = False
+        self._append_home_debug_log(f"Command result: {action_text}")
         # Push the same human-readable text to the phone via SSE so
         # users get a live toast confirming the PC saw their gesture
         # or voice command. Skipped silently if no phone is paired,
@@ -9892,6 +13346,83 @@ Admin elevation
         layout.addWidget(ts_label, 0, Qt.AlignVCenter)
 
         return row, ts_label
+
+    def _on_mouse_mode_activated(self) -> None:
+        """Show the monitor picker on mouse-mode-on. Skipped silently
+        when the user already has a saved preset
+        (config.mouse_active_monitor_index is not None) — they've
+        already told us which monitor they want, no need to ask again
+        every activation. The dialog is non-modal (Qt.Tool) so the
+        user can interact with their hand cursor while choosing.
+
+        Clicking "Monitor Choices" inside the popup routes to
+        Settings -> Save Locations -> Mouse Control where the
+        persistent default lives, mirroring the user's spec."""
+        if getattr(self.config, "mouse_active_monitor_index", None) is not None:
+            return
+        existing = getattr(self, "_mouse_monitor_dialog", None)
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    return
+            except Exception:
+                pass
+        try:
+            dialog = _MouseMonitorChoiceDialog(self.config, parent=self)
+            dialog.monitor_chosen.connect(self._on_mouse_monitor_choice_made)
+            dialog.preset_requested.connect(self._on_mouse_monitor_preset_requested)
+            dialog.show()
+            self._mouse_monitor_dialog = dialog
+        except Exception:
+            pass
+
+    def _on_mouse_monitor_choice_made(self, monitor_index: object) -> None:
+        """User picked a monitor from the activation popup. Persist
+        immediately so the same choice applies across sessions, and
+        sync the Save Locations dropdown if it's already built."""
+        chosen = monitor_index if isinstance(monitor_index, int) else None
+        self.config.mouse_active_monitor_index = chosen
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+        combo = getattr(self, "_save_locations_mouse_monitor_combo", None)
+        if combo is not None:
+            try:
+                for i in range(combo.count()):
+                    if combo.itemData(i) == chosen:
+                        combo.setCurrentIndex(i)
+                        break
+            except Exception:
+                pass
+
+    def _on_mouse_monitor_preset_requested(self) -> None:
+        """User clicked "Monitor Choices" in the activation popup —
+        navigate to the Save Locations panel where the persistent
+        default lives, then scroll the Mouse Control box into view."""
+        try:
+            self.show_settings_section(SECTION_SAVE_LOCATIONS)
+        except Exception:
+            pass
+        # Defer the scroll so the Save Locations panel has time to
+        # become the current page + lay out before we ask QScrollArea
+        # to scroll one of its descendants into view.
+        QTimer.singleShot(120, self._scroll_save_locations_to_mouse_control)
+
+    def _scroll_save_locations_to_mouse_control(self) -> None:
+        """Bring the Mouse Control inner card into view inside the
+        Save Locations scroll area. Idempotent — safe to call when
+        the panel hasn't been built yet (does nothing)."""
+        box = self.findChild(QFrame, "saveLocationsMouseControlBox")
+        if box is None:
+            return
+        scroll = self.findChild(QScrollArea, "saveLocationsScroll")
+        if scroll is None:
+            return
+        try:
+            scroll.ensureWidgetVisible(box, 0, 80)
+        except Exception:
+            pass
 
     def _on_action_history_changed(self, events: object) -> None:
         if not hasattr(self, "action_history_list"):
@@ -12816,6 +16347,40 @@ Admin elevation
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):  # noqa: N802
+        # Walk-through overlay: re-anchor the pill + Next button
+        # whenever the page or content stack resizes / moves so the
+        # overlay stays parked over the active panel's top-right.
+        if event.type() in (QEvent.Resize, QEvent.Move, QEvent.Show):
+            page = getattr(self, "settings_page", None)
+            stack = getattr(self, "settings_content_stack", None)
+            if obj is page or obj is stack:
+                try:
+                    self._position_walkthrough_overlay()
+                except Exception:
+                    pass
+        # Walk-through target glow: keep the soft halo glued to the
+        # target sidebar tab even if the sidebar reflows underneath.
+        glow = getattr(self, "_walkthrough_target_glow_widget", None)
+        if glow is not None and event.type() in (QEvent.Resize, QEvent.Move):
+            try:
+                target = self._walkthrough_target_button
+                if target is not None and (obj is target or obj is target.parentWidget()):
+                    glow.update_position()
+            except Exception:
+                pass
+        # Walk-through bounce-settle: ease the bouncing target back to
+        # baseline the first time the user hovers it.
+        if (
+            getattr(self, "_walkthrough_active", False)
+            and self._walkthrough_target_button is not None
+            and obj is self._walkthrough_target_button
+            and self._walkthrough_bounce_anim is not None
+            and event.type() in (QEvent.Enter, QEvent.HoverEnter)
+        ):
+            try:
+                self._settle_walkthrough_bounce()
+            except Exception:
+                pass
         # Gesture Binds rebind pill: re-anchor to bottom-center on
         # every panel resize so the pill stays floating at the bottom
         # regardless of window size or scroll position.
@@ -14176,6 +17741,40 @@ def _stop_screen_recording(self) -> bool:
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):  # noqa: N802
+        # Walk-through overlay: re-anchor the pill + Next button
+        # whenever the page or content stack resizes / moves so the
+        # overlay stays parked over the active panel's top-right.
+        if event.type() in (QEvent.Resize, QEvent.Move, QEvent.Show):
+            page = getattr(self, "settings_page", None)
+            stack = getattr(self, "settings_content_stack", None)
+            if obj is page or obj is stack:
+                try:
+                    self._position_walkthrough_overlay()
+                except Exception:
+                    pass
+        # Walk-through target glow: keep the soft halo glued to the
+        # target sidebar tab even if the sidebar reflows underneath.
+        glow = getattr(self, "_walkthrough_target_glow_widget", None)
+        if glow is not None and event.type() in (QEvent.Resize, QEvent.Move):
+            try:
+                target = self._walkthrough_target_button
+                if target is not None and (obj is target or obj is target.parentWidget()):
+                    glow.update_position()
+            except Exception:
+                pass
+        # Walk-through bounce-settle: ease the bouncing target back to
+        # baseline the first time the user hovers it.
+        if (
+            getattr(self, "_walkthrough_active", False)
+            and self._walkthrough_target_button is not None
+            and obj is self._walkthrough_target_button
+            and self._walkthrough_bounce_anim is not None
+            and event.type() in (QEvent.Enter, QEvent.HoverEnter)
+        ):
+            try:
+                self._settle_walkthrough_bounce()
+            except Exception:
+                pass
         # Gesture Binds rebind pill: re-anchor to bottom-center on
         # every panel resize so the pill stays floating at the bottom
         # regardless of window size or scroll position.
@@ -14276,6 +17875,76 @@ def _stop_screen_recording(self) -> bool:
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._update_home_status_card_width()
+        self._reposition_walkthrough_edge_glow()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        # Walk-through edge glow now lives on a dedicated overlay
+        # widget (`_WalkthroughEdgeGlowOverlay`) parented to the
+        # central widget so it can paint ON TOP of the surface-fill
+        # children (title bar + page stack) instead of underneath
+        # them where it was being hidden. This paintEvent leaves the
+        # window paint untouched and returns early.
+        return
+        # Original early-return guard preserved as dead-code anchor
+        # so the rest of the (now-unused) gradient-painting block
+        # below is never reached.
+        if not getattr(self, "_walkthrough_active", False):
+            return
+        try:
+            from PySide6.QtGui import QLinearGradient
+        except Exception:
+            return
+        rect = self.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        title_bar_height = 0
+        try:
+            tb = getattr(self, "title_bar", None)
+            if tb is not None and tb.isVisible():
+                title_bar_height = int(tb.height())
+        except Exception:
+            title_bar_height = 0
+        # Body region = everything below the title bar.
+        body_top = title_bar_height
+        body_height = rect.height() - body_top
+        if body_height <= 0:
+            return
+        accent = str(self.config.accent_color or "#1DE9B6")
+        try:
+            color = QColor(accent)
+        except Exception:
+            color = QColor("#1DE9B6")
+        if not color.isValid():
+            color = QColor("#1DE9B6")
+        depth = max(20, min(56, int(min(rect.width(), body_height) * 0.045)))
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            painter.setPen(Qt.NoPen)
+            for side in ("top", "bottom", "left", "right"):
+                if side == "top":
+                    grad = QLinearGradient(0, body_top, 0, body_top + depth)
+                    band = QRect(0, body_top, rect.width(), depth)
+                elif side == "bottom":
+                    grad = QLinearGradient(0, rect.height(), 0, rect.height() - depth)
+                    band = QRect(0, rect.height() - depth, rect.width(), depth)
+                elif side == "left":
+                    grad = QLinearGradient(0, body_top, depth, body_top)
+                    band = QRect(0, body_top, depth, body_height)
+                else:  # right
+                    grad = QLinearGradient(rect.width(), body_top, rect.width() - depth, body_top)
+                    band = QRect(rect.width() - depth, body_top, depth, body_height)
+                start = QColor(color)
+                start.setAlpha(70)
+                end = QColor(color)
+                end.setAlpha(0)
+                grad.setColorAt(0.0, start)
+                grad.setColorAt(1.0, end)
+                painter.setBrush(grad)
+                painter.drawRect(band)
+        finally:
+            painter.end()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.stop_engine()
