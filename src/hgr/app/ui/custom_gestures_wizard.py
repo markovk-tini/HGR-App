@@ -175,10 +175,16 @@ class _VirtualKeyboard(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(_VK_KEY_GAP)
+        # Stretches on BOTH sides of each row so the row's content
+        # sits centred horizontally inside the keyboard widget,
+        # which itself can grow to fill whatever width the parent
+        # layout gave it. The previous version only had a trailing
+        # stretch and left-aligned the keys.
         for row_cells in _VK_LAYOUT_ROWS:
             row = QHBoxLayout()
             row.setSpacing(_VK_KEY_GAP)
             row.setContentsMargins(0, 0, 0, 0)
+            row.addStretch(1)
             for label, key, width_units in row_cells:
                 btn = self._make_key(label, key, width_units)
                 row.addWidget(btn)
