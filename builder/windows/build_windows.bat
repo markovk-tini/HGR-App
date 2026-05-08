@@ -79,8 +79,17 @@ if not exist "%ROOT%\whisper.cpp\models\ggml-silero-v5.1.2.bin" if not exist "%R
   echo [WARN] Optional VAD model not found: ggml-silero-v5.1.2.bin
 )
 
-REM Read app version (single source of truth) -- used for payload zip name + URL.
-for /f "delims=" %%V in ('"%PYTHON%" -c "import re,sys; t=open(r'%ROOT%\src\hgr\__init__.py',encoding='utf-8').read(); m=re.search(r'__version__\s*=\s*\"([^\"]+)\"', t); sys.stdout.write(m.group(1) if m else '')"') do set "APP_VERSION=%%V"
+REM Read app version (single source of truth) -- used for payload zip
+REM name + URL. Plain findstr + for /f instead of a Python one-liner
+REM because cmd's for /f parses parentheses inside the quoted command,
+REM which collides with python's m.group(1) and similar.
+set "APP_VERSION="
+for /f "tokens=2 delims==" %%V in ('findstr /b /c:"__version__" "%ROOT%\src\hgr\__init__.py"') do (
+  set "APP_VERSION=%%V"
+)
+REM Strip surrounding spaces and the outer double quotes around the value.
+set "APP_VERSION=%APP_VERSION: =%"
+set "APP_VERSION=%APP_VERSION:"=%"
 if "%APP_VERSION%"=="" (
   echo [ERROR] Could not read __version__ from src\hgr\__init__.py
   popd
