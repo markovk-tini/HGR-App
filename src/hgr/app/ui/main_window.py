@@ -495,7 +495,16 @@ class _WalkthroughEdgeGlowOverlay(QWidget):
     """Mouse-transparent overlay painted on top of the central
     widget's children so the walkthrough edge halo can sit OVER the
     surface fills of the title bar and page stack instead of being
-    hidden behind them."""
+    hidden behind them.
+
+    The widget covers the full central rect but is MASKED to only
+    the edge bands. Without the mask, the WA_TranslucentBackground
+    forced Qt to re-composite the entire overlay every time a child
+    widget below repainted — and 8 simultaneously-decoding video
+    cards (Dynamic Gestures dropdown during walkthrough) blew that
+    up into a frozen GUI thread. With the mask, the center of the
+    window has NO overlay coverage at all, so video paints
+    underneath proceed without triggering any overlay work."""
 
     def __init__(self, parent: QWidget):
         super().__init__(parent)
@@ -503,6 +512,7 @@ class _WalkthroughEdgeGlowOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")
         self._accent = QColor("#1DE9B6")
+        self._mask_depth = 0
 
     def set_accent(self, color) -> None:
         try:
@@ -512,6 +522,39 @@ class _WalkthroughEdgeGlowOverlay(QWidget):
         except Exception:
             pass
         self.update()
+
+    def _edge_depth(self) -> int:
+        rect = self.rect()
+        return max(20, min(56, int(min(rect.width(), rect.height()) * 0.045)))
+
+    def _refresh_edge_mask(self) -> None:
+        """Apply a region mask that keeps ONLY the four edge bands
+        as part of the widget. The interior is excluded from the
+        widget's geometry so it neither receives paint events nor
+        forces re-composites on the children below."""
+        from PySide6.QtGui import QRegion
+        rect = self.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        depth = self._edge_depth()
+        if depth == self._mask_depth and not self.mask().isEmpty():
+            return
+        self._mask_depth = depth
+        outer = QRegion(rect)
+        inner_rect = rect.adjusted(depth, depth, -depth, -depth)
+        if inner_rect.width() > 0 and inner_rect.height() > 0:
+            inner = QRegion(inner_rect)
+            self.setMask(outer - inner)
+        else:
+            self.setMask(outer)
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh_edge_mask()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._refresh_edge_mask()
 
     def paintEvent(self, event):  # noqa: N802
         try:
@@ -525,7 +568,7 @@ class _WalkthroughEdgeGlowOverlay(QWidget):
         try:
             painter.setRenderHint(QPainter.Antialiasing, False)
             painter.setPen(Qt.NoPen)
-            depth = max(20, min(56, int(min(rect.width(), rect.height()) * 0.045)))
+            depth = self._edge_depth()
             for side in ("top", "bottom", "left", "right"):
                 if side == "top":
                     grad = QLinearGradient(0, 0, 0, depth)
@@ -1341,16 +1384,9 @@ class GestureMediaWidget(QFrame):
             self._video_widget = video_widget
 
             self._player = QMediaPlayer(self)
-            # Deliberately do NOT attach a QAudioOutput. Each QAudioOutput
-            # registers a Windows audio session with the endpoint (even when
-            # muted), and the GestureMediaWidget is instantiated ~20 times
-            # across the tutorial UI. That many ghost sessions changes how the
-            # Razer / Windows shared-mode mixer negotiates format and applies
-            # DSP, which caused a loud-spike regression when a second real
-            # audio source (e.g. YouTube) joined on top of a game. With no
-            # audio output attached, QMediaPlayer skips audio decoding entirely
-            # — no session is ever registered. Video-only was the intent here
-            # anyway (the previous code just set the QAudioOutput to muted).
+            # No QAudioOutput attached — 20+ muted audio sessions
+            # changed Razer / Windows shared-mode mixer behaviour
+            # and caused a loud-spike regression on stream start.
             self._audio = None
             self._player.setVideoOutput(video_widget)
             self._player.setSource(QUrl.fromLocalFile(str(media_path)))
@@ -1359,10 +1395,6 @@ class GestureMediaWidget(QFrame):
             self._loop_timer = QTimer(self)
             self._loop_timer.setSingleShot(True)
             self._loop_timer.timeout.connect(self._restart_video)
-            # Initial play deferred to the first showEvent below so
-            # we don't pay the decoder-setup cost during Control
-            # Guide page construction (when many cards build at once
-            # behind a hidden parent).
         else:
             self.setFixedSize(220, 220)
             fallback = GestureSketchWidget(gesture_key)
@@ -1423,31 +1455,18 @@ class GestureMediaWidget(QFrame):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        if self._player is not None:
-            # Skip play() entirely while the guided walkthrough is
-            # running. The Dynamic Gestures dropdown surfaces ~8
-            # of these widgets at once, and the simultaneous
-            # decoder negotiations + walkthrough edge-glow paint
-            # locked up the GUI thread previously. Letting the
-            # dropdown open with frozen video frames is a far
-            # better UX than the freeze. After walkthrough exits,
-            # subsequent dropdown re-expansions will fire showEvent
-            # again and the videos will play normally.
-            try:
-                top = self.window()
-                if getattr(top, "_walkthrough_active", False):
-                    return
-            except Exception:
-                pass
-            # Stagger play() to keep N simultaneous showEvents from
-            # collapsing into N simultaneous decoder setups. 70 ms
-            # per slot * 10 slot rotation = up to 630 ms total
-            # spread, which is imperceptible to the user but enough
-            # for each player to negotiate its decoder before the
-            # next one starts.
-            slot = GestureMediaWidget._play_stagger_counter % 10
-            GestureMediaWidget._play_stagger_counter += 1
-            QTimer.singleShot(slot * 70, self._safe_resume_play)
+        if self._player is None:
+            return
+        # Stagger play() across cards so 10 simultaneous showEvents
+        # don't kick off 10 simultaneous decoder setups. 70 ms per
+        # slot * 10 slot rotation = up to 630 ms total spread.
+        # Walkthrough freeze is handled at the dropdown level
+        # (GestureGuideSection._toggle_expanded hides the edge-glow
+        # overlay during expansion), so play() can fire normally
+        # here regardless of walkthrough state.
+        slot = GestureMediaWidget._play_stagger_counter % 10
+        GestureMediaWidget._play_stagger_counter += 1
+        QTimer.singleShot(slot * 70, self._safe_resume_play)
 
     def _safe_resume_play(self) -> None:
         """Guard against the deferred-play timer firing after the
@@ -1695,12 +1714,14 @@ class GestureGuideSection(QFrame):
         outer.addWidget(self.content)
 
     def _toggle_expanded(self, checked: bool) -> None:
-        # Always allow expansion — including Dynamic Gestures during
-        # walkthrough. The freeze guard now lives in
-        # GestureMediaWidget.showEvent (skips play() during
-        # walkthrough), so the dropdown can open without kicking
-        # off the multi-decoder negotiation that locks the GUI
-        # thread.
+        # The walkthrough freeze used to come from the edge-glow
+        # overlay's WA_TranslucentBackground forcing Qt to
+        # re-composite over every video paint underneath. The
+        # overlay is now masked to only the four edge bands
+        # (_WalkthroughEdgeGlowOverlay._refresh_edge_mask), so the
+        # center where videos render has no overlay coverage at
+        # all — child paints don't trigger overlay work. Dropdown
+        # toggling can be a plain visibility flip again.
         self.content.setVisible(bool(checked))
         self.header_button.setText(f"{'▼' if checked else '▶'}  {self.header_button.text()[3:]}")
 
@@ -1931,8 +1952,12 @@ def _build_gesture_guide_dynamic_cards() -> list[GestureGuideCard]:
                 "fingers extended and TOUCHING (like a closed peace sign), with ring + pinky curled and "
                 "thumb relaxed. Hold the pose briefly to enter scroll mode — the cursor stops tracking "
                 "and the status text changes to “mouse scroll active”.\n"
-                "• Once scroll mode is active: move the same hand UP to scroll up, DOWN to scroll "
-                "down. Bigger moves scroll faster; tiny moves are ignored as deadzone.\n"
+                "• The Y-position where you confirm the scroll pose becomes the neutral anchor. "
+                "From there, lift your hand UP to start a slow scroll up; the FURTHER above the anchor "
+                "you hold, the FASTER it scrolls. Drop your hand DOWN below the anchor to scroll down "
+                "with the same distance-equals-speed feel.\n"
+                "• Return your hand back near the anchor to slow down and stop. A small deadzone "
+                "around the anchor keeps tiny tremors from scrolling.\n"
                 "• To leave scroll mode and resume cursor control, simply break the "
                 "two-finger-together pose (open the fingers apart, or curl them).\n\n"
                 "Requirements: Mouse mode must already be ON. Don’t pinch — a thumb-pinch "
@@ -3505,14 +3530,54 @@ class _MouseControlMonitorPreview(QWidget):
         painter.drawRoundedRect(outer_rect, 10, 10)
 
         # Outer red rectangle ("Mouse control area" — same color +
-        # placement as draw_mouse_control_box_overlay). Sized to fill
-        # the outer card with a generous inner margin, so the inner
-        # monitor map can use the bulk of the box.
+        # placement as draw_mouse_control_box_overlay). Sized like
+        # a small mousepad rather than the full card width: the
+        # base footprint is a single-monitor mousepad (~210×118
+        # px), and the box GROWS in width / height to match the
+        # actual virtual-desktop aspect when more monitors are
+        # plugged in (horizontal arrangement → wider, vertical
+        # arrangement → taller). User feedback was that the old
+        # full-card red box implied "your mouse control area is
+        # this entire region", which read incorrectly — the new
+        # sizing reads as "small pad here, grows as your desktop
+        # grows."
         red = _QC("#FF5252")
         red_fill = _QC(red.red(), red.green(), red.blue(), 18)
         red_border = _QC(red.red(), red.green(), red.blue(), 230)
-        margin = 22
-        box = outer_rect.adjusted(margin, margin, -margin, -margin)
+
+        # Pre-compute the union now so we can size the box to it.
+        union_pre, _rects_pre = self._virtual_desktop_bounds()
+
+        # Single-monitor base mousepad footprint (16:9-ish, slightly
+        # taller than wide aspect-cap to leave label room).
+        BASE_W = 210
+        BASE_H = 118  # ≈ BASE_W * 9/16 (small mousepad)
+        if (
+            union_pre is not None
+            and union_pre.width() > 0
+            and union_pre.height() > 0
+        ):
+            aspect = union_pre.width() / float(union_pre.height())
+            base_aspect = BASE_W / float(BASE_H)
+            if aspect >= base_aspect:
+                box_w = int(round(BASE_H * aspect))
+                box_h = BASE_H
+            else:
+                box_w = BASE_W
+                box_h = int(round(BASE_W / aspect))
+        else:
+            box_w, box_h = BASE_W, BASE_H
+
+        # Cap the box so it never exceeds the outer card.
+        box_w = min(box_w, max(60, outer_rect.width() - 32))
+        box_h = min(box_h, max(60, outer_rect.height() - 32))
+        # Center the mousepad inside the outer card.
+        box = _QRect(
+            outer_rect.center().x() - box_w // 2,
+            outer_rect.center().y() - box_h // 2,
+            box_w,
+            box_h,
+        )
         painter.setBrush(_QBrush(red_fill))
         painter.setPen(_QPen(red_border, 2))
         painter.drawRoundedRect(box, 6, 6)
@@ -6032,16 +6097,13 @@ class MainWindow(QMainWindow):
             "Tweak how Touchless behaves while you use it. Adjust mouse "
             "control, choose what overlays appear on screen, switch "
             "performance modes, and connect Spotify. Click Save Changes "
-            "(top-right or bottom of the page) when you're done.",
+            "(top-right of the page) when you're done.",
         )
 
-        # Top-right Save Changes button — same behaviour as the
-        # bottom one. Built from the existing title-row layout
-        # (matches how the Microphone tab places its save button)
-        # so a user who's already at the top of the page doesn't
-        # have to scroll all the way down to commit edits. Both
-        # buttons share enabled-state + the [pendingSave="true"]
-        # styled-glow via _update_general_save_state.
+        # Top-right Save Changes button — same placement the
+        # Microphone tab uses. The bottom Save button was removed
+        # (cleaner layout) but the top one stays so the user has
+        # a clear "commit my edits" affordance.
         title_item = layout.takeAt(0)
         title_label_widget = title_item.widget() if title_item is not None else None
         header_row = QHBoxLayout()
@@ -6110,21 +6172,13 @@ class MainWindow(QMainWindow):
         inner_layout.addWidget(self._build_general_system_modes_section())
         inner_layout.addWidget(self._build_general_spotify_section())
 
-        # Save Changes button — disabled until any control is
-        # touched. Property `pendingSave` drives the styled "lit"
-        # look; we just toggle it from `_update_general_save_state`
-        # whenever a control changes.
-        save_row = QHBoxLayout()
-        save_row.setContentsMargins(0, 6, 0, 0)
-        save_row.addStretch(1)
-        self._general_save_button = QPushButton("Save Changes")
-        self._general_save_button.setObjectName("settingsSaveButton")
-        self._general_save_button.setEnabled(False)
-        self._general_save_button.setProperty("pendingSave", False)
-        self._general_save_button.setCursor(Qt.PointingHandCursor)
-        self._general_save_button.clicked.connect(self._save_general_changes)
-        save_row.addWidget(self._general_save_button)
-        inner_layout.addLayout(save_row)
+        # Bottom Save button removed — only the top-right one
+        # remains. General still uses the DEFERRED-save model:
+        # control changes write into _general_pending without
+        # touching self.config, the top Save button enables when
+        # any pending change exists, and clicking it commits them
+        # all in one shot via _save_general_changes.
+        self._general_save_button = None
 
         inner_layout.addStretch(1)
         layout.addWidget(scroll, 1)
@@ -12782,6 +12836,22 @@ Admin elevation
         green" border to the current page's tab so the user can
         see at a glance where they are in the tour, and schedule
         the Next button fade-in 3 s later."""
+        # Stop any in-flight Next-button animations from the previous
+        # step. Without this, the user clicking Next mid-bounce would
+        # leave a still-running QPropertyAnimation tugging on the
+        # button's geometry while the new step tries to reposition
+        # it, which has shown up as a hung UI on slower machines.
+        for anim_attr in (
+            "_walkthrough_next_fade_anim",
+            "_walkthrough_next_opacity_anim",
+        ):
+            anim = getattr(self, anim_attr, None)
+            if anim is not None:
+                try:
+                    anim.stop()
+                except Exception:
+                    pass
+                setattr(self, anim_attr, None)
         target_section = self._walkthrough_target_section()
         # Hide any finale visuals from a prior step transition.
         self._hide_walkthrough_finale_visuals()
