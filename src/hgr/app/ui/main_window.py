@@ -4826,12 +4826,10 @@ class MainWindow(QMainWindow):
         hero.setAlignment(Qt.AlignCenter)
         hero.setObjectName("heroLabel")
         body_layout.addWidget(hero)
-
-        subtitle = QLabel("Start live gesture and voice control, open Settings, or use Live View to monitor the camera feed.")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setWordWrap(True)
-        subtitle.setObjectName("subtitleLabel")
-        body_layout.addWidget(subtitle)
+        # Subtitle removed -- the buttons (START / END / SETTINGS)
+        # are self-describing, and the runtime status card below
+        # tells the user everything they need to know about state.
+        # Hero + buttons + status card is plenty of hierarchy.
 
         button_row = QHBoxLayout()
         button_row.setSpacing(14)
@@ -6146,11 +6144,9 @@ class MainWindow(QMainWindow):
         # ---- Card 1: What it is ------------------------------------
         card1 = self._make_instructions_card(
             "What it is",
-            "Touchless is a hands-free control layer for your PC. A camera "
-            "watches your hands, a microphone listens for short commands, "
-            "and the app turns those into clicks, scrolls, key presses, "
-            "media controls, and dictation — all running locally on your "
-            "machine.",
+            "Touchless lets you control your PC with hand gestures and "
+            "voice — no touch required. Your camera and microphone do "
+            "the work, and everything runs locally on your machine.",
         )
         inner_layout.addWidget(card1)
 
@@ -6172,9 +6168,9 @@ class MainWindow(QMainWindow):
         steps_layout.addWidget(steps_title)
 
         steps = [
-            ("1", "Press Start", "Live tracking begins with whichever camera is selected. Both hands are read at once."),
-            ("2", "Try a gesture", "Point your right hand at the camera with one finger up to play / pause Spotify, or hold left-hand 'one' to start voice."),
-            ("3", "Open Tutorial", "The guided Tutorial walks you through every core motion with live feedback. Best place to learn."),
+            ("1", "Press Start", "Live tracking turns on with your camera and microphone. Both hands and your voice are read at once."),
+            ("2", "Wave at the camera", "Open Live View to see what Touchless is picking up in real time. Move your hands around — recognized gestures show up with a green outline."),
+            ("3", "Open Tutorial", "The guided Tutorial walks you through every core motion with live feedback. The fastest way to learn."),
         ]
         for num, head, body in steps:
             row = QHBoxLayout()
@@ -6232,12 +6228,12 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(controls_title)
 
         capabilities = [
-            ("Spotify",   "Play, pause, skip, shuffle, volume, and 'play X on Spotify' by voice."),
-            ("Chrome",    "Search, new tab, back / forward, refresh, and 'search X on chrome' by voice."),
-            ("Mouse",     "Hand-driven cursor with pinch-to-click, two-finger-up scroll, and click-and-drag."),
-            ("Volume",    "Right-hand volume pose plus mute / unmute. System volume, not app volume."),
-            ("Voice",     "Hold left-hand 'one' to start the listener. Speak commands or dictate text."),
-            ("Drawing",   "Sketch over the camera feed or directly on screen. Pinch + stretch resizes strokes."),
+            ("Spotify",   "Play, pause, skip, shuffle, and adjust volume. Or just say “play X on Spotify”."),
+            ("Chrome",    "Search, switch tabs, refresh. Or say “search X on Chrome”."),
+            ("Mouse",     "Move the cursor with your hand. Pinch to click. Two fingers up to scroll."),
+            ("Volume",    "Change system volume, mute, and unmute with a hand gesture."),
+            ("Voice",     "Hold a left-hand gesture to start listening. Speak commands or dictate text."),
+            ("Drawing",   "Sketch over your screen or the camera feed. Save as a PNG."),
         ]
         cap_grid = QGridLayout()
         cap_grid.setHorizontalSpacing(SPACE_LG)
@@ -6276,12 +6272,12 @@ class MainWindow(QMainWindow):
         # ---- Card 4: Where to learn more ---------------------------
         more_card = self._make_instructions_card(
             "Where to learn more",
-            "<b>Control Guide</b> — every gesture and voice command, with a "
-            "short demo card for each. Best as a reference.<br>"
             "<b>Tutorial</b> — guided practice with live camera feedback. "
-            "Best as a first pass.<br>"
-            "<b>General settings</b> — mouse sensitivity, overlay toggles, "
-            "system performance modes, and the Connect Spotify button.",
+            "Best place to start.<br>"
+            "<b>Control Guide</b> — every gesture and voice command, with "
+            "a short demo for each. Use as a reference.<br>"
+            "<b>General settings</b> — mouse sensitivity, overlays, "
+            "performance modes, and the Connect Spotify button.",
             allow_html=True,
         )
         inner_layout.addWidget(more_card)
