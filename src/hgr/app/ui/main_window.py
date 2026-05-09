@@ -118,19 +118,19 @@ WALKTHROUGH_PAGES = (
     SECTION_INSTRUCTIONS,
     SECTION_GENERAL,
     SECTION_GESTURES,
+    SECTION_CAMERA,
+    SECTION_MICROPHONE,
 )
 
 # On-page descriptive hint shown for each step. The Next button
 # fades in immediately and auto-navigates to the next entry when
-# clicked. Three pages on purpose — the previous five-page tour
-# (Instructions / Control Guide / Gesture Binds / Camera /
-# Microphone) was a "settings room tour" rather than something a
-# rushed user would actually finish. The new flow points at the
-# pages that 90 % of users actually return to: what the app is
-# (Instructions), the toggles they'll touch (General), and the
-# gesture / voice reference (Control Guide). Camera, Microphone,
-# Gesture Binds stay reachable in the sidebar but are not part of
-# the first-touch tour.
+# clicked. Five pages: swaps Gesture Binds (rebinding actions —
+# advanced, most users never touch it) out of the previous tour
+# and adds General (the new home for mouse / overlay / gaming /
+# performance / Spotify-connect toggles). Camera + Microphone
+# stay because they're the only place phone-QR pairing and mic-
+# source picking get surfaced — telling rushed users 'find it in
+# settings later' loses them.
 WALKTHROUGH_PAGE_HINTS = {
     SECTION_INSTRUCTIONS:
         "What Touchless does and the 30-second start.",
@@ -138,6 +138,10 @@ WALKTHROUGH_PAGE_HINTS = {
         "Mouse, overlays, performance, and Connect Spotify all live here.",
     SECTION_GESTURES:
         "Every gesture and voice command, with a short demo for each.",
+    SECTION_CAMERA:
+        "Pick your camera, or pair your phone over Wi-Fi for a better one.",
+    SECTION_MICROPHONE:
+        "Pick your microphone — or use your phone's mic over Wi-Fi.",
 }
 
 # Finale message after Control Guide. Tighter wording: the
