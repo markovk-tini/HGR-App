@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -667,13 +668,23 @@ class TutorialWindow(QDialog):
         self._last_tutorial_play_pause_text = ""
         self._last_voice_success_text = ""
         self._prime_voice_runtime_async()
+        # Detect whether Spotify desktop is installed. Drives the
+        # "play media" voice step (Spotify vs YouTube) and decides
+        # whether play/pause + swipes route through Spotify Web API
+        # or the OS media keys (which YouTube + every other media
+        # app respect via Windows Media integration).
+        self._has_spotify = self._detect_spotify_installed()
+        # Five-step practice flow with a coherent narrative arc:
+        # mouse -> voice opens & plays media -> volume adjusts the
+        # music -> pause/play -> swipes skip tracks. Order matters:
+        # everything after step 2 has audio playing, so the gestures
+        # land on something the user can hear / see change.
         self._practice_steps = (
-            _StepDefinition("swipes", "Part 1/6: Right and Left Swipes", "", ""),
-            _StepDefinition("spotify_open", "Part 2/6: Open Spotify", "", ""),
-            _StepDefinition("play_pause", "Part 3/6: Pause/Play", "", ""),
-            _StepDefinition("gesture_wheel", "Part 4/6: Gesture Wheel", "", ""),
-            _StepDefinition("mouse_mode", "Part 5/6: Mouse Control", "", ""),
-            _StepDefinition("voice_command", "Part 6/6: Voice Command", "", ""),
+            _StepDefinition("mouse_mode", "Part 1/5: Mouse Control", "", ""),
+            _StepDefinition("voice_command", "Part 2/5: Voice Command", "", ""),
+            _StepDefinition("volume", "Part 3/5: Volume Control", "", ""),
+            _StepDefinition("play_pause", "Part 4/5: Pause/Play", "", ""),
+            _StepDefinition("swipes", "Part 5/5: Skip Tracks (Swipes)", "", ""),
         )
         self._step_index = 0
         self._completed_steps: set[int] = set()
@@ -682,6 +693,56 @@ class TutorialWindow(QDialog):
         self._build_ui()
         self.apply_theme(config)
         self._reset_for_step()
+
+    def _detect_spotify_installed(self) -> bool:
+        """Cheap one-shot check at tutorial open: do any of the
+        Spotify executable paths SpotifyController already knows
+        about exist on disk? No process scan, no network call --
+        just file-existence checks that take microseconds.
+
+        Yes -> tutorial uses the existing Spotify Web API path for
+        the media voice step + play/pause + swipes.
+        No  -> tutorial swaps to a YouTube voice command and the
+        OS media-key path (VK_MEDIA_PLAY_PAUSE / NEXT / PREV) so
+        YouTube / Edge / VLC / etc. respond.
+        """
+        try:
+            controller = SpotifyController()
+            for candidate in getattr(controller, "_executable_paths", ()):
+                try:
+                    if Path(candidate).exists():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _send_media_key(virtual_key: int) -> bool:
+        """Press + release a Windows media virtual key.
+        VK_MEDIA_PLAY_PAUSE = 0xB3, VK_MEDIA_NEXT_TRACK = 0xB0,
+        VK_MEDIA_PREV_TRACK = 0xB1. Used in the no-Spotify tutorial
+        path so play/pause + swipes drive YouTube (or any app that
+        registers as a Windows media controller) without going
+        through Spotify Web API.
+
+        Uses keybd_event because it's the simplest path and works
+        on Windows 7+; SendInput has the same effect with more
+        boilerplate. Returns True on apparent success, False if
+        we're not on Windows or the call failed."""
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            KEYEVENTF_EXTENDEDKEY = 0x0001
+            KEYEVENTF_KEYUP = 0x0002
+            user32 = ctypes.windll.user32
+            user32.keybd_event(virtual_key, 0, KEYEVENTF_EXTENDEDKEY, 0)
+            user32.keybd_event(virtual_key, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+            return True
+        except Exception:
+            return False
 
     def _prime_voice_runtime_async(self) -> None:
         def _worker() -> None:
@@ -1664,6 +1725,10 @@ class TutorialWindow(QDialog):
         self._mouse_tracker.reset()
         self.mouse_widget.reset()
         self._play_pause_ready_for_next = True
+        # Volume-step state: reset so up/down/mute progress doesn't
+        # leak across navigation. Re-initialized lazily in the
+        # volume handler the next time the step runs.
+        self._volume_step_state = None
         if self._voice_overlay is not None:
             self._voice_overlay.hide_overlay()
         self._apply_step_content()
@@ -1690,45 +1755,22 @@ class TutorialWindow(QDialog):
         self.progress_badge.setText(f"Step {self._step_index + 1} of {len(self._practice_steps)}")
         self.step_title.setText(step.title)
 
+        # Step copy branches on Spotify presence: with Spotify the
+        # voice step says "play X on Spotify" and play/pause +
+        # swipes route through Spotify Web API; without, the voice
+        # step says "play X on YouTube" and play/pause + swipes
+        # send Windows media keys (which YouTube / Edge / VLC /
+        # etc. respect via Windows Media integration).
+        media_target = "Spotify" if self._has_spotify else "YouTube"
+        media_app_phrase = "Spotify" if self._has_spotify else "your YouTube video"
         what_is_map = {
-            "swipes": "Skip songs in Spotify, and go forward/back in Chrome.",
-            "spotify_open": "Open or focus the Spotify app.",
-            "play_pause": "Pause or play any music or video on your computer.",
-            "gesture_wheel": "Open the gesture wheel for Spotify controls.",
             "mouse_mode": "Move the cursor and click with your right hand. Toggle on/off with your left.",
-            "voice_command": "Speak commands like \u201copen YouTube on Chrome\u201d.",
+            "voice_command": f"Speak a command like \u201cplay [a song] on {media_target}\u201d.",
+            "volume": "Adjust system volume with a hand pose. Pinch in to mute / unmute.",
+            "play_pause": "Pause or play whatever's playing on your computer.",
+            "swipes": "Skip to the next or previous track.",
         }
         instruction_map = {
-            "swipes": (
-                "How to do it:\n"
-                "\u2022 RIGHT hand, open palm (all 5 fingers extended, palm to camera).\n"
-                "\u2022 Swipe right: start on the LEFT, sweep to the right in one motion.\n"
-                "\u2022 Swipe left: start on the RIGHT, sweep to the left.\n"
-                "\u2022 The motion triggers it, not the pose.\n\n"
-                "To complete: 3 right swipes, then 3 left swipes. Bbox turns green on each one."
-            ),
-            "spotify_open": (
-                "How to do it:\n"
-                "\u2022 RIGHT hand, peace sign \u2014 index + middle up in a V, others curled, thumb tucked.\n"
-                "\u2022 Keep index + middle APART (touching = volume pose, not \u2018two\u2019).\n"
-                "\u2022 Hold ~1 second. Bbox turns green when \u2018two\u2019 is recognized.\n\n"
-                "To complete: hold the pose until Spotify opens."
-            ),
-            "play_pause": (
-                "How to do it:\n"
-                "\u2022 RIGHT hand, closed fist \u2014 all four fingers curled in, thumb across the front.\n"
-                "\u2022 Knuckles face the camera.\n"
-                "\u2022 Each clean fist toggles play/pause.\n\n"
-                "To complete: trigger play/pause twice (fist, relax, fist again)."
-            ),
-            "gesture_wheel": (
-                "How to do it:\n"
-                "\u2022 RIGHT hand. Thumb out + index up + pinky up, middle and ring curled.\n"
-                "\u2022 Like a \u201crock on\u201d sign with the thumb extended (ASL \u2018Y\u2019 + index).\n"
-                "\u2022 Hold ~1 second \u2014 the wheel opens, your fingertip is the cursor.\n"
-                "\u2022 Move to a slice and hold ~1 second to activate it.\n\n"
-                "To complete: open the wheel and activate any slice."
-            ),
             "mouse_mode": (
                 "How to do it:\n"
                 "\u2022 Turn ON / OFF \u2014 LEFT hand, three fingers up (index + middle + ring), thumb across, pinky curled. Hold until the \u2018Mouse Mode\u2019 pill appears.\n"
@@ -1742,9 +1784,36 @@ class TutorialWindow(QDialog):
             "voice_command": (
                 "How to do it:\n"
                 "\u2022 LEFT hand, only the index finger up (others curled, thumb tucked).\n"
-                "\u2022 Hold until the microphone appears at the bottom middle of your monitor — that shows Touchless is listening.\n"
-                "\u2022 Speak clearly: \u201cOpen YouTube on Google Chrome\u201d.\n\n"
-                "To complete: trigger the listener and open YouTube on Chrome."
+                "\u2022 Hold until the microphone appears at the bottom of your screen — that shows Touchless is listening.\n"
+                f"\u2022 Speak clearly: \u201cplay [pick a song or video] on {media_target}\u201d.\n\n"
+                + (
+                    "To complete: trigger the listener and play something on Spotify."
+                    if self._has_spotify else
+                    "To complete: trigger the listener and start a YouTube video playing in your default browser."
+                )
+            ),
+            "volume": (
+                "How to do it:\n"
+                "\u2022 RIGHT hand, peace sign with index + middle TOUCHING (closed peace sign), ring + pinky curled, thumb relaxed.\n"
+                "\u2022 Hold the pose to enter volume mode — the volume bar appears on screen.\n"
+                "\u2022 Move your hand UP to raise volume, DOWN to lower. Bigger moves = bigger jumps.\n"
+                "\u2022 Mute / unmute: while volume mode is on, pinch thumb to index tip.\n\n"
+                "To complete: raise the volume, lower it, then mute and unmute once."
+            ),
+            "play_pause": (
+                "How to do it:\n"
+                "\u2022 RIGHT hand, closed fist — all four fingers curled in, thumb across the front.\n"
+                "\u2022 Knuckles face the camera.\n"
+                "\u2022 Each clean fist toggles play/pause.\n\n"
+                f"To complete: pause and resume {media_app_phrase} once each (fist, relax, fist again)."
+            ),
+            "swipes": (
+                "How to do it:\n"
+                "\u2022 RIGHT hand, open palm (all 5 fingers extended, palm to camera).\n"
+                "\u2022 Swipe right: start on the LEFT, sweep to the right in one motion (next track).\n"
+                "\u2022 Swipe left: start on the RIGHT, sweep to the left (previous track).\n"
+                "\u2022 The motion triggers it, not the pose.\n\n"
+                "To complete: 3 right swipes, then 3 left swipes. Bbox turns green on each one."
             ),
         }
         self.step_desc.setText(what_is_map.get(step.key, step.description))
@@ -1798,10 +1867,11 @@ class TutorialWindow(QDialog):
             self.progress_label.clear()
         else:
             self.practice_stack.hide()
+            voice_target = "Spotify" if self._has_spotify else "YouTube"
             header_map = {
-                "spotify_open": "Open Spotify with right-hand two!",
-                "play_pause": "Play/pause with right-hand fist!",
+                "play_pause": "Pause / play with right-hand fist!",
                 "voice_command": self._voice_command_header_text(False),
+                "volume": "Hold the volume pose to adjust.",
             }
             self._set_camera_step_labels(
                 header=header_map.get(step.key, step.description),
@@ -2785,6 +2855,22 @@ class TutorialWindow(QDialog):
                 self.swipe_widget.set_counts(self._swipe_counts["swipe_left"], self._swipe_counts["swipe_right"])
                 self._visual_green_until["swipes"] = max(self._visual_green_until.get("swipes", 0.0), now + self._gesture_flash_seconds)
                 accepted_swipe = True
+                # No-Spotify path: send the OS media-track keys so
+                # YouTube / Edge / VLC respond to the swipe as a
+                # next/previous-track hint. Single videos won't
+                # actually advance (no playlist context), but any
+                # media app with a queue will, and the gesture fires
+                # the visual confirmation regardless. Spotify users
+                # don't need this -- the engine's spotify_router
+                # already routes swipes through the Web API.
+                if not self._has_spotify:
+                    VK_MEDIA_NEXT_TRACK = 0xB0
+                    VK_MEDIA_PREV_TRACK = 0xB1
+                    self._send_media_key(
+                        VK_MEDIA_NEXT_TRACK
+                        if dynamic_label == "swipe_right"
+                        else VK_MEDIA_PREV_TRACK
+                    )
                 # Each successful swipe is its own action-completion
                 # event — fire encouragement now (throttle handles
                 # the burst case).
@@ -2847,6 +2933,16 @@ class TutorialWindow(QDialog):
                 self._play_pause_ready_for_next = False
                 self._trigger_encouragement(now)
                 visual_ready = True
+                # No-Spotify path: send the OS media-play/pause key
+                # so YouTube / Edge / VLC / anything that registers
+                # as a Windows media controller toggles. The engine's
+                # spotify_controller.toggle_playback() path is a
+                # no-op without the desktop app installed; without
+                # this fallback the user's fist would do nothing
+                # visible.
+                if not self._has_spotify:
+                    VK_MEDIA_PLAY_PAUSE = 0xB3
+                    self._send_media_key(VK_MEDIA_PLAY_PAUSE)
                 # Toggling Spotify playback can pop the Spotify
                 # desktop client to the foreground (its window
                 # manager reacts to play/pause Web API commands by
@@ -2857,6 +2953,68 @@ class TutorialWindow(QDialog):
                 self._start_tutorial_refocus_guard()
             self._set_step_progress(self._fist_progress_html())
             if self._spotify_toggle_count >= 2:
+                self._complete_step("Completed! Swipe right to move on!")
+            return visual_ready
+
+        if step.key == "volume":
+            # Volume practice: detect mode entry + at least one up
+            # move + one down move + a mute toggle. The engine emits
+            # volume_active, volume_level_scalar, and volume_muted
+            # in the debug payload; we just watch for transitions.
+            volume_active = bool(payload.get("volume_active"))
+            level_raw = payload.get("volume_level_scalar")
+            try:
+                level = float(level_raw) if level_raw is not None else None
+            except Exception:
+                level = None
+            muted = bool(payload.get("volume_muted"))
+            tracker = getattr(self, "_volume_step_state", None)
+            if tracker is None:
+                tracker = {
+                    "engaged": False,
+                    "last_level": level,
+                    "up_done": False,
+                    "down_done": False,
+                    "last_muted": muted,
+                    "mute_toggled": False,
+                }
+                self._volume_step_state = tracker
+            if volume_active and not tracker["engaged"]:
+                tracker["engaged"] = True
+                tracker["last_level"] = level
+            if volume_active and level is not None and tracker["last_level"] is not None:
+                delta = level - float(tracker["last_level"])
+                if delta >= 0.04 and not tracker["up_done"]:
+                    tracker["up_done"] = True
+                    self._trigger_encouragement(now)
+                if delta <= -0.04 and not tracker["down_done"]:
+                    tracker["down_done"] = True
+                    self._trigger_encouragement(now)
+                tracker["last_level"] = level
+            if muted != tracker["last_muted"]:
+                tracker["mute_toggled"] = True
+                tracker["last_muted"] = muted
+                self._trigger_encouragement(now)
+            visual_ready = volume_active
+            if not tracker["engaged"]:
+                self._set_step_progress("Hold the volume pose to begin.")
+            elif not (tracker["up_done"] and tracker["down_done"]):
+                progress_bits = []
+                progress_bits.append("✓" if tracker["up_done"] else "—")
+                progress_bits.append(" raise volume   ")
+                progress_bits.append("✓" if tracker["down_done"] else "—")
+                progress_bits.append(" lower volume")
+                self._set_step_progress("".join(progress_bits))
+            elif not tracker["mute_toggled"]:
+                self._set_step_progress("Now pinch thumb to index tip to mute / unmute.")
+            else:
+                self._set_step_progress("All three! Swipe right to move on!")
+            if (
+                tracker["up_done"]
+                and tracker["down_done"]
+                and tracker["mute_toggled"]
+                and not self._step_completed
+            ):
                 self._complete_step("Completed! Swipe right to move on!")
             return visual_ready
 

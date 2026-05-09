@@ -613,6 +613,13 @@ class GestureWorker(QObject):
         self._fps = 0.0
         self._dynamic_hold_label = "neutral"
         self._dynamic_hold_until = 0.0
+        # Last static / dynamic labels we emitted a `gesture_detected`
+        # telemetry event for, per hand. Fires on transitions so a
+        # held pose doesn't spam one event per frame.
+        self._telemetry_last_static_label = "neutral"
+        self._telemetry_last_dynamic_label = "neutral"
+        self._telemetry_last_static_label_secondary = "neutral"
+        self._telemetry_last_dynamic_label_secondary = "neutral"
         self._low_fps_active = bool(getattr(config, "low_fps_mode", False))
         self._low_fps_below_since: float | None = None
         self._low_fps_above_since: float | None = None
@@ -1069,6 +1076,33 @@ class GestureWorker(QObject):
         self._action_history_dirty_for_emit = True
         try:
             self.action_history_changed.emit(snapshot)
+        except Exception:
+            pass
+        # Telemetry: anonymous "user did something" event. Mirrors
+        # the in-app action history exactly — every record_action
+        # call is a user-visible action regardless of whether it
+        # came through _dispatch_action, the volume tracker, swipe
+        # router, wheels, voice, or drawing pipeline. The shared
+        # `_action_fired_telemetry_last` dict dedupes against the
+        # tail of _dispatch_action's `if fired:` block so flows that
+        # touch both (voice_command_listen → _start_voice_command
+        # → _record_action) only emit once.
+        try:
+            last_telemetry = getattr(self, "_action_fired_telemetry_last", None)
+            if last_telemetry is None:
+                last_telemetry = {}
+                self._action_fired_telemetry_last = last_telemetry
+            now = time.monotonic()
+            if now - last_telemetry.get(label, 0.0) >= 0.25:
+                last_telemetry[label] = now
+                from ...telemetry import track as _track
+                _track(
+                    "action_fired",
+                    {
+                        "action_id": str(label),
+                        "in_tutorial": bool(getattr(self, "_tutorial_mode_enabled", False)),
+                    },
+                )
         except Exception:
             pass
 
@@ -4573,13 +4607,19 @@ class GestureWorker(QObject):
     def _handle_volume_control(self, result, now: float, *, hand_handedness: str | None) -> None:
         # Tutorial isolation: volume + mute go through the
         # volume_tracker pipeline, NOT _dispatch_action — so the
-        # tutorial whitelist there doesn't catch them. Reset the
-        # tracker and bail when the tutorial is active so the
-        # user's gesture can't accidentally crank the system
-        # volume or toggle mute while they're learning a different
-        # gesture. Resumes normally as soon as the tutorial
-        # session ends.
-        if self._tutorial_mode_enabled:
+        # tutorial whitelist there doesn't catch them. On any step
+        # OTHER than the dedicated volume practice step, reset the
+        # tracker and bail so the user's gesture can't crank
+        # system volume while they're learning something else. On
+        # the volume step itself the pipeline runs normally so the
+        # gesture actually changes volume + the engine emits the
+        # volume_active / volume_level_scalar / volume_muted fields
+        # in the debug payload that the tutorial's volume handler
+        # watches for completion.
+        if (
+            self._tutorial_mode_enabled
+            and self._tutorial_step_key != "volume"
+        ):
             try:
                 self.volume_tracker.reset()
             except Exception:
@@ -5007,6 +5047,32 @@ class GestureWorker(QObject):
 
         if fired:
             cooldown_state[action_id] = now
+            # Most fire paths (volume, swipes, wheels, voice,
+            # drawing) emit action_fired via _record_action, the
+            # universal action-history hook. A handful of
+            # _dispatch_action branches (mouse_mode_toggle,
+            # open_spotify, play_pause, system_mute_toggle) skip
+            # _record_action so we cover them here, with a small
+            # dedupe window so cases that DO go through both paths
+            # (voice_command_listen, dictation_toggle,
+            # drawing_mode_toggle) only emit once.
+            try:
+                last_telemetry = getattr(self, "_action_fired_telemetry_last", None)
+                if last_telemetry is None:
+                    last_telemetry = {}
+                    self._action_fired_telemetry_last = last_telemetry
+                if now - last_telemetry.get(action_id, 0.0) >= 0.25:
+                    last_telemetry[action_id] = now
+                    from ...telemetry import track as _track
+                    _track(
+                        "action_fired",
+                        {
+                            "action_id": str(action_id),
+                            "in_tutorial": bool(getattr(self, "_tutorial_mode_enabled", False)),
+                        },
+                    )
+            except Exception:
+                pass
         return fired
 
     def _apply_gesture_binding_remap(self, prediction, hand_handedness, now: float):
@@ -6060,6 +6126,16 @@ class GestureWorker(QObject):
                 )
             except Exception:
                 pass
+            # Mirror the action history + telemetry that the static
+            # binding path produces, so gesture-driven mode toggles
+            # are visible alongside everything else. The label uses
+            # `mouse_mode_on/off` to distinguish from the bound-hold
+            # `mouse_mode_toggle` action_id, but you can collapse them
+            # in the dashboard if useful.
+            self._record_action(
+                "mouse_mode_on" if update.mode_enabled else "mouse_mode_off",
+                "mouse mode on" if update.mode_enabled else "mouse mode off",
+            )
             # On the off->on transition only, emit the activation
             # signal so the main window can show the "which monitor
             # to control" picker. The signal is queued (Qt
@@ -6193,6 +6269,62 @@ class GestureWorker(QObject):
 
     def _build_debug_payload(self, result, now: float) -> dict:
         prediction = result.prediction
+        # Telemetry: emit `gesture_detected` on label TRANSITIONS so
+        # holding a pose doesn't spam an event every frame. Use the
+        # raw prediction labels (not the display-suppressed ones) so
+        # we capture what the recognizer actually saw, even when
+        # drawing mode is masking the chip. Tracks BOTH primary
+        # (right) and secondary (left) hand predictions because
+        # left-hand gestures (e.g. "four" → YouTube mode, pinch →
+        # drawing) would otherwise be invisible to telemetry.
+        #
+        # Note: the recognizer's `stable_label` includes motion-
+        # coupled poses (volume_pose, pinch, wheel_pose) — held
+        # shapes that the user actually uses for continuous motion
+        # control. We reclassify these as kind="dynamic" so the
+        # dashboard's Held vs Motion split matches the user's mental
+        # model from the control guide.
+        _MOTION_COUPLED_STABLE = {"volume_pose", "pinch", "wheel_pose"}
+        try:
+            in_tutorial = bool(getattr(self, "_tutorial_mode_enabled", False))
+            primary_handedness = ""
+            if result.found and result.tracked_hand is not None:
+                primary_handedness = str(result.tracked_hand.handedness or "").lower()
+            secondary_handedness = "left" if primary_handedness == "right" else (
+                "right" if primary_handedness == "left" else ""
+            )
+            secondary_pred = getattr(result, "secondary_prediction", None)
+
+            def _emit_transition(pred, kind_attr, last_attr, kind_default, hand_label):
+                if pred is None:
+                    return
+                value = str(getattr(pred, kind_attr, "neutral") or "neutral")
+                last = getattr(self, last_attr, "neutral")
+                if value != last and value not in ("", "neutral"):
+                    kind = kind_default
+                    if kind_default == "static" and (
+                        value in _MOTION_COUPLED_STABLE or value.startswith("swipe_")
+                    ):
+                        kind = "dynamic"
+                    from ...telemetry import track as _track
+                    _track(
+                        "gesture_detected",
+                        {
+                            "gesture": value,
+                            "kind": kind,
+                            "handedness": hand_label,
+                            "in_tutorial": in_tutorial,
+                        },
+                    )
+                setattr(self, last_attr, value)
+
+            _emit_transition(prediction,    "stable_label",  "_telemetry_last_static_label",            "static",  primary_handedness)
+            _emit_transition(prediction,    "dynamic_label", "_telemetry_last_dynamic_label",           "dynamic", primary_handedness)
+            _emit_transition(secondary_pred, "stable_label",  "_telemetry_last_static_label_secondary",  "static",  secondary_handedness)
+            _emit_transition(secondary_pred, "dynamic_label", "_telemetry_last_dynamic_label_secondary", "dynamic", secondary_handedness)
+        except Exception:
+            pass
+
         # Suppress repeat_circle while drawing mode is on. The user
         # is actively drawing strokes with their index finger, and
         # the dynamic recogniser can label that motion as
@@ -7712,6 +7844,18 @@ class GestureWorker(QObject):
                     context = VoiceCommandContext(preferred_app=preferred_target) if mode == "general" else None
                     try:
                         execution = self.voice_processor.execute(result.heard_text, context=context)
+                        try:
+                            from ...telemetry import track as _track
+                            _track(
+                                "voice_command_executed",
+                                {
+                                    "target": str(getattr(execution, "target", "") or ""),
+                                    "success": bool(getattr(execution, "success", False)),
+                                    "in_tutorial": bool(self._tutorial_mode_enabled),
+                                },
+                            )
+                        except Exception:
+                            pass
                     except Exception as exc:
                         traceback.print_exc()
                         payload = {
