@@ -116,37 +116,37 @@ SECTION_GENERAL = 10
 # focused on the essentials.
 WALKTHROUGH_PAGES = (
     SECTION_INSTRUCTIONS,
+    SECTION_GENERAL,
     SECTION_GESTURES,
-    SECTION_GESTURE_BINDS,
-    SECTION_CAMERA,
-    SECTION_MICROPHONE,
 )
 
 # On-page descriptive hint shown for each step. The Next button
-# bounces in 3 s after the page lands and auto-navigates to the
-# next entry when clicked.
+# fades in immediately and auto-navigates to the next entry when
+# clicked. Three pages on purpose — the previous five-page tour
+# (Instructions / Control Guide / Gesture Binds / Camera /
+# Microphone) was a "settings room tour" rather than something a
+# rushed user would actually finish. The new flow points at the
+# pages that 90 % of users actually return to: what the app is
+# (Instructions), the toggles they'll touch (General), and the
+# gesture / voice reference (Control Guide). Camera, Microphone,
+# Gesture Binds stay reachable in the sidebar but are not part of
+# the first-touch tour.
 WALKTHROUGH_PAGE_HINTS = {
     SECTION_INSTRUCTIONS:
-        "Use this page to learn more about how Touchless works.",
+        "What Touchless does and the 30-second start.",
+    SECTION_GENERAL:
+        "Mouse, overlays, performance, and Connect Spotify all live here.",
     SECTION_GESTURES:
-        "View all preset gestures and example voice commands here.",
-    SECTION_GESTURE_BINDS:
-        "Reassign which gestures trigger which built-in actions.",
-    SECTION_CAMERA:
-        "Pick which camera Touchless uses to see your gestures.",
-    SECTION_MICROPHONE:
-        "Pick which microphone Touchless uses for voice commands.",
+        "Every gesture and voice command, with a short demo for each.",
 }
 
-# Finale text shown in the big centered pill after the user clicks
-# Next on the Microphone page. Plain-language summary that there
-# are more options in Settings if they want to dig deeper, plus a
-# nudge to try the live Gesture Tutorial.
+# Finale message after Control Guide. Tighter wording: the
+# previous paragraph mentioned three things the user wasn't going
+# to remember anyway. Now it's a single sentence pointing at the
+# one thing they should do next — the live Tutorial.
 WALKTHROUGH_FINALE_MESSAGE = (
-    "Nice work — that's the core tour!\n\n"
-    "There's more to explore in Settings (Custom Gestures, Save "
-    "Locations, themes, and more) whenever you're ready.\n\n"
-    "Now let's hop into the live Gesture Tutorial."
+    "That's the quick tour!\n\n"
+    "Press Gesture Tutorial to practice the gestures live."
 )
 
 
