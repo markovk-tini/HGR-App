@@ -340,9 +340,11 @@ class TitleBar(QFrame):
         self.version_label.setObjectName("titleBarVersion")
         self.version_label.setStyleSheet(
             "QLabel#titleBarVersion {"
-            "  color: rgba(255,255,255,0.55);"
-            "  font-size: 11px;"
-            "  padding: 0 8px;"
+            "  color: rgba(255,255,255,0.65);"
+            "  font-size: 12px;"
+            "  font-weight: 500;"
+            "  letter-spacing: 0.3px;"
+            "  padding: 0 10px;"
             "  background: transparent;"
             "}"
         )
@@ -8889,9 +8891,9 @@ class MainWindow(QMainWindow):
         section_style = (
             f"QLabel#cameraSectionHeader {{"
             f"  color: {self.config.accent_color};"
-            f"  font-size: 13px;"
-            f"  font-weight: 600;"
-            f"  letter-spacing: 1px;"
+            f"  font-size: 12px;"
+            f"  font-weight: 700;"
+            f"  letter-spacing: 1.2px;"
             f"  text-transform: uppercase;"
             f"  margin-top: 0px;"
             f"}}"
@@ -9842,9 +9844,9 @@ class MainWindow(QMainWindow):
         section_style = (
             f"QLabel#micSectionHeader {{"
             f"  color: {self.config.accent_color};"
-            f"  font-size: 13px;"
-            f"  font-weight: 600;"
-            f"  letter-spacing: 1px;"
+            f"  font-size: 12px;"
+            f"  font-weight: 700;"
+            f"  letter-spacing: 1.2px;"
             f"  text-transform: uppercase;"
             f"  margin-top: 0px;"
             f"}}"
@@ -11742,15 +11744,17 @@ Admin elevation
             color: {self.config.text_color};
         }}
         #cardTitle {{
-            font-size: 18px;
+            font-size: 20px;
             font-weight: 800;
+            letter-spacing: -0.1px;
             color: {self.config.accent_color};
             background: transparent;
         }}
         #cardSubtitle {{
-            font-size: 13px;
-            font-weight: 700;
-            color: rgba(176,219,252,0.95);
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            color: rgba(176,219,252,0.85);
             background: transparent;
         }}
         QFrame#homeLogPane {{
@@ -11825,8 +11829,9 @@ Admin elevation
             color: {self.config.accent_color};
         }}
         #settingsTitle {{
-            font-size: 24px;
-            font-weight: 900;
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.3px;
             color: {self.config.accent_color};
         }}
         #settingsPanelTitle {{
@@ -11844,14 +11849,19 @@ Admin elevation
         #gestureCardTitle {{
             font-size: 18px;
             font-weight: 800;
+            letter-spacing: -0.1px;
             color: {self.config.accent_color};
         }}
         #gestureCardSubtitle {{
             color: {dim_text_strong};
-            font-weight: 700;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
         }}
         #gestureCardBody {{
             color: {self.config.text_color};
+            font-size: 14px;
+            line-height: 150%;
             background: transparent;
         }}
         QScrollArea#gestureGuideScroll, QScrollArea#gestureGuideScroll > QWidget, QScrollArea#gestureGuideScroll QWidget#qt_scrollarea_viewport {{
@@ -20201,6 +20211,23 @@ def _stop_screen_recording(self) -> bool:
             self._telemetry = client
             self._session_started_at = time.monotonic()
             _telemetry.track("app_session_started")
+            # Catch unhandled Python exceptions and forward them as
+            # anonymous error_caught events. Keeps the original
+            # excepthook chained so the traceback still prints to
+            # stderr / the IDE for live debugging.
+            import sys as _sys
+            _prev_hook = _sys.excepthook
+            def _telemetry_excepthook(exc_type, exc_value, exc_tb):
+                try:
+                    if exc_value is not None:
+                        _telemetry.track_error("uncaught_exception", exc_value)
+                except Exception:
+                    pass
+                try:
+                    _prev_hook(exc_type, exc_value, exc_tb)
+                except Exception:
+                    pass
+            _sys.excepthook = _telemetry_excepthook
         except Exception:
             self._telemetry = None
             self._session_started_at = time.monotonic()

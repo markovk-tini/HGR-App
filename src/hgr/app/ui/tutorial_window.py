@@ -1279,19 +1279,25 @@ class TutorialWindow(QDialog):
             }}
             QLabel#tutorialHero {{
                 color: {self.config.accent_color};
-                font-size: 26px;
-                font-weight: 900;
+                font-size: 28px;
+                font-weight: 800;
+                letter-spacing: -0.3px;
             }}
             QLabel#tutorialSubtitle {{
                 color: {self.config.text_color};
-                font-size: 14px;
+                font-size: 16px;
+                font-weight: 400;
+                line-height: 150%;
+                letter-spacing: 0.1px;
             }}
             QLabel#tutorialBadge {{
                 background-color: rgba(9,42,58,0.92);
                 color: {self.config.accent_color};
                 border-radius: 13px;
                 padding: 8px 12px;
-                font-weight: 800;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
             }}
             QLabel#tutorialMeta, QLabel#tutorialProgress, QLabel#tutorialVoicePreview {{
                 color: {self.config.text_color};
@@ -1300,26 +1306,30 @@ class TutorialWindow(QDialog):
             QLabel#tutorialStepTitle {{
                 color: {self.config.accent_color};
                 font-size: 22px;
-                font-weight: 900;
+                font-weight: 800;
+                letter-spacing: -0.2px;
             }}
             QLabel#tutorialCameraHeader, QLabel#tutorialCameraFooter {{
                 color: {self.config.accent_color};
-                font-size: 22px;
-                font-weight: 900;
+                font-size: 20px;
+                font-weight: 800;
+                letter-spacing: -0.1px;
                 background: transparent;
                 padding: 6px 4px;
             }}
             QLabel#tutorialStepDesc {{
                 color: {self.config.text_color};
                 font-size: 14px;
+                line-height: 150%;
             }}
             QLabel#tutorialInstructionBox {{
                 background-color: rgba(255,255,255,0.04);
                 border: 1px solid rgba(29,233,182,0.18);
                 border-radius: 16px;
                 color: {self.config.text_color};
-                padding: 14px 16px;
+                padding: 16px 18px;
                 font-size: 14px;
+                line-height: 150%;
             }}
             QLabel#tutorialVideo {{
                 background-color: rgba(0,0,0,0.16);
@@ -1333,7 +1343,9 @@ class TutorialWindow(QDialog):
                 color: {self.config.accent_color};
                 border-radius: 12px;
                 padding: 8px 12px;
-                font-weight: 800;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
             }}
             QLabel#tutorialPracticeLabel {{
                 background-color: rgba(255,255,255,0.04);
@@ -1342,11 +1354,13 @@ class TutorialWindow(QDialog):
                 color: {self.config.text_color};
                 padding: 18px;
                 font-size: 15px;
+                line-height: 150%;
             }}
             QLabel#tutorialNote {{
                 color: {self.config.accent_color};
-                font-size: 13px;
-                font-weight: 700;
+                font-size: 12px;
+                font-weight: 600;
+                letter-spacing: 0.5px;
             }}
             QPushButton {{
                 background-color: {self.config.primary_color};
@@ -1600,6 +1614,22 @@ class TutorialWindow(QDialog):
             self._go_next()
 
     def _reset_for_step(self) -> None:
+        try:
+            from ...telemetry import track as _track
+            _track(
+                "tutorial_step_entered",
+                {
+                    "step_index": int(self._step_index),
+                    "step_key": (
+                        self._practice_steps[self._step_index].key
+                        if 0 <= self._step_index < len(self._practice_steps)
+                        else "completion"
+                    ),
+                    "completion_page": bool(self._show_completion_page),
+                },
+            )
+        except Exception:
+            pass
         self._step_completed = True if self._show_completion_page else (self._step_index in self._completed_steps)
         self._hold_started.clear()
         self._hold_last_fired.clear()
