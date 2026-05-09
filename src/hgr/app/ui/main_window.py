@@ -150,6 +150,45 @@ WALKTHROUGH_FINALE_MESSAGE = (
 )
 
 
+# =============================================================================
+# Design tokens — pulled here so the whole UI reads from one source instead of
+# the previous ad-hoc mix of font-size: 12/13/14/16/17/18/22 px scattered
+# across panel-builders. Five sizes, three weights, six-step spacing scale,
+# two easing curves. Stays small on purpose — the goal is consistency, not a
+# full design system.
+# =============================================================================
+
+# Type scale (px). DISPLAY only used for the hero "Touchless" lockup; HERO is
+# the previous 68px brand size kept for backwards compatibility.
+FONT_HERO = 68         # hero lockup (home page)
+FONT_DISPLAY = 28      # large headings (panel titles)
+FONT_HEADING = 20      # section / card titles
+FONT_BODY_LG = 16      # primary body / subtitle
+FONT_BODY = 14         # default body
+FONT_CAPTION = 12      # helper text, hint pills, smaller chips
+
+# Three weights — anything more is noise.
+WEIGHT_REGULAR = 400
+WEIGHT_SEMIBOLD = 600
+WEIGHT_BOLD = 800
+
+# Spacing scale (px). Use these for QLayout margins / spacing instead of
+# random integers; gives the eye a predictable rhythm.
+SPACE_XS = 4
+SPACE_SM = 8
+SPACE_MD = 12
+SPACE_LG = 16
+SPACE_XL = 24
+SPACE_XXL = 32
+
+# Animation timings + easing. Default to OutCubic at 250 ms for almost
+# everything visible — fast enough to feel snappy, slow enough to read as
+# motion rather than a teleport. SLOW reserved for the few transitions
+# that genuinely need to draw the eye (modal enter, walkthrough finale).
+ANIM_FAST_MS = 150
+ANIM_MEDIUM_MS = 250
+ANIM_SLOW_MS = 400
+
 
 def _with_alpha(color: QColor, alpha: int) -> QColor:
     c = QColor(color)
@@ -582,11 +621,20 @@ class _WalkthroughEdgeGlowOverlay(QWidget):
                 else:  # right
                     grad = QLinearGradient(rect.width(), 0, rect.width() - depth, 0)
                     band = QRect(rect.width() - depth, 0, depth, rect.height())
+                # Softened from alpha=95 to alpha=58, with an
+                # intermediate 0.55-stop at alpha=14 so the fade
+                # reads as a gentle accent wash instead of a hard
+                # green halo. The user's "feels clanky" feedback
+                # specifically called out the walkthrough's visual
+                # busyness.
                 start = QColor(self._accent)
-                start.setAlpha(95)
+                start.setAlpha(58)
+                mid = QColor(self._accent)
+                mid.setAlpha(14)
                 end = QColor(self._accent)
                 end.setAlpha(0)
                 grad.setColorAt(0.0, start)
+                grad.setColorAt(0.55, mid)
                 grad.setColorAt(1.0, end)
                 painter.setBrush(grad)
                 painter.drawRect(band)
@@ -4264,18 +4312,26 @@ class TouchlessNotice(QDialog):
             "}"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(SPACE_XL, SPACE_LG + 2, SPACE_XL, SPACE_LG)
+        layout.setSpacing(SPACE_MD)
 
         title_label = QLabel(title)
         title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        title_label.setStyleSheet(
+            f"font-size: {FONT_HEADING}px; "
+            f"font-weight: {WEIGHT_BOLD}; "
+            f"letter-spacing: 0.1px;"
+        )
         layout.addWidget(title_label)
 
         body_label = QLabel(message)
         body_label.setWordWrap(True)
         body_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        body_label.setStyleSheet("font-size: 13px; line-height: 1.4;")
+        body_label.setStyleSheet(
+            f"font-size: {FONT_BODY}px; "
+            f"font-weight: {WEIGHT_REGULAR}; "
+            f"line-height: 150%;"
+        )
         layout.addWidget(body_label, 1)
 
         button_row = QHBoxLayout()
@@ -4432,6 +4488,11 @@ class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
+        # Telemetry: ensure an anonymous install UUID exists, then
+        # construct the singleton client. Both this constructor and
+        # `track(...)` are no-ops when no API key is configured —
+        # safe to ship in every build.
+        self._init_telemetry()
         self._phone_camera_qr_server = None
         # If a phone was previously paired, auto-start the embedded
         # server on launch so the user's already-open phone Safari tab
@@ -5296,12 +5357,13 @@ class MainWindow(QMainWindow):
         self._walkthrough_hint_label.setStyleSheet(
             "QLabel#walkthroughHint {"
             f"  color: {green_text};"
-            "  font-size: 17px;"
-            "  font-weight: 900;"
+            f"  font-size: {FONT_BODY_LG}px;"
+            f"  font-weight: {WEIGHT_SEMIBOLD};"
+            "  letter-spacing: 0.1px;"
             f"  background: {self.config.primary_color};"
-            f"  border: 2px solid {self.config.accent_color};"
-            "  border-radius: 28px;"
-            "  padding: 12px 24px;"
+            f"  border: 1px solid {self.config.accent_color};"
+            "  border-radius: 22px;"
+            "  padding: 10px 22px;"
             "}"
         )
         self._walkthrough_hint_label.setVisible(False)
@@ -5328,6 +5390,28 @@ class MainWindow(QMainWindow):
         self._walkthrough_next_fade_effect = QGraphicsOpacityEffect(self._walkthrough_next_button)
         self._walkthrough_next_fade_effect.setOpacity(1.0)
         self._walkthrough_next_button.setGraphicsEffect(self._walkthrough_next_fade_effect)
+
+        # Step-progress dots — small accent / muted dots positioned
+        # above the hint pill. Visible only during the walkthrough;
+        # text reads "Step N of M". Gives users the orientation
+        # cue ("how far through am I?") that the previous design
+        # didn't have at all. Mouse-transparent so it doesn't block
+        # clicks on the panel underneath.
+        self._walkthrough_progress_label = QLabel("", page)
+        self._walkthrough_progress_label.setObjectName("walkthroughProgress")
+        self._walkthrough_progress_label.setAlignment(Qt.AlignCenter)
+        self._walkthrough_progress_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._walkthrough_progress_label.setStyleSheet(
+            "QLabel#walkthroughProgress {"
+            f"  color: {self.config.text_color};"
+            f"  font-size: {FONT_CAPTION}px;"
+            f"  font-weight: {WEIGHT_SEMIBOLD};"
+            "  letter-spacing: 0.5px;"
+            "  background: transparent;"
+            "  padding: 0px;"
+            "}"
+        )
+        self._walkthrough_progress_label.setVisible(False)
 
         # `_walkthrough_bar` kept as alias for the hint label so other
         # helpers that reference it (visibility toggle, etc.) keep
@@ -6007,14 +6091,20 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def _build_instructions_panel(self) -> QWidget:
+        """Quick-start page. Restructured around four cards:
+        What it is / Get started / What you can control / Where to
+        learn more. Replaces the previous wall of ten numbered
+        paragraphs that tried to be both reference and tutorial in
+        one. Reference detail now lives in Control Guide; this page
+        is purely the 30-second 'how do I use this thing?' answer."""
         panel, layout = self._make_content_panel(
             "Instructions",
-            "Touchless turns a live camera feed into hands-free control of Spotify, Chrome, the mouse, system volume, voice dictation, and an on-screen drawing canvas. Use this page as the quick start, Control Guide for the full gesture + voice command map, and Tutorial for the guided walkthrough.",
+            "How Touchless works and how to get started in under a minute.",
         )
 
-        # Wrap the body in a scroll area so the long step list stays
-        # readable on shorter windows instead of squishing.
         accent = self.config.accent_color or "#1DE9B6"
+        text_color = str(self.config.text_color or "#E5F6FF")
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -6048,40 +6138,194 @@ class MainWindow(QMainWindow):
         inner.setStyleSheet("background: transparent;")
         scroll.setWidget(inner)
         inner_layout = QVBoxLayout(inner)
-        inner_layout.setContentsMargins(0, 0, 8, 0)
-        inner_layout.setSpacing(12)
+        inner_layout.setContentsMargins(0, 0, SPACE_SM, 0)
+        inner_layout.setSpacing(SPACE_LG)
 
-        info_box = QFrame()
-        info_box.setObjectName("innerCard")
-        info_box.setAttribute(Qt.WA_StyledBackground, True)
-        info_box.setStyleSheet(self._settings_inner_card_stylesheet())
-        info_layout = QVBoxLayout(info_box)
-        info_layout.setContentsMargins(16, 16, 16, 16)
-        info_layout.setSpacing(10)
-        items = [
-            "1. Press Start to begin live tracking with the selected camera. Touchless reads both hands in real time and routes gestures to whichever control context is active (Spotify, Chrome, mouse, volume, voice, drawing).",
-            "2. Live View shows the camera feed with the hand skeleton, a per-hand gesture label (red outline by default, green when a gesture is recognized), the voice state, the volume state, and the current app routing. Open it whenever you want to verify what Touchless is seeing.",
-            "3. Right-hand gestures drive Spotify, Chrome, the gesture wheels, drawing, and volume. Left-hand gestures drive voice and dictation, the mouse-mode toggle, the YouTube wheel toggle (left 'four'), and Spotify-side controls during a save prompt.",
-            "4. Spotify actions only work while Spotify is running on this device. Chrome wheel actions only work while Chrome is already open and active. The right-hand 'two' gesture will open or focus Spotify if it isn't running.",
-            "5. Mouse mode is a separate control mode. Turn it on with the left hand, control the pointer with the right hand, and turn it off again when you're finished. While mouse mode is on, drawing and the gesture wheels are disabled.",
-            "6. Drawing mode (right-hand gesture) lets you sketch directly over the camera feed. Opening the thumb for about 0.2 seconds lifts the pen; a left-hand pinch + stretch resizes the captured stroke; swiping right clears the canvas, swiping left undoes one stroke. Color, thickness, and eraser type persist across sessions; shape mode always resets to off when you re-enter drawing mode.",
-            "7. Use your phone as the camera (and optionally the microphone) by opening Settings -> Camera, scanning the QR code with your phone, and tapping 'Use phone camera'. The phone streams video over your local Wi-Fi and bypasses any built-in webcam. The phone microphone is a separate toggle in Settings -> Microphone.",
-            "8. Three camera-performance modes live in Settings -> Camera. Low FPS auto-engages on slower hardware (drops to 0.34 / 0.22 detection thresholds + the lite landmark model). Lite Mode is a manual switch to MediaPipe model_complexity=0 for roughly 2.5x faster CPU inference. GPU Mode routes the hand-detection model through ONNX Runtime + DirectML on any DX12 GPU (NVIDIA / AMD / Intel) and falls back to CPU MediaPipe if the GPU path isn't reachable. Use whichever combination keeps your machine near 30 fps.",
-            "9. Custom Gestures (Beta) lets you record your own static hand pose and bind it to a key, hotkey, text snippet, URL, or shell command. Open Settings -> Custom Gesture to create one and to test it in the Sandbox.",
-            "10. Tutorial is the easiest place to learn the main motions. It uses the same live gesture and voice runtime as the rest of the app, so the actions you practice there are the real actions the app will run.",
+        # ---- Card 1: What it is ------------------------------------
+        card1 = self._make_instructions_card(
+            "What it is",
+            "Touchless is a hands-free control layer for your PC. A camera "
+            "watches your hands, a microphone listens for short commands, "
+            "and the app turns those into clicks, scrolls, key presses, "
+            "media controls, and dictation — all running locally on your "
+            "machine.",
+        )
+        inner_layout.addWidget(card1)
+
+        # ---- Card 2: Get started -----------------------------------
+        steps_card = QFrame()
+        steps_card.setObjectName("innerCard")
+        steps_card.setAttribute(Qt.WA_StyledBackground, True)
+        steps_card.setStyleSheet(self._settings_inner_card_stylesheet())
+        steps_layout = QVBoxLayout(steps_card)
+        steps_layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        steps_layout.setSpacing(SPACE_MD)
+
+        steps_title = QLabel("Get started")
+        steps_title.setStyleSheet(
+            f"color: {text_color}; "
+            f"font-size: {FONT_HEADING}px; "
+            f"font-weight: {WEIGHT_BOLD};"
+        )
+        steps_layout.addWidget(steps_title)
+
+        steps = [
+            ("1", "Press Start", "Live tracking begins with whichever camera is selected. Both hands are read at once."),
+            ("2", "Try a gesture", "Point your right hand at the camera with one finger up to play / pause Spotify, or hold left-hand 'one' to start voice."),
+            ("3", "Open Tutorial", "The guided Tutorial walks you through every core motion with live feedback. Best place to learn."),
         ]
-        for item in items:
-            lbl = QLabel(item)
-            lbl.setWordWrap(True)
-            info_layout.addWidget(lbl)
-        inner_layout.addWidget(info_box)
-        # Connect Spotify lives in the General settings tab now —
-        # see _build_general_panel. The first-time Spotify-active
-        # prompt also points there.
-        inner_layout.addStretch(1)
+        for num, head, body in steps:
+            row = QHBoxLayout()
+            row.setSpacing(SPACE_MD)
+            row.setContentsMargins(0, 0, 0, 0)
+            badge = QLabel(num)
+            badge.setFixedSize(28, 28)
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setStyleSheet(
+                f"QLabel {{"
+                f"  background: {accent};"
+                f"  color: #001B24;"
+                f"  border-radius: 14px;"
+                f"  font-size: {FONT_BODY}px;"
+                f"  font-weight: {WEIGHT_BOLD};"
+                f"}}"
+            )
+            row.addWidget(badge, 0, Qt.AlignTop)
+            text_col = QVBoxLayout()
+            text_col.setSpacing(2)
+            text_col.setContentsMargins(0, 2, 0, 0)
+            head_label = QLabel(head)
+            head_label.setStyleSheet(
+                f"color: {text_color}; "
+                f"font-size: {FONT_BODY_LG}px; "
+                f"font-weight: {WEIGHT_SEMIBOLD};"
+            )
+            body_label = QLabel(body)
+            body_label.setWordWrap(True)
+            body_label.setStyleSheet(
+                f"color: {text_color}; "
+                f"font-size: {FONT_BODY}px; "
+                f"font-weight: {WEIGHT_REGULAR};"
+            )
+            text_col.addWidget(head_label)
+            text_col.addWidget(body_label)
+            row.addLayout(text_col, 1)
+            steps_layout.addLayout(row)
+        inner_layout.addWidget(steps_card)
 
+        # ---- Card 3: What you can control --------------------------
+        controls_card = QFrame()
+        controls_card.setObjectName("innerCard")
+        controls_card.setAttribute(Qt.WA_StyledBackground, True)
+        controls_card.setStyleSheet(self._settings_inner_card_stylesheet())
+        controls_layout = QVBoxLayout(controls_card)
+        controls_layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        controls_layout.setSpacing(SPACE_MD)
+        controls_title = QLabel("What you can control")
+        controls_title.setStyleSheet(
+            f"color: {text_color}; "
+            f"font-size: {FONT_HEADING}px; "
+            f"font-weight: {WEIGHT_BOLD};"
+        )
+        controls_layout.addWidget(controls_title)
+
+        capabilities = [
+            ("Spotify",   "Play, pause, skip, shuffle, volume, and 'play X on Spotify' by voice."),
+            ("Chrome",    "Search, new tab, back / forward, refresh, and 'search X on chrome' by voice."),
+            ("Mouse",     "Hand-driven cursor with pinch-to-click, two-finger-up scroll, and click-and-drag."),
+            ("Volume",    "Right-hand volume pose plus mute / unmute. System volume, not app volume."),
+            ("Voice",     "Hold left-hand 'one' to start the listener. Speak commands or dictate text."),
+            ("Drawing",   "Sketch over the camera feed or directly on screen. Pinch + stretch resizes strokes."),
+        ]
+        cap_grid = QGridLayout()
+        cap_grid.setHorizontalSpacing(SPACE_LG)
+        cap_grid.setVerticalSpacing(SPACE_MD)
+        cap_grid.setContentsMargins(0, 0, 0, 0)
+        for idx, (name, desc) in enumerate(capabilities):
+            row = idx // 2
+            col = idx % 2
+            cap_widget = QWidget()
+            cap_widget.setStyleSheet("background: transparent;")
+            cap_layout = QVBoxLayout(cap_widget)
+            cap_layout.setContentsMargins(0, 0, 0, 0)
+            cap_layout.setSpacing(2)
+            cap_name = QLabel(name)
+            cap_name.setStyleSheet(
+                f"color: {accent}; "
+                f"font-size: {FONT_BODY}px; "
+                f"font-weight: {WEIGHT_BOLD}; "
+                f"letter-spacing: 0.5px;"
+            )
+            cap_desc = QLabel(desc)
+            cap_desc.setWordWrap(True)
+            cap_desc.setStyleSheet(
+                f"color: {text_color}; "
+                f"font-size: {FONT_BODY}px; "
+                f"font-weight: {WEIGHT_REGULAR};"
+            )
+            cap_layout.addWidget(cap_name)
+            cap_layout.addWidget(cap_desc)
+            cap_grid.addWidget(cap_widget, row, col)
+        cap_grid.setColumnStretch(0, 1)
+        cap_grid.setColumnStretch(1, 1)
+        controls_layout.addLayout(cap_grid)
+        inner_layout.addWidget(controls_card)
+
+        # ---- Card 4: Where to learn more ---------------------------
+        more_card = self._make_instructions_card(
+            "Where to learn more",
+            "<b>Control Guide</b> — every gesture and voice command, with a "
+            "short demo card for each. Best as a reference.<br>"
+            "<b>Tutorial</b> — guided practice with live camera feedback. "
+            "Best as a first pass.<br>"
+            "<b>General settings</b> — mouse sensitivity, overlay toggles, "
+            "system performance modes, and the Connect Spotify button.",
+            allow_html=True,
+        )
+        inner_layout.addWidget(more_card)
+
+        inner_layout.addStretch(1)
         layout.addWidget(scroll, 1)
         return panel
+
+    def _make_instructions_card(
+        self,
+        title: str,
+        body: str,
+        *,
+        allow_html: bool = False,
+    ) -> QFrame:
+        """Two-line card used by the Instructions panel: a heading,
+        then a body paragraph. Pulls its sizes from the design
+        tokens (FONT_HEADING title / FONT_BODY body) so the whole
+        panel reads with one rhythm."""
+        text_color = str(self.config.text_color or "#E5F6FF")
+        card = QFrame()
+        card.setObjectName("innerCard")
+        card.setAttribute(Qt.WA_StyledBackground, True)
+        card.setStyleSheet(self._settings_inner_card_stylesheet())
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        card_layout.setSpacing(SPACE_SM)
+        title_label = QLabel(title)
+        title_label.setStyleSheet(
+            f"color: {text_color}; "
+            f"font-size: {FONT_HEADING}px; "
+            f"font-weight: {WEIGHT_BOLD};"
+        )
+        card_layout.addWidget(title_label)
+        body_label = QLabel(body)
+        body_label.setWordWrap(True)
+        if allow_html:
+            body_label.setTextFormat(Qt.RichText)
+        body_label.setStyleSheet(
+            f"color: {text_color}; "
+            f"font-size: {FONT_BODY}px; "
+            f"font-weight: {WEIGHT_REGULAR}; "
+            f"line-height: 150%;"
+        )
+        card_layout.addWidget(body_label)
+        return card
 
     # ----- General panel ---------------------------------------------------
     def _build_general_panel(self) -> QWidget:
@@ -11287,6 +11531,14 @@ Admin elevation
             except Exception:
                 pass
         self.settings_content_stack.setCurrentIndex(index)
+        try:
+            from ... import telemetry as _telemetry
+            _telemetry.track(
+                "settings_tab_opened",
+                {"section_id": int(index)},
+            )
+        except Exception:
+            pass
         # Match by page_index, NOT list position. The sidebar visual
         # order (Instructions, General, Control Guide, ...) is NOT
         # the same as the SECTION_* index order — SECTION_GENERAL is
@@ -11472,6 +11724,9 @@ Admin elevation
         }}
         #subtitleLabel {{
             color: {self.config.text_color};
+            font-size: 16px;
+            font-weight: 400;
+            letter-spacing: 0.1px;
         }}
         #card, #settingsSidebar, #settingsContentPanel, #innerCard {{
             background-color: {card_bg};
@@ -11575,12 +11830,16 @@ Admin elevation
             color: {self.config.accent_color};
         }}
         #settingsPanelTitle {{
-            font-size: 22px;
-            font-weight: 900;
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.3px;
             color: {self.config.accent_color};
         }}
         #settingsPanelSubtitle {{
             color: {self.config.text_color};
+            font-size: 14px;
+            font-weight: 400;
+            line-height: 150%;
         }}
         #gestureCardTitle {{
             font-size: 18px;
@@ -12446,10 +12705,12 @@ Admin elevation
             except Exception:
                 pass
             self._walkthrough_next_timer = None
-        # Hide overlay pill + Next button.
+        # Hide overlay pill + Next button + step-progress label.
         if self._walkthrough_hint_label is not None:
             self._walkthrough_hint_label.setVisible(False)
             self._walkthrough_hint_label.setText("")
+        if getattr(self, "_walkthrough_progress_label", None) is not None:
+            self._walkthrough_progress_label.setVisible(False)
         if self._walkthrough_next_button is not None:
             self._walkthrough_next_button.setVisible(False)
             self._walkthrough_next_button.setText("Next")
@@ -12539,22 +12800,23 @@ Admin elevation
     # --- Bounce animation + glow overlay ------------------------------
 
     def _start_walkthrough_bounce(self, button) -> None:
-        """1 Hz vertical bounce on the target sidebar button. Per the
-        user's spec, the amplitude is 1.5x the previous version
-        (±9 / ±6 instead of ±6 / ±4) so the motion reads more
-        clearly. Stored baseline_y so we can ease back to rest on
-        first hover."""
+        """Subtle vertical pulse on the target sidebar button so the
+        eye is drawn to it without the previous full-amplitude bounce
+        feeling theatrical. 1.4 s loop, ±4 / ±3 px (was ±9 / ±6 on
+        a 0.9 s loop). The walkthrough also has a ~250 ms OutCubic
+        Next button slide-in now, so the sidebar doesn't need to
+        carry as much motion-attention work itself."""
         try:
             self._walkthrough_bounce_baseline_y = int(button.y())
             anim = QPropertyAnimation(button, b"pos", self)
-            anim.setDuration(900)
+            anim.setDuration(1400)
             anim.setLoopCount(-1)
             x = int(button.x())
             base_y = int(button.y())
             anim.setKeyValueAt(0.0, QPoint(x, base_y))
-            anim.setKeyValueAt(0.25, QPoint(x, base_y - 9))
+            anim.setKeyValueAt(0.25, QPoint(x, base_y - 4))
             anim.setKeyValueAt(0.50, QPoint(x, base_y))
-            anim.setKeyValueAt(0.75, QPoint(x, base_y + 6))
+            anim.setKeyValueAt(0.75, QPoint(x, base_y + 3))
             anim.setKeyValueAt(1.0, QPoint(x, base_y))
             anim.setEasingCurve(QEasingCurve.InOutSine)
             anim.start()
@@ -12789,6 +13051,19 @@ Admin elevation
             # Don't punch through the page's top edge.
             pill_y = max(0, pill_y)
             hint.setGeometry(pill_x, pill_y, pill_w, pill_h)
+            # ---- Step progress label (just above the pill) --------
+            progress_label = getattr(self, "_walkthrough_progress_label", None)
+            if progress_label is not None and progress_label.isVisible():
+                prog_h = max(14, progress_label.sizeHint().height())
+                prog_w = max(80, progress_label.sizeHint().width())
+                # Sits 4 px above the pill, centered on it. If pulling
+                # it above the page top would clip, drop it inside the
+                # pill margin instead.
+                prog_y = pill_y - prog_h - 4
+                if prog_y < 0:
+                    prog_y = 0
+                prog_x = pill_x + (pill_w - prog_w) // 2
+                progress_label.setGeometry(prog_x, prog_y, prog_w, prog_h)
             # ---- Next button (bottom-right of the WINDOW) -----------
             next_btn_size = button.sizeHint()
             next_btn_w = max(next_btn_size.width(), 110)
@@ -12868,6 +13143,18 @@ Admin elevation
             self._walkthrough_hint_label.setText(
                 WALKTHROUGH_PAGE_HINTS.get(target_section, "")
             )
+        # Step-progress text — "Step 2 of 5", with an absolute index
+        # within WALKTHROUGH_PAGES so the user has orientation.
+        progress_label = getattr(self, "_walkthrough_progress_label", None)
+        if progress_label is not None:
+            try:
+                idx = WALKTHROUGH_PAGES.index(target_section) + 1
+                total = len(WALKTHROUGH_PAGES)
+                progress_label.setText(f"STEP {idx} OF {total}")
+                progress_label.setVisible(True)
+                progress_label.raise_()
+            except Exception:
+                progress_label.setVisible(False)
         if self._walkthrough_next_button is not None:
             self._walkthrough_next_button.setVisible(False)
             # Always "Next" — even on Microphone (the last regular
@@ -12876,7 +13163,12 @@ Admin elevation
             self._walkthrough_next_button.setText("Next")
         if self._walkthrough_next_fade_effect is not None:
             self._walkthrough_next_fade_effect.setOpacity(0.0)
-        # Schedule the fade-in.
+        # Show the Next button immediately. The previous 3 s delay was
+        # intended as a "read the page first" cue, but in practice it
+        # made every step feel sluggish — the user couldn't move on
+        # even when they'd already read the hint. The button still
+        # fades + slides in (250 ms OutCubic), so users get the visual
+        # cue without the blocking wait.
         timer = self._walkthrough_next_timer
         if timer is None:
             timer = QTimer(self)
@@ -12884,18 +13176,15 @@ Admin elevation
             timer.timeout.connect(self._show_walkthrough_next_button)
             self._walkthrough_next_timer = timer
         timer.stop()
-        timer.start(3000)
+        timer.start(0)
 
     def _show_walkthrough_next_button(self) -> None:
-        """Drop the Next button into the bottom-right with a ball-
-        bounce. Per the user's spec it doesn't fall from the top of
-        the window — it starts ~25 % of the page height ABOVE its
-        landing position, fades in, and bounces a few times before
-        settling. Drives both the geometry animation (OutBounce) and
-        the opacity animation in parallel."""
-        # Allow the bounce-in from both regular pages (on_page →
-        # next_visible) AND the finale phase (Gesture Tutorial
-        # button bouncing in over the centered finale pill).
+        """Slide + fade the Next button in. The previous design used
+        a 1.1 s OutBounce ball-bounce settle; replaced with a 250 ms
+        OutCubic glide so step transitions feel snappy instead of
+        clanky. Drop distance also shortened (8% of page height vs
+        25%) so the motion is a quick rise into place rather than a
+        long fall."""
         if not self._walkthrough_active or self._walkthrough_phase not in (
             "on_page", "finale"
         ):
@@ -12904,44 +13193,32 @@ Admin elevation
         page = getattr(self, "settings_page", None)
         if button is None or page is None:
             return
-        # Finale keeps phase = "finale" so subsequent Next-clicks
-        # route to the exit-into-tutorial branch; everywhere else
-        # the bounce moves us into "next_visible".
         if self._walkthrough_phase == "on_page":
             self._walkthrough_phase = "next_visible"
         button.setVisible(True)
-        # First call positions the button at its landing geometry.
         self._position_walkthrough_overlay()
         try:
             target_geom = button.geometry()
             page_h = max(1, page.height())
-            # Start position: same X, but Y is 25% of the page height
-            # above the landing Y so the drop is short and snappy
-            # rather than falling from the top of the window.
-            drop_distance = max(60, int(page_h * 0.25))
+            drop_distance = max(20, int(page_h * 0.08))
             start_geom = QRect(
                 target_geom.x(),
-                max(0, target_geom.y() - drop_distance),
+                max(0, target_geom.y() + drop_distance),
                 target_geom.width(),
                 target_geom.height(),
             )
             button.setGeometry(start_geom)
-            # OutBounce ease for the ball-bounce settle ("one large
-            # bounce, then smaller and smaller, then still").
             geom_anim = QPropertyAnimation(button, b"geometry", self)
-            geom_anim.setDuration(1100)
+            geom_anim.setDuration(ANIM_MEDIUM_MS)
             geom_anim.setStartValue(start_geom)
             geom_anim.setEndValue(target_geom)
-            geom_anim.setEasingCurve(QEasingCurve.OutBounce)
+            geom_anim.setEasingCurve(QEasingCurve.OutCubic)
             geom_anim.start()
             self._walkthrough_next_fade_anim = geom_anim
-            # Opacity 0 → 1 in parallel; finishes ~half-way through
-            # the bounce so the button is fully visible before it
-            # settles.
             if self._walkthrough_next_fade_effect is not None:
                 self._walkthrough_next_fade_effect.setOpacity(0.0)
                 opacity_anim = QPropertyAnimation(self._walkthrough_next_fade_effect, b"opacity", self)
-                opacity_anim.setDuration(550)
+                opacity_anim.setDuration(ANIM_MEDIUM_MS)
                 opacity_anim.setStartValue(0.0)
                 opacity_anim.setEndValue(1.0)
                 opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -12958,6 +13235,17 @@ Admin elevation
     def _on_walkthrough_next_clicked(self) -> None:
         if not self._walkthrough_active:
             return
+        try:
+            from ... import telemetry as _telemetry
+            _telemetry.track(
+                "walkthrough_next_clicked",
+                {
+                    "step_index": int(self._walkthrough_step_index),
+                    "phase": str(self._walkthrough_phase),
+                },
+            )
+        except Exception:
+            pass
         # Finale-phase "Gesture Tutorial" click: exit + open tutorial.
         if self._walkthrough_phase == "finale":
             self._exit_walkthrough(open_tutorial=True)
@@ -14252,6 +14540,11 @@ Admin elevation
                 if prompt_result == "cancel":
                     self.last_action_label.setText("Last action: start cancelled")
                 return
+            try:
+                from ... import telemetry as _telemetry
+                _telemetry.track("engine_started")
+            except Exception:
+                pass
     
             cameras = self._discovered_cameras if self._discovered_cameras else self.refresh_camera_inventory(update_status=True, notify=False)
             phone_qr_paired = (
@@ -14419,6 +14712,11 @@ Admin elevation
                 self._show_mini_live_viewer()
 
     def stop_engine(self) -> None:
+            try:
+                from ... import telemetry as _telemetry
+                _telemetry.track("engine_stopped")
+            except Exception:
+                pass
             self._hide_mini_live_viewer()
             if self.live_view_window is not None:
                 self.live_view_window.detach_from_worker()
@@ -18349,7 +18647,63 @@ Admin elevation
         if self.tutorial_window is not None:
             self.tutorial_window.close()
         self.overlay.hide_message()
+        # Telemetry: emit session-end with duration, then flush the
+        # background poster so any pending events make it out
+        # before process exit.
+        try:
+            from ... import telemetry as _telemetry
+            session_seconds = max(
+                0.0,
+                time.monotonic() - getattr(self, "_session_started_at", time.monotonic()),
+            )
+            _telemetry.track(
+                "app_session_ended",
+                {"session_seconds": round(session_seconds, 1)},
+            )
+            client = getattr(self, "_telemetry", None)
+            if client is not None:
+                client.shutdown(timeout=2.0)
+        except Exception:
+            pass
         super().closeEvent(event)
+
+    def _init_telemetry(self) -> None:
+        """Construct the anonymous-usage TelemetryClient and stash
+        it on the singleton so call sites in the engine, voice
+        layer, etc. can fire `track()` without each module needing
+        a back-reference to MainWindow. Generates the install
+        UUID on first launch and persists it via save_config.
+
+        No-op end-to-end when no PostHog API key is configured."""
+        try:
+            import uuid as _uuid
+            from ... import telemetry as _telemetry
+            from ... import __version__ as _APP_VERSION
+            if not getattr(self.config, "analytics_install_id", ""):
+                self.config.analytics_install_id = _uuid.uuid4().hex
+                try:
+                    save_config(self.config)
+                except Exception:
+                    pass
+            client = _telemetry.TelemetryClient(
+                install_id=str(self.config.analytics_install_id),
+                app_version=str(_APP_VERSION),
+            )
+            print(
+                f"[telemetry] init: enabled={client.enabled} "
+                f"host={client._host} install={client._install_id[:8]}...",
+                flush=True,
+            )
+            _telemetry.set_client(client)
+            self._telemetry = client
+            self._session_started_at = time.monotonic()
+            _telemetry.track("app_session_started")
+        except Exception as exc:
+            import traceback
+            print(f"[telemetry] init FAILED: {exc!r}", flush=True)
+            traceback.print_exc()
+            self._telemetry = None
+            self._session_started_at = time.monotonic()
 
 
 def _locate_ffmpeg_executable(self, tool_name: str) -> str | None:
@@ -19799,7 +20153,57 @@ def _stop_screen_recording(self) -> bool:
         if self.tutorial_window is not None:
             self.tutorial_window.close()
         self.overlay.hide_message()
+        # Telemetry: emit session-end with duration, then flush the
+        # background poster so any pending events make it out
+        # before process exit.
+        try:
+            from ... import telemetry as _telemetry
+            session_seconds = max(
+                0.0,
+                time.monotonic() - getattr(self, "_session_started_at", time.monotonic()),
+            )
+            _telemetry.track(
+                "app_session_ended",
+                {"session_seconds": round(session_seconds, 1)},
+            )
+            client = getattr(self, "_telemetry", None)
+            if client is not None:
+                client.shutdown(timeout=2.0)
+        except Exception:
+            pass
         super().closeEvent(event)
+
+    def _init_telemetry(self) -> None:
+        """Construct the anonymous-usage TelemetryClient and stash
+        it on the singleton so call sites in the engine, voice
+        layer, etc. can fire `track()` without each module needing
+        a back-reference to MainWindow. Generates the install
+        UUID on first launch and persists it via save_config.
+
+        No-op end-to-end when no PostHog API key is configured
+        (config.POSTHOG_API_KEY empty + TOUCHLESS_TELEMETRY_API_KEY
+        env var unset)."""
+        try:
+            import uuid as _uuid
+            from ... import telemetry as _telemetry
+            from ... import __version__ as _APP_VERSION
+            if not getattr(self.config, "analytics_install_id", ""):
+                self.config.analytics_install_id = _uuid.uuid4().hex
+                try:
+                    save_config(self.config)
+                except Exception:
+                    pass
+            client = _telemetry.TelemetryClient(
+                install_id=str(self.config.analytics_install_id),
+                app_version=str(_APP_VERSION),
+            )
+            _telemetry.set_client(client)
+            self._telemetry = client
+            self._session_started_at = time.monotonic()
+            _telemetry.track("app_session_started")
+        except Exception:
+            self._telemetry = None
+            self._session_started_at = time.monotonic()
 
     def _monitor_dialog_cursor_from_info(self, info) -> tuple[float, float] | None:
         if not isinstance(info, dict):
