@@ -11710,8 +11710,17 @@ Admin elevation
             color: {self.config.text_color};
         }}
         #titleBar {{
-            background-color: {self.config.primary_color};
+            /* Title bar continues the surface color rather than being
+               a saturated brand band. Modern dark-theme apps (Discord,
+               Linear, GitHub Desktop, VS Code) all do this -- the
+               accent color carries brand identity through active
+               states (selected nav, hover, focus, badges) and the
+               chrome stays neutral. The 1px bottom border in a
+               low-alpha accent keeps the title-bar boundary visible
+               so users can still see where the draggable region ends. */
+            background-color: {self.config.surface_color};
             border: none;
+            border-bottom: 1px solid rgba(29, 233, 182, 0.10);
         }}
         #heroLabel {{
             font-size: 68px;
