@@ -11710,19 +11710,16 @@ Admin elevation
             color: {self.config.text_color};
         }}
         #titleBar {{
-            /* Title bar uses a slightly elevated dark navy (#1A2438,
-               slate-800-equivalent) sitting above the surface
-               (#0F172A, slate-900). Same dark-navy family as the
-               body but visibly distinct -- reads as an elevated
-               header strip rather than a flat continuation. This
-               is the slate-800/900 split Vercel / Linear / GitHub
-               all use on dark themes; modern without being a
-               saturated brand band. The 1 px bottom border in
-               20%-alpha accent further separates it from the
-               surface. */
-            background-color: #1A2438;
+            /* Deep indigo (#1B2754) -- noticeably elevated above
+               the slate-900 surface (#0F172A) and tinted enough to
+               feel alive without going back to the saturated brand
+               royal-blue. Same family as the original primary
+               (#0B3D91) but at ~30% brightness so it reads as
+               'cool dark navy header' rather than 'flat blue band'.
+               1 px accent bottom border crisps the separation. */
+            background-color: #1B2754;
             border: none;
-            border-bottom: 1px solid rgba(29, 233, 182, 0.20);
+            border-bottom: 1px solid rgba(29, 233, 182, 0.22);
         }}
         #heroLabel {{
             font-size: 68px;
