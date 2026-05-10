@@ -1113,10 +1113,21 @@ class MouseGestureTracker:
             return 0.001
 
     def _pinch_distance_ratio(self, hand_reading, finger_name: str) -> float:
-        """Distance from thumb tip to the named finger's tip,
+        """3D distance from thumb tip to the named finger's tip,
         divided by hand size. Returns +inf if landmarks aren't
-        available so the caller's threshold check naturally falls
-        through to "not pinching"."""
+        available so the caller's threshold check falls through
+        to 'not pinching'.
+
+        Includes the Z (depth) component because the user's
+        natural pinch with fingers pointing straight up mostly
+        moves the thumb along Z (toward / away from the camera)
+        with little X/Y motion. A 2D-only distance stayed below
+        threshold the whole time -- no transition, no click.
+        Adding Z gives a clear transition: not-pinching is
+        ~0.6-0.9 of hand-size in 3D, pinching is ~0-0.2.
+
+        MediaPipe Z is normalized to roughly the same scale as
+        X/Y per landmark, so we don't need a Z weight."""
         try:
             landmarks = hand_reading.landmarks
             if landmarks is None or len(landmarks) <= self._PINCH_TIP_LMS[finger_name]:
@@ -1125,7 +1136,14 @@ class MouseGestureTracker:
             target = landmarks[self._PINCH_TIP_LMS[finger_name]]
             dx = float(thumb[0]) - float(target[0])
             dy = float(thumb[1]) - float(target[1])
-            tip_dist = math.hypot(dx, dy)
+            # Defensive: some landmark formats omit Z. Default to
+            # 0 so a missing depth reduces gracefully to the old
+            # 2D behaviour rather than raising.
+            try:
+                dz = float(thumb[2]) - float(target[2])
+            except (IndexError, TypeError):
+                dz = 0.0
+            tip_dist = math.sqrt(dx * dx + dy * dy + dz * dz)
             return tip_dist / self._hand_size(landmarks)
         except Exception:
             return float("inf")
