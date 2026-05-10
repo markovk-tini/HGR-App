@@ -620,6 +620,11 @@ class GestureWorker(QObject):
         self._telemetry_last_dynamic_label = "neutral"
         self._telemetry_last_static_label_secondary = "neutral"
         self._telemetry_last_dynamic_label_secondary = "neutral"
+        # Debounce: timestamp of the last `gesture_detected` emit per
+        # (handedness, gesture) tuple. Suppresses recognizer flicker
+        # (rapid pinch→neutral→pinch cycles) that would otherwise
+        # over-count transitions on the secondary hand.
+        self._telemetry_gesture_last_emit: dict[tuple[str, str], float] = {}
         self._low_fps_active = bool(getattr(config, "low_fps_mode", False))
         self._low_fps_below_since: float | None = None
         self._low_fps_above_since: float | None = None
@@ -1096,10 +1101,29 @@ class GestureWorker(QObject):
             if now - last_telemetry.get(label, 0.0) >= 0.25:
                 last_telemetry[label] = now
                 from ...telemetry import track as _track
+                # Derive an `app` bucket from the action_id prefix so the
+                # dashboard can group by surface — chrome_search /
+                # chrome_back / chrome_forward all roll up under
+                # app="chrome", youtube_next / youtube_toggle under
+                # app="youtube", spotify_* under app="spotify", etc.
+                # Without this, the dashboard's only handle on what the
+                # user is doing is the raw action_id string, which is
+                # too noisy to chart over.
+                app_bucket = "other"
+                label_lower = str(label).lower()
+                for prefix in (
+                    "chrome", "youtube", "spotify", "drawing", "mouse",
+                    "voice", "volume", "dictation", "screenshot",
+                    "recording", "clip", "system", "window",
+                ):
+                    if label_lower.startswith(prefix + "_") or label_lower == prefix:
+                        app_bucket = prefix
+                        break
                 _track(
                     "action_fired",
                     {
                         "action_id": str(label),
+                        "app": app_bucket,
                         "in_tutorial": bool(getattr(self, "_tutorial_mode_enabled", False)),
                     },
                 )
@@ -6295,27 +6319,37 @@ class GestureWorker(QObject):
             )
             secondary_pred = getattr(result, "secondary_prediction", None)
 
+            in_drawing = bool(getattr(self, "_drawing_mode_enabled", False))
+            in_mouse = bool(getattr(self, "_mouse_mode_enabled", False))
+            DEBOUNCE = 0.75  # seconds; collapses recognizer flicker
+
             def _emit_transition(pred, kind_attr, last_attr, kind_default, hand_label):
                 if pred is None:
                     return
                 value = str(getattr(pred, kind_attr, "neutral") or "neutral")
                 last = getattr(self, last_attr, "neutral")
                 if value != last and value not in ("", "neutral"):
-                    kind = kind_default
-                    if kind_default == "static" and (
-                        value in _MOTION_COUPLED_STABLE or value.startswith("swipe_")
-                    ):
-                        kind = "dynamic"
-                    from ...telemetry import track as _track
-                    _track(
-                        "gesture_detected",
-                        {
-                            "gesture": value,
-                            "kind": kind,
-                            "handedness": hand_label,
-                            "in_tutorial": in_tutorial,
-                        },
-                    )
+                    debounce_key = (hand_label, value)
+                    last_emit = self._telemetry_gesture_last_emit.get(debounce_key, 0.0)
+                    if now - last_emit >= DEBOUNCE:
+                        self._telemetry_gesture_last_emit[debounce_key] = now
+                        kind = kind_default
+                        if kind_default == "static" and (
+                            value in _MOTION_COUPLED_STABLE or value.startswith("swipe_")
+                        ):
+                            kind = "dynamic"
+                        from ...telemetry import track as _track
+                        _track(
+                            "gesture_detected",
+                            {
+                                "gesture": value,
+                                "kind": kind,
+                                "handedness": hand_label,
+                                "in_tutorial": in_tutorial,
+                                "in_drawing_mode": in_drawing,
+                                "in_mouse_mode": in_mouse,
+                            },
+                        )
                 setattr(self, last_attr, value)
 
             _emit_transition(prediction,    "stable_label",  "_telemetry_last_static_label",            "static",  primary_handedness)
@@ -7846,10 +7880,29 @@ class GestureWorker(QObject):
                         execution = self.voice_processor.execute(result.heard_text, context=context)
                         try:
                             from ...telemetry import track as _track
+                            # Pull intent app + action so the dashboard
+                            # can group "play X on YouTube" / "search X
+                            # on Chrome" by app even though the
+                            # engine-side `target` for both is just
+                            # "chrome" (YouTube goes through the chrome
+                            # router). intent_app_name distinguishes
+                            # them: chrome / youtube / spotify / system /
+                            # file_explorer / outlook / touchless.
+                            intent = getattr(execution, "intent", None)
+                            intent_app = ""
+                            intent_action = ""
+                            if intent is not None:
+                                try:
+                                    intent_app = str(getattr(intent, "app_name", "") or "")
+                                    intent_action = str(getattr(intent, "action", "") or "")
+                                except Exception:
+                                    pass
                             _track(
                                 "voice_command_executed",
                                 {
                                     "target": str(getattr(execution, "target", "") or ""),
+                                    "intent_app": intent_app,
+                                    "intent_action": intent_action,
                                     "success": bool(getattr(execution, "success", False)),
                                     "in_tutorial": bool(self._tutorial_mode_enabled),
                                 },
