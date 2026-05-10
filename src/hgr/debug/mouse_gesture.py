@@ -186,6 +186,14 @@ class MouseGestureTracker:
         self._cursor_anchor_hand: tuple[float, float] | None = None
         self._cursor_anchor_screen: tuple[float, float] | None = None
         self._cursor_reference_active = False
+        # Grace window after motion_pose_ready last returned True.
+        # MediaPipe's per-frame finger-state classification flickers
+        # when the hand is held at certain tilts -- a single misclassified
+        # frame would otherwise drop the cursor, then re-anchor on the
+        # next True frame, producing the "jitters unless tilted slightly
+        # right" symptom. Keeping the cursor live for pose_grace_seconds
+        # (0.22 s, ~6-7 frames at 30 fps) absorbs single-frame flickers.
+        self._motion_ready_grace_until = 0.0
         self._index_state = _FingerSequenceState()
         self._middle_state = _FingerSequenceState()
         self._dragging = False
@@ -353,7 +361,19 @@ class MouseGestureTracker:
         right_click = self._update_right_sequence(hand_reading, now)
         left_release = left_release or left_release_event
 
-        if self._dragging or motion_ready:
+        # Pose grace: MediaPipe's per-frame finger-state classifier
+        # flickers when the hand is held at non-ideal tilts (the
+        # "smooth only when tilted slightly right" bug). Without
+        # grace, a single failed motion_ready frame drops the
+        # cursor, then re-anchors on the next True frame, producing
+        # the jitter the user reported. Refresh the grace deadline
+        # whenever motion_ready is True; treat the cursor as live
+        # for pose_grace_seconds afterwards.
+        if motion_ready:
+            self._motion_ready_grace_until = now + self.pose_grace_seconds
+        cursor_alive = motion_ready or (now < self._motion_ready_grace_until)
+
+        if self._dragging or cursor_alive:
             cursor_position = self._update_cursor(
                 hand_reading,
                 cursor_seed=cursor_seed,
