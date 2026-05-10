@@ -6882,7 +6882,6 @@ class MainWindow(QMainWindow):
                 "list is process-name based."
             ),
         )
-        text_color = str(self.config.text_color or "#E5F6FF")
 
         # Windowed / borderless warning — a yellow-tinted info
         # banner. Above the toggles so users see it before they
@@ -11717,7 +11716,7 @@ Admin elevation
                (#0B3D91) but at ~30% brightness so it reads as
                'cool dark navy header' rather than 'flat blue band'.
                1 px accent bottom border crisps the separation. */
-            background-color: #1B2754;
+            background-color: #1F2D6B;
             border: none;
             border-bottom: 1px solid rgba(29, 233, 182, 0.22);
         }}

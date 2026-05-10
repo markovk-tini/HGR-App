@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
-import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -40,7 +39,12 @@ from ...gesture.rendering.overlay import HAND_CONNECTIONS
 from ...voice.command_processor import VoiceCommandProcessor
 from ...debug.spotify_controller import SpotifyController
 from ...gesture.ui.test_window import SpotifyWheelOverlay
-from ..camera.camera_utils import open_camera_by_index, open_preferred_or_first_available
+# NOTE: camera helpers (open_camera_by_index / open_preferred_or_first_available)
+# used to be imported here, but the tutorial window now reads frames from
+# the parent app's shared GestureWorker — not from a fresh capture handle.
+# The unused imports were cluttering the import list. See line ~1597 for
+# the historical comment about why this window doesn't open its own
+# camera anymore.
 from ...voice.command_processor import VoiceCommandContext
 from ..integration.noop_engine import GestureWorker
 
@@ -256,11 +260,21 @@ class MousePracticeWidget(QWidget):
         self._cursor_position = position
         self.update()
 
+    # Tutorial-only "aim assist": registration radius is wider than
+    # the visible dot (drawn at 22 px in paintEvent). Pinch-driven
+    # cursor is smoothed but still has a small tremor — beginners
+    # would otherwise miss often, get frustrated, and conclude
+    # "mouse mode doesn't work". Learning-mode forgiveness margin
+    # only; live mouse mode hits real Windows controls where the OS
+    # does its own click-target heuristics. Bumped 0.12 -> 0.16
+    # (~33% larger hit zone) per Touchless to-do.md §4.1.6.
+    _TUTORIAL_TARGET_HIT_RADIUS = 0.16
+
     def register_click(self, position: tuple[float, float] | None) -> bool:
         if not self._mode_enabled or position is None or self.completed:
             return False
         target = self._targets[self._active_index]
-        if math.hypot(position[0] - target[0], position[1] - target[1]) <= 0.12:
+        if math.hypot(position[0] - target[0], position[1] - target[1]) <= self._TUTORIAL_TARGET_HIT_RADIUS:
             self._active_index += 1
             if self.completed:
                 self._status_text = "Nice work!"
@@ -1867,7 +1881,6 @@ class TutorialWindow(QDialog):
             self.progress_label.clear()
         else:
             self.practice_stack.hide()
-            voice_target = "Spotify" if self._has_spotify else "YouTube"
             header_map = {
                 "play_pause": "Pause / play with right-hand fist!",
                 "voice_command": self._voice_command_header_text(False),
