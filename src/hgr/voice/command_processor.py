@@ -13,6 +13,7 @@ from ..config.app_config import CONFIG_DIR
 from ..debug.chrome_controller import KNOWN_WEB_TARGETS, ChromeController
 from ..debug.desktop_controller import DesktopAppEntry, DesktopController
 from ..debug.spotify_controller import SpotifyController
+from ..debug.youtube_controller import YouTubeController
 
 
 COMMON_FILLERS = (
@@ -196,6 +197,16 @@ APP_OBJECT_HINTS = (
     "titled",
 )
 SPOTIFY_CONTEXT_PHRASES = ("on spotify", "in spotify", "from spotify", "using spotify")
+YOUTUBE_CONTEXT_PHRASES = (
+    "on youtube",
+    "in youtube",
+    "from youtube",
+    "using youtube",
+    "on you tube",
+    "in you tube",
+    "from you tube",
+    "using you tube",
+)
 CHROME_CONTEXT_PHRASES = ("on chrome", "in chrome", "using chrome", "in the browser", "on the browser")
 WEB_FALLBACK_PREFIXES = (
     ("search", "search up"),
@@ -468,11 +479,17 @@ class VoiceCommandProcessor:
         chrome_controller: ChromeController | None = None,
         spotify_controller: SpotifyController | None = None,
         desktop_controller: DesktopController | None = None,
+        youtube_controller: YouTubeController | None = None,
         profile_store: VoiceProfileStore | None = None,
     ) -> None:
         self.chrome_controller = chrome_controller or ChromeController()
         self.spotify_controller = spotify_controller or SpotifyController()
         self.desktop_controller = desktop_controller or DesktopController()
+        # Voice's YouTube auto-play handler. Distinct instance from
+        # the engine's youtube_controller (which drives playback
+        # gestures) — both operate on the same Chrome window via
+        # separate API surfaces, so sharing isn't required.
+        self.youtube_controller = youtube_controller or YouTubeController()
         self.profile_store = profile_store or VoiceProfileStore()
         self._pending_selection: dict[str, Any] | None = None
 
@@ -485,6 +502,10 @@ class VoiceCommandProcessor:
             self._parse_clip(normalized, raw_text=spoken_text, context=context),
             self._parse_touchless_app(normalized, raw_text=spoken_text, context=context),
             self._parse_spotify(normalized, raw_text=spoken_text, context=context),
+            # YouTube parser runs BEFORE chrome so "play X on youtube"
+            # is handled as a YouTube play (search + open) rather than
+            # being intercepted by the chrome web-target heuristic.
+            self._parse_youtube(normalized, raw_text=spoken_text, context=context),
             self._parse_chrome(normalized, raw_text=spoken_text, context=context),
             self._parse_settings(normalized, raw_text=spoken_text, context=context),
             self._parse_close_window(normalized, raw_text=spoken_text, context=context),
@@ -755,6 +776,8 @@ class VoiceCommandProcessor:
             result = self._execute_spotify(intent)
         elif intent.app_name == "chrome":
             result = self._execute_chrome(intent)
+        elif intent.app_name == "youtube":
+            result = self._execute_youtube(intent)
         elif intent.app_name == "settings":
             result = self._execute_settings(intent)
         elif intent.app_name == "file_explorer":
@@ -922,6 +945,8 @@ class VoiceCommandProcessor:
             return True
         if intent.app_name == "spotify" and intent.confidence >= 0.88:
             return True
+        if intent.app_name == "youtube" and intent.confidence >= 0.84:
+            return True
         return intent.confidence >= 0.98 and intent.app_name != "system"
 
     def _display_text_for_intent(self, intent: ParsedVoiceCommand) -> str:
@@ -941,6 +966,10 @@ class VoiceCommandProcessor:
                 return "repeat on spotify"
             if intent.action in {"pause", "resume"}:
                 return f"{intent.action} spotify"
+        elif intent.app_name == "youtube":
+            if intent.action == "play" and query:
+                return f"play {query} on youtube"
+            return "youtube"
         elif intent.app_name == "chrome":
             if intent.action in {"open", "search"} and query:
                 return f"search {query} on chrome"
@@ -1018,6 +1047,113 @@ class VoiceCommandProcessor:
             heard_text=intent.raw_text,
             control_text=self.spotify_controller.message,
             info_text=info_text,
+        )
+
+    def _execute_youtube(self, intent: ParsedVoiceCommand) -> VoiceExecutionResult:
+        """Open YouTube search results for the query in Chrome AND
+        auto-click the first video card on the resulting page.
+
+        Two-stage execution:
+          1. `chrome_controller.search_youtube(query)` returns
+             immediately after dispatching the URL — synchronous
+             from the voice pipeline's perspective so we can return
+             a fast "OK heard" response to the user.
+          2. `youtube_controller.play_first_search_result(query)`
+             runs on a background thread because it polls for the
+             freshly-opened tab and walks the page's accessibility
+             tree (~1.5–4 s of waiting). Putting this on the voice
+             pipeline thread would block the next utterance.
+
+        Failure paths degrade gracefully: if step 2 can't find the
+        tab or the first link, the user is still on the search-
+        results page (filtered to videos) and one click away from
+        playback. Same fallback as the pre-auto-play behaviour."""
+        query = (intent.query or "").strip()
+        success = False
+        message = "youtube search query missing"
+        # Helper: telemetry fire-and-forget. Lazy import keeps the
+        # voice processor importable in environments / tests where
+        # the telemetry module isn't on the path.
+        def _fire(event: str, props: dict) -> None:
+            try:
+                from ..telemetry import track as _track
+                _track(event, props)
+            except Exception:
+                pass
+
+        if query:
+            success = self.chrome_controller.search_youtube(query)
+            message = self.chrome_controller.message
+            # Stage-1 telemetry: the search-page open is the user's
+            # first observable signal that the voice command worked.
+            # Fires whether the open succeeded or not so the dashboard
+            # can chart conversion (intent -> search opened -> auto-
+            # play started -> video actually playing).
+            _fire(
+                "youtube_search_opened",
+                {
+                    "success": bool(success),
+                    "via": "voice",
+                },
+            )
+            if success:
+                # Stage 2 — UIAutomation auto-click on a worker.
+                # Capture the controller reference so the closure
+                # doesn't depend on `self` after the executor returns.
+                yt = self.youtube_controller
+                target_query = query
+
+                def _autoplay_worker() -> None:
+                    # Surface ANY exception from the worker — the
+                    # previous silent-pass version made it impossible
+                    # to tell whether the worker crashed (rare but
+                    # possible) vs. just landed in a non-success
+                    # path. The autoplay path's diagnostics live on
+                    # stderr behind a [yt-autoplay] tag so they're
+                    # easy to grep alongside the rest of the engine
+                    # log.
+                    import sys as _sys
+                    import traceback as _tb
+                    autoplay_ok = False
+                    autoplay_error = ""
+                    try:
+                        autoplay_ok = bool(yt.play_first_search_result(target_query))
+                    except Exception as exc:
+                        autoplay_error = f"{type(exc).__name__}: {exc}"
+                        try:
+                            _sys.stderr.write(
+                                f"[yt-autoplay] worker crashed: {autoplay_error}\n"
+                            )
+                            _tb.print_exc(file=_sys.stderr)
+                            _sys.stderr.flush()
+                        except Exception:
+                            pass
+                    # Stage-2 telemetry: the auto-play click is the
+                    # 'YouTube is actually playing' signal. Fires for
+                    # both success and failure so the dashboard can
+                    # see the full funnel (search opened -> autoplay
+                    # attempted -> autoplay succeeded vs. fell back
+                    # to the search-results page).
+                    _fire(
+                        "youtube_autoplay",
+                        {
+                            "success": autoplay_ok,
+                            "error": autoplay_error,
+                            "via": "voice",
+                        },
+                    )
+
+                threading.Thread(
+                    target=_autoplay_worker,
+                    name="youtube-autoplay",
+                    daemon=True,
+                ).start()
+        return VoiceExecutionResult(
+            success=success,
+            target="youtube",
+            heard_text=intent.raw_text,
+            control_text=message,
+            info_text=f"YouTube: {query}" if query else message,
         )
 
     def _execute_chrome(self, intent: ParsedVoiceCommand) -> VoiceExecutionResult:
@@ -1378,6 +1514,58 @@ class VoiceCommandProcessor:
             query=query,
             matched_alias=matched_alias,
             slots={"preferred_types": preferred_types},
+        )
+
+    def _parse_youtube(
+        self,
+        text: str,
+        *,
+        raw_text: str,
+        context: VoiceCommandContext | None,
+    ) -> ParsedVoiceCommand | None:
+        """Mirror of `_parse_spotify` for the YouTube/Chrome surface.
+
+        Recognises "play <query> on youtube" and the related play-
+        verb variants. The execute step opens YouTube search results
+        for the query in Chrome (filtered to videos only) so the
+        first card on the page is the playable result the user
+        wants. Without this parser, "play X on youtube" used to fall
+        through every other parser and land on "command not
+        understood".
+        """
+        youtube_context = (
+            self._contains_any(text, YOUTUBE_CONTEXT_PHRASES)
+            or (context is not None and context.preferred_app == "youtube")
+        )
+        if not youtube_context:
+            return None
+
+        has_play_phrase = self._contains_any(text, SPOTIFY_PLAY_PHRASES)
+        if not has_play_phrase:
+            return None
+
+        query = self._cleanup_query(
+            text,
+            app_name="youtube",
+            extra_phrases=SPOTIFY_PLAY_PHRASES + YOUTUBE_CONTEXT_PHRASES + ("on youtube", "you tube"),
+            trim_edge_noise=True,
+        )
+        # Strip any lingering "video"/"music"/"song" tail that the
+        # generic music-tail trimmer would catch — keeps the search
+        # query tight ("broken boulevard by green day video" →
+        # "broken boulevard by green day").
+        query = self._strip_music_tail(query)
+        if not query:
+            return None
+
+        return ParsedVoiceCommand(
+            raw_text=raw_text,
+            normalized_text=text,
+            app_name="youtube",
+            action="play",
+            confidence=0.86,
+            query=query,
+            matched_alias=None,
         )
 
     def _parse_chrome(
