@@ -688,17 +688,16 @@ class TutorialWindow(QDialog):
         # or the OS media keys (which YouTube + every other media
         # app respect via Windows Media integration).
         self._has_spotify = self._detect_spotify_installed()
-        # Five-step practice flow with a coherent narrative arc:
-        # mouse -> voice opens & plays media -> volume adjusts the
-        # music -> pause/play -> swipes skip tracks. Order matters:
-        # everything after step 2 has audio playing, so the gestures
-        # land on something the user can hear / see change.
+        # Five-step practice flow. Swipes come first so users learn
+        # left/right-swipe early — the same gesture the tutorial uses
+        # to advance / go back between pages — then the audio-driven
+        # steps follow once the user is fluent with navigation.
         self._practice_steps = (
-            _StepDefinition("mouse_mode", "Part 1/5: Mouse Control", "", ""),
-            _StepDefinition("voice_command", "Part 2/5: Voice Command", "", ""),
-            _StepDefinition("volume", "Part 3/5: Volume Control", "", ""),
-            _StepDefinition("play_pause", "Part 4/5: Pause/Play", "", ""),
-            _StepDefinition("swipes", "Part 5/5: Skip Tracks (Swipes)", "", ""),
+            _StepDefinition("swipes", "Part 1/5: Swipe Gestures", "", ""),
+            _StepDefinition("mouse_mode", "Part 2/5: Mouse Control", "", ""),
+            _StepDefinition("voice_command", "Part 3/5: Voice Command", "", ""),
+            _StepDefinition("volume", "Part 4/5: Volume Control", "", ""),
+            _StepDefinition("play_pause", "Part 5/5: Pause/Play", "", ""),
         )
         self._step_index = 0
         self._completed_steps: set[int] = set()
@@ -774,8 +773,12 @@ class TutorialWindow(QDialog):
     def _build_ui(self) -> None:
         self.setWindowTitle("Touchless Tutorial")
         self.setModal(False)
-        self.resize(1180, 820)
-        self.setMinimumSize(1040, 760)
+        # Match the main-window starting size (1020x740) so the
+        # tutorial doesn't pop up visibly bigger than the app it
+        # launched from. Min size is conservative so the camera
+        # preview + step navigator both stay visible.
+        self.resize(1020, 720)
+        self.setMinimumSize(880, 640)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -892,7 +895,26 @@ class TutorialWindow(QDialog):
         self.instruction_box.setObjectName("tutorialInstructionBox")
         self.instruction_box.setWordWrap(True)
         self.instruction_box.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        info_layout.addWidget(self.instruction_box)
+        # Wrap the instruction box in a scroll area so when the
+        # window is short and the step has a long list of steps, the
+        # text scrolls inside its card instead of pushing other UI
+        # off-screen. ScrollBarAsNeeded means the scrollbar is
+        # invisible whenever the content fits.
+        self.instruction_scroll = QScrollArea()
+        self.instruction_scroll.setObjectName("tutorialInstructionScroll")
+        self.instruction_scroll.setWidgetResizable(True)
+        self.instruction_scroll.setFrameShape(QFrame.NoFrame)
+        self.instruction_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.instruction_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.instruction_scroll.setStyleSheet(
+            "QScrollArea#tutorialInstructionScroll, "
+            "QScrollArea#tutorialInstructionScroll > QWidget, "
+            "QScrollArea#tutorialInstructionScroll QWidget#qt_scrollarea_viewport "
+            "{ background: transparent; border: none; }"
+        )
+        self.instruction_scroll.viewport().setStyleSheet("background: transparent;")
+        self.instruction_scroll.setWidget(self.instruction_box)
+        info_layout.addWidget(self.instruction_scroll, 1)
 
         example_row = QHBoxLayout()
         example_row.setContentsMargins(0, 0, 0, 0)
@@ -1139,25 +1161,31 @@ class TutorialWindow(QDialog):
         cursor_seen: bool | None = None,
         completed_targets: int | None = None,
     ) -> str:
+        # Progressive header for the mouse step. Each state corresponds
+        # to the next action the user should take, so reading the text
+        # alone walks them through the whole flow without needing the
+        # side panel.
         seen = self._mouse_cursor_seen if cursor_seen is None else bool(cursor_seen)
         done = self.mouse_widget.completed_targets if completed_targets is None else int(completed_targets)
+        if self._step_completed:
+            return "Swipe right to continue!"
         if done >= 4 or self._mouse_stage == "disable":
-            return "Now toggle mouse mode off with left hand 3 again"
+            return "Turn off mouse mode by doing left hand three!"
         if done >= 3:
-            return "One more left, click on dot 4"
+            return "Now click on target 4"
         if done >= 2:
-            return "Now dot 3"
+            return "Now click on target 3"
         if done >= 1:
-            return "Move cursor to dot 2 then pinch thumb-to-index to click again"
+            return "Now click on target 2"
         if mode_enabled:
             if seen:
                 return (
-                    "Hover over dot one. Then PINCH your thumb tip to your "
-                    "index tip (and release) to left-click"
+                    "Now left click on target 1 by pinching index finger "
+                    "and thumb together briefly"
                 )
             return (
-                "Now with your right hand opened and palm facing towards the "
-                "monitor control the cursor with your movements"
+                "With right hand open facing towards the screen, "
+                "move the cursor around"
             )
         return "Toggle mouse mode with left hand three"
 
@@ -1302,6 +1330,15 @@ class TutorialWindow(QDialog):
         dialog.activateWindow()
 
     def _build_completion_guide_page(self) -> QWidget:
+        """End-of-tutorial page. Title + a 'Quick Tips' card with
+        discoverability hints the user wouldn't otherwise stumble
+        across (where Connect Spotify lives, how to pause gestures
+        without quitting, etc.), then the full gesture-guide
+        scroll area below for reference. Renamed from a plain
+        'Tutorial Completed' confirmation to a tips page because
+        first-pass users land here once and the gesture grid
+        alone wasn't surfacing the useful 'oh, that's where THAT
+        setting lives' moments."""
         from .main_window import build_gesture_guide_scroll_area
 
         page = QWidget()
@@ -1310,19 +1347,104 @@ class TutorialWindow(QDialog):
         page_layout.setContentsMargins(18, 18, 18, 18)
         page_layout.setSpacing(14)
 
-        self.completion_title_label = QLabel("Tutorial Completed!")
+        self.completion_title_label = QLabel("Tutorial Completed — Quick Tips")
         self.completion_title_label.setObjectName("tutorialStepTitle")
         page_layout.addWidget(self.completion_title_label)
 
         self.completion_disclaimer_label = QLabel(
-            "This gesture guide can also be found in Settings — open it there any time to view every gesture. "
-            "Swipe right once you think you are ready to start!"
+            "Some things that aren't obvious from the UI. The full "
+            "gesture reference is below; swipe right when you're ready."
         )
         self.completion_disclaimer_label.setObjectName("tutorialInstructionBox")
         self.completion_disclaimer_label.setWordWrap(True)
         self.completion_disclaimer_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         page_layout.addWidget(self.completion_disclaimer_label)
 
+        # ---- Tips card -----------------------------------------
+        tips = [
+            (
+                "Pause gestures without quitting",
+                "Open the Live View widget (the small camera thumbnail) and "
+                "toggle gestures off. The app keeps running and you can flip "
+                "them back on the same way.",
+            ),
+            (
+                "Connect Spotify",
+                "Settings → General → Connect Spotify. After authorising once, "
+                "voice and gesture controls for Spotify just work.",
+            ),
+            (
+                "Use your phone as the camera",
+                "Settings → Camera → scan the QR code with your phone. Streams "
+                "video (and optionally the phone microphone) over your local "
+                "Wi-Fi.",
+            ),
+            (
+                "Save a clip of what just happened",
+                "Hold left-hand 'one' to start the voice listener, then say "
+                "“clip that” — saves the last minute to your Clips folder.",
+            ),
+            (
+                "Auto-hide overlays while gaming",
+                "Settings → General → Overlay → enable Gaming Overlay. Touchless "
+                "auto-suppresses pop-ups when a known game is detected. Set "
+                "games to Windowed Fullscreen / Borderless so the overlay can "
+                "appear over them.",
+            ),
+            (
+                "If gestures aren't detecting reliably",
+                "Settings → General → System Modes → try Lite Mode or Low FPS "
+                "Mode. They loosen tracking thresholds for slower hardware.",
+            ),
+            (
+                "Adjust mouse sensitivity",
+                "Settings → General → Mouse. Smaller control box = a tiny hand "
+                "movement covers the whole screen (high sensitivity); larger "
+                "box = more precision.",
+            ),
+            (
+                "Replay this tutorial anytime",
+                "Settings → Tutorial. Or record your own gesture: Settings → "
+                "Custom Gesture (Beta).",
+            ),
+        ]
+        tips_card = QFrame()
+        tips_card.setObjectName("tutorialCard")
+        tips_card_layout = QVBoxLayout(tips_card)
+        tips_card_layout.setContentsMargins(14, 14, 14, 14)
+        tips_card_layout.setSpacing(12)
+        accent = self.config.accent_color or "#1DE9B6"
+        text_color = self.config.text_color or "#E5F6FF"
+        for headline, body in tips:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            bullet = QLabel("•")
+            bullet.setStyleSheet(
+                f"color: {accent}; font-size: 18px; font-weight: 800;"
+            )
+            bullet.setFixedWidth(14)
+            bullet.setAlignment(Qt.AlignTop)
+            row.addWidget(bullet, 0, Qt.AlignTop)
+            text_col = QVBoxLayout()
+            text_col.setContentsMargins(0, 0, 0, 0)
+            text_col.setSpacing(2)
+            head_label = QLabel(headline)
+            head_label.setStyleSheet(
+                f"color: {text_color}; font-size: 14px; font-weight: 700;"
+            )
+            body_label = QLabel(body)
+            body_label.setWordWrap(True)
+            body_label.setStyleSheet(
+                f"color: {text_color}; font-size: 13px; line-height: 150%;"
+            )
+            text_col.addWidget(head_label)
+            text_col.addWidget(body_label)
+            row.addLayout(text_col, 1)
+            tips_card_layout.addLayout(row)
+        page_layout.addWidget(tips_card)
+
+        # ---- Gesture reference (kept as-is) --------------------
         guide_card = QFrame()
         guide_card.setObjectName("tutorialCard")
         guide_card_layout = QVBoxLayout(guide_card)
@@ -1777,29 +1899,34 @@ class TutorialWindow(QDialog):
         # etc. respect via Windows Media integration).
         media_target = "Spotify" if self._has_spotify else "YouTube"
         media_app_phrase = "Spotify" if self._has_spotify else "your YouTube video"
+        # Lowercase phrase the user actually speaks, e.g. "spotify"
+        # or "youtube" — kept distinct from media_target which is
+        # used as a proper noun ("Recommended for Spotify users…").
+        media_voice_phrase = "spotify" if self._has_spotify else "youtube"
         what_is_map = {
             "mouse_mode": "Move the cursor and click with your right hand. Toggle on/off with your left.",
-            "voice_command": f"Speak a command like \u201cplay [a song] on {media_target}\u201d.",
+            "voice_command": f"Speak a command like \u201cplay [a song] on {media_voice_phrase}\u201d.",
             "volume": "Adjust system volume with a hand pose. Pinch in to mute / unmute.",
             "play_pause": "Pause or play whatever's playing on your computer.",
             "swipes": "Skip to the next or previous track.",
         }
         instruction_map = {
             "mouse_mode": (
-                "How to do it:\n"
-                "\u2022 Turn ON / OFF \u2014 LEFT hand, three fingers up (index + middle + ring), thumb across, pinky curled. Hold until the \u2018Mouse Mode\u2019 pill appears.\n"
-                "\u2022 Move cursor \u2014 RIGHT hand, open palm. Move within the small red box; the dot mirrors your real cursor.\n"
-                "\u2022 Left-click \u2014 RIGHT hand: PINCH thumb tip to index tip, then release. Hold the pinch to click-and-drag.\n"
-                "\u2022 Right-click \u2014 RIGHT hand: PINCH thumb tip to middle tip, then release.\n"
-                "\u2022 Keep the other 3 fingers relaxed (open or partial curl) \u2014 a fist won\u2019t register as a pinch.\n"
-                "\u2022 Scroll \u2014 RIGHT hand: index + middle extended and TOUCHING together (ring + pinky curled). Hold briefly to set a NEUTRAL anchor at your current hand height; then lift up to scroll up (further = faster) or drop down to scroll down (further = faster). Return near the anchor to slow and stop.\n\n"
-                "To complete: turn on, click every tutorial target, turn off."
+                "Steps:\n"
+                "1. Toggle mouse mode ON \u2014 LEFT hand, three fingers up (index + middle + ring), thumb across, pinky curled.\n"
+                "2. Move the cursor \u2014 RIGHT hand open, palm to the camera. The cursor mirrors your hand inside the red box.\n"
+                "3. Left-click \u2014 pinch your RIGHT thumb tip to your index tip, then release.\n"
+                "4. Click each of the 4 tutorial targets in order.\n"
+                "5. Toggle mouse mode OFF \u2014 LEFT hand three fingers again.\n"
+                "6. Swipe right to continue.\n\n"
+                "Bonus: right-click = thumb-to-middle. Scroll = index + middle touching; hold briefly to set an anchor, then lift up to scroll up or drop down to scroll down."
             ),
             "voice_command": (
-                "How to do it:\n"
-                "\u2022 LEFT hand, only the index finger up (others curled, thumb tucked).\n"
-                "\u2022 Hold until the microphone appears at the bottom of your screen — that shows Touchless is listening.\n"
-                f"\u2022 Speak clearly: \u201cplay [pick a song or video] on {media_target}\u201d.\n\n"
+                "Steps:\n"
+                "1. LEFT hand, only the index finger up (others curled, thumb tucked).\n"
+                "2. Hold until the microphone appears at the bottom of the screen — that means Touchless is listening.\n"
+                f"3. Speak clearly: \u201cplay [a song] on {media_voice_phrase}\u201d.\n"
+                "4. Swipe right to continue once it starts playing.\n\n"
                 + (
                     "To complete: trigger the listener and play something on Spotify."
                     if self._has_spotify else
@@ -1867,13 +1994,13 @@ class TutorialWindow(QDialog):
             if self._step_completed:
                 self.mouse_widget.mark_all_targets_completed()
             if self._step_completed:
-                footer_text = "Completed! Swipe right to move on!"
+                footer_text = "Swipe right to continue!"
             elif self._mouse_stage == "enable":
-                footer_text = "Mouse mode off. Turn it on to begin."
+                footer_text = "Toggle mouse mode on to begin."
             elif self._mouse_stage == "practice":
-                footer_text = "Mouse mode on. Clear all tutorial targets."
+                footer_text = "Click each of the four targets."
             else:
-                footer_text = "Targets cleared. Turn mouse mode off to finish."
+                footer_text = "All targets done. Toggle mouse mode off."
             self._set_camera_step_labels(
                 header=self._mouse_mode_header_text(mode_enabled=False),
                 footer=footer_text,
