@@ -849,22 +849,35 @@ class StartTutorialDialog(QDialog):
                 color: {self.config.text_color};
                 font-size: 14px;
             }}
+            /* Unified app-wide checkbox style: green box always
+               visible, white checkmark on check. Mirrors
+               _general_checkbox_qss(). */
             QCheckBox#startDialogCheckbox {{
                 color: {self.config.text_color};
                 spacing: 10px;
                 font-size: 14px;
+                background: transparent;
             }}
             QCheckBox#startDialogCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
+                width: 18px;
+                height: 18px;
                 border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
+                border: 2px solid {self.config.accent_color};
+                background-color: transparent;
+            }}
+            QCheckBox#startDialogCheckbox::indicator:hover {{
+                border: 2px solid #29F0C1;
+                background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#startDialogCheckbox::indicator:checked {{
-                background: rgba(255,255,255,0.05);
-                border: 1.5px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' stroke='%23FFFFFF' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                background-color: {self.config.accent_color};
+                border: 2px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+            }}
+            QCheckBox#startDialogCheckbox::indicator:checked:hover {{
+                background-color: #29F0C1;
+                border: 2px solid #29F0C1;
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             QPushButton#startDialogButton {{
                 background-color: {self.config.primary_color};
@@ -1047,22 +1060,35 @@ class WalkthroughStartDialog(QDialog):
                 color: {self.config.text_color};
                 font-size: 14px;
             }}
+            /* Unified app-wide checkbox style: green box always
+               visible, white checkmark on check. Mirrors
+               _general_checkbox_qss(). */
             QCheckBox#startDialogCheckbox {{
                 color: {self.config.text_color};
                 spacing: 10px;
                 font-size: 14px;
+                background: transparent;
             }}
             QCheckBox#startDialogCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
+                width: 18px;
+                height: 18px;
                 border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
+                border: 2px solid {self.config.accent_color};
+                background-color: transparent;
+            }}
+            QCheckBox#startDialogCheckbox::indicator:hover {{
+                border: 2px solid #29F0C1;
+                background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#startDialogCheckbox::indicator:checked {{
-                background: rgba(255,255,255,0.05);
-                border: 1.5px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' stroke='%23FFFFFF' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                background-color: {self.config.accent_color};
+                border: 2px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+            }}
+            QCheckBox#startDialogCheckbox::indicator:checked:hover {{
+                background-color: #29F0C1;
+                border: 2px solid #29F0C1;
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             QPushButton#startDialogButton {{
                 background-color: {self.config.primary_color};
@@ -1230,22 +1256,35 @@ class CameraSelectionDialog(QDialog):
                 padding: 10px 12px;
                 min-height: 22px;
             }}
+            /* Unified app-wide checkbox style: green box always
+               visible, white checkmark on check. Mirrors
+               _general_checkbox_qss(). */
             QCheckBox#cameraDialogCheckbox {{
                 color: {self.config.text_color};
                 spacing: 10px;
                 font-size: 14px;
+                background: transparent;
             }}
             QCheckBox#cameraDialogCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
+                width: 18px;
+                height: 18px;
                 border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
+                border: 2px solid {self.config.accent_color};
+                background-color: transparent;
+            }}
+            QCheckBox#cameraDialogCheckbox::indicator:hover {{
+                border: 2px solid #29F0C1;
+                background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#cameraDialogCheckbox::indicator:checked {{
-                background: rgba(255,255,255,0.05);
-                border: 1.5px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' stroke='%23FFFFFF' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                background-color: {self.config.accent_color};
+                border: 2px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+            }}
+            QCheckBox#cameraDialogCheckbox::indicator:checked:hover {{
+                background-color: #29F0C1;
+                border: 2px solid #29F0C1;
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             QPushButton#cameraDialogButton {{
                 background-color: {self.config.primary_color};
@@ -6338,30 +6377,36 @@ class MainWindow(QMainWindow):
         self._repolish_widget(button)
 
     def _settings_save_button_pending_stylesheet(self) -> str:
+        # Pending-state inline override (mirrors the global QSS
+        # rule for [pendingSave="true"]; the inline copy exists as
+        # a Qt repaint workaround on some builds where the
+        # attribute selector didn't reliably trigger a repaint).
+        # Matches the global look: 2 px full-strength accent
+        # border, primary-blue fill, full text colour, font-weight
+        # 900 -- the "lit up" look from the user's reference.
         primary = str(self.config.primary_color)
         text_color = str(self.config.text_color)
         accent = str(self.config.accent_color or "#1DE9B6")
-        accent_outline_strong = _with_alpha(QColor(accent), 230).name(QColor.HexArgb)
         hover_blue = _with_alpha(QColor(primary).lighter(118), 235).name(QColor.HexArgb)
         pressed_blue = _with_alpha(QColor(primary).lighter(125), 245).name(QColor.HexArgb)
         return (
             f"QPushButton#settingsSaveButton {{"
             f"  background-color: {primary};"
             f"  color: {text_color};"
-            f"  border: 1px solid {accent_outline_strong};"
+            f"  border: 2px solid {accent};"
             f"  border-radius: 14px;"
-            f"  padding: 12px 18px;"
-            f"  font-weight: 800;"
+            f"  padding: 11px 17px;"
+            f"  font-weight: 900;"
             f"  min-width: 110px;"
             f"}}"
             f"QPushButton#settingsSaveButton:hover {{"
             f"  background-color: {hover_blue};"
-            f"  border: 1px solid {accent_outline_strong};"
+            f"  border: 2px solid {accent};"
             f"  color: {text_color};"
             f"}}"
             f"QPushButton#settingsSaveButton:pressed {{"
             f"  background-color: {pressed_blue};"
-            f"  border: 1px solid {accent_outline_strong};"
+            f"  border: 2px solid {accent};"
             f"  color: {text_color};"
             f"}}"
         )
@@ -6941,16 +6986,19 @@ class MainWindow(QMainWindow):
             button = getattr(self, attr, None)
             if button is None:
                 continue
-            button.setEnabled(dirty)
-            button.setProperty("pendingSave", dirty)
-            # Property changes don't auto-restyle in Qt — re-polish so
-            # the QSS rule keyed on `[pendingSave="true"]` actually
-            # repaints.
-            try:
-                button.style().unpolish(button)
-                button.style().polish(button)
-            except Exception:
-                pass
+            # Stay clickable but no-op when nothing is pending --
+            # _save_general_changes already short-circuits on
+            # empty _general_pending. Keeps the button in its
+            # muted "nothing to do" neutral state rather than
+            # going to the grayed-out :disabled style; matches
+            # the user's reference screenshot exactly.
+            button.setEnabled(True)
+            # Route through the shared helper so General's save
+            # buttons get the same inline-stylesheet workaround
+            # other panels use -- avoids the Qt repaint quirk
+            # where the property selector alone doesn't reliably
+            # repaint on some Windows builds.
+            self._set_settings_save_button_pending(button, dirty)
 
     def _save_general_changes(self) -> None:
         """Apply every pending change to self.config in one shot,
@@ -9179,26 +9227,46 @@ class MainWindow(QMainWindow):
         box_layout.setContentsMargins(16, 16, 16, 16)
         box_layout.setSpacing(8)
 
-        # Small checkbox stylesheet shared across this panel.
+        # Camera-panel checkbox style: matches the unified app-wide
+        # green-box-with-white-checkmark look (see
+        # _general_checkbox_qss). Templated by name so multiple
+        # camera-panel checkboxes can share the same look while
+        # keeping QSS scoped per widget.
         checkbox_style_tpl = (
             "QCheckBox#{name} {{"
             "  color: {text};"
             "  spacing: 10px;"
             "  font-size: 13px;"
+            "  background: transparent;"
             "}}"
             "QCheckBox#{name}:disabled {{"
             "  color: rgba(127,127,127,0.55);"
             "}}"
             "QCheckBox#{name}::indicator {{"
-            "  width: 16px;"
-            "  height: 16px;"
+            "  width: 18px;"
+            "  height: 18px;"
             "  border-radius: 4px;"
-            "  border: 1px solid rgba(127,127,127,0.55);"
-            "  background: rgba(127,127,127,0.10);"
+            "  border: 2px solid {accent};"
+            "  background-color: transparent;"
+            "}}"
+            "QCheckBox#{name}::indicator:hover {{"
+            "  border: 2px solid #29F0C1;"
+            "  background-color: rgba(29,233,182,0.18);"
             "}}"
             "QCheckBox#{name}::indicator:checked {{"
-            "  background: {accent};"
-            "  border: 1px solid {accent};"
+            "  background-color: {accent};"
+            "  border: 2px solid {accent};"
+            "  image: url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>\");"
+            "}}"
+            "QCheckBox#{name}::indicator:checked:hover {{"
+            "  background-color: #29F0C1;"
+            "  border: 2px solid #29F0C1;"
+            "  image: url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>\");"
+            "}}"
+            "QCheckBox#{name}::indicator:disabled {{"
+            "  border: 2px solid rgba(127,127,127,0.45);"
+            "  background-color: rgba(127,127,127,0.12);"
+            "  image: none;"
             "}}"
         )
         section_style = (
@@ -10203,23 +10271,36 @@ class MainWindow(QMainWindow):
 
         self.use_phone_mic_checkbox = QCheckBox("Use phone microphone (QR) as source")
         self.use_phone_mic_checkbox.setObjectName("usePhoneMicCheckbox")
+        # Unified app-wide checkbox style: green box always visible,
+        # white checkmark on check.
         self.use_phone_mic_checkbox.setStyleSheet(
             f"""
             QCheckBox#usePhoneMicCheckbox {{
                 color: {self.config.text_color};
                 spacing: 10px;
                 font-size: 13px;
+                background: transparent;
             }}
             QCheckBox#usePhoneMicCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
+                width: 18px;
+                height: 18px;
                 border-radius: 4px;
-                border: 1px solid rgba(255,255,255,0.35);
-                background: rgba(255,255,255,0.05);
+                border: 2px solid {self.config.accent_color};
+                background-color: transparent;
+            }}
+            QCheckBox#usePhoneMicCheckbox::indicator:hover {{
+                border: 2px solid #29F0C1;
+                background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#usePhoneMicCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
+                background-color: {self.config.accent_color};
+                border: 2px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+            }}
+            QCheckBox#usePhoneMicCheckbox::indicator:checked:hover {{
+                background-color: #29F0C1;
+                border: 2px solid #29F0C1;
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             """
         )
@@ -11049,47 +11130,10 @@ class MainWindow(QMainWindow):
         analytics_layout.addWidget(analytics_body)
 
         self._analytics_toggle = QCheckBox("Send anonymous usage data")
-        # Touchless-themed checkbox: visible box (white outline →
-        # teal fill on check) with an explicit WHITE checkmark
-        # rendered from an inline SVG. PySide6 QSS supports data:
-        # URIs for image:, so the checkmark ships embedded — no
-        # external resource file needed.
-        _CHECK_SVG = (
-            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3.5 8.5 l3 3 l6-7' fill='none' stroke='white' "
-            "stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/>"
-            "</svg>"
-        )
-        import base64 as _b64
-        _check_uri = (
-            "data:image/svg+xml;base64,"
-            + _b64.b64encode(_CHECK_SVG.encode("utf-8")).decode("ascii")
-        )
-        self._analytics_toggle.setStyleSheet(
-            "QCheckBox {"
-            f"  color: {self.config.text_color};"
-            "  background: transparent;"
-            f"  font-size: {FONT_BODY}px;"
-            f"  font-weight: {WEIGHT_REGULAR};"
-            "  spacing: 10px;"
-            "  padding: 4px 0;"
-            "}"
-            "QCheckBox::indicator {"
-            "  width: 20px;"
-            "  height: 20px;"
-            "  border: 2px solid #FFFFFF;"
-            "  border-radius: 4px;"
-            "  background: rgba(255,255,255,0.04);"
-            "}"
-            "QCheckBox::indicator:hover {"
-            "  border: 2px solid #1DE9B6;"
-            "}"
-            "QCheckBox::indicator:checked {"
-            "  background: #1DE9B6;"
-            "  border: 2px solid #1DE9B6;"
-            f"  image: url(\"{_check_uri}\");"
-            "}"
-        )
+        # Use the unified app-wide checkbox style (green box, white
+        # checkmark when checked) so this control matches every
+        # other checkbox in the app.
+        self._analytics_toggle.setStyleSheet(self._general_checkbox_qss())
         self._analytics_toggle.setChecked(
             bool(getattr(self.config, "analytics_enabled", False))
         )
@@ -12495,15 +12539,21 @@ Admin elevation
            without the prefix, every save button would also default
            to primary-blue and the pending-state colour change would
            be invisible. */
+        /* Save Changes neutral state — muted "nothing to do" look:
+           subtle 1px border, dim text (45 % alpha), low-contrast
+           fill. Reads as inactive without being grayed-out-disabled;
+           the button IS clickable but pressing it is a no-op when
+           nothing's pending, so it shouldn't shout for attention. */
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton {{
             background-color: {settings_button_bg};
-            color: {self.config.text_color};
+            color: rgba(229, 246, 255, 0.45);
             border: 1px solid {accent_outline};
+            font-weight: 700;
         }}
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[hgrHover="true"],
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton:hover {{
             background-color: {button_hover_color};
-            color: {self.config.text_color};
+            color: rgba(229, 246, 255, 0.70);
             border: 1px solid {accent_outline_strong};
         }}
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[hgrPressed="true"],
@@ -12512,20 +12562,22 @@ Admin elevation
             color: {self.config.text_color};
             border: 1px solid {accent_outline_strong};
         }}
+        /* Save Changes pending state — "lit up" look:
+           full-strength accent border at 2 px so the cyan rim
+           reads clearly, full text colour + bolder weight, solid
+           primary-blue fill. The whole button changes colour, not
+           just the border. */
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[pendingSave="true"] {{
-            /* Pending: solid primary-blue fill so it visibly stands
-               out from the neutral default and from sibling buttons
-               in the panel. The whole BUTTON changes colour — not
-               just the border. */
             background-color: {self.config.primary_color};
             color: {self.config.text_color};
-            border: 1px solid {accent_outline_strong};
+            border: 2px solid {self.config.accent_color};
+            font-weight: 900;
         }}
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[pendingSave="true"][hgrHover="true"],
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton[pendingSave="true"]:hover {{
             background-color: {button_hover_color};
             color: {self.config.text_color};
-            border: 1px solid {accent_outline_strong};
+            border: 2px solid {self.config.accent_color};
         }}
         QStackedWidget#settingsContentStack QPushButton#settingsSaveButton:disabled {{
             color: {soft_text};
