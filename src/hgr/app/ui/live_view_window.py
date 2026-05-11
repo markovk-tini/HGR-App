@@ -661,16 +661,20 @@ class LiveViewWindow(QMainWindow):
             if found:
                 self._tracking_quality_last_hand_ts = now
             time_since_hand = now - self._tracking_quality_last_hand_ts
-            if found and confidence >= 0.65:
+            # Key off `found` (MediaPipe hand-presence flag), NOT the
+            # `confidence` value: `confidence` is the gesture-CLASSIFIER
+            # score, so a neutral hand with no recognized gesture
+            # would be `found=True, confidence≈0`, which previously
+            # left the chip stuck in whatever the prior state was.
+            # User-visible symptom: chip read 'No hand seen' even
+            # while the skeleton + bbox were clearly drawn on top of
+            # a clearly-visible hand.
+            if found:
                 self._set_tracking_quality_state("good")
-            elif found and confidence >= 0.45:
-                self._set_tracking_quality_state("fair")
             elif time_since_hand >= 0.6:
                 self._set_tracking_quality_state("poor")
             # Between found=False and 0.6 s timeout, keep the prior
             # state to avoid flashing red on single-frame drops.
-            # Down from 1.5 s — user reported the chip's reactions
-            # to hand removal/reappearance feeling very delayed.
 
     def _apply_fps_chip_color(self, kind: str) -> None:
         """Recolor the FPS chip — green when comfortably high,

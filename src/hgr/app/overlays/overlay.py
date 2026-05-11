@@ -1305,14 +1305,16 @@ class TrackingQualityPill(QWidget):
         self.move(x, y)
 
     def update_state(self, *, found: bool, confidence: float) -> None:
-        """Feed a per-engine-frame tracking observation. State
-        decays to 'poor' if no hand seen for 0.6 s (down from the
-        live-view chip's 1.5 s -- user reported the desktop pill
-        feeling laggy with the longer window)."""
+        """Feed a per-engine-frame tracking observation. Keys off
+        the MediaPipe `found` flag, not the gesture-classifier
+        confidence — a neutral hand has confidence≈0 even though
+        the hand is fully tracked. State decays to 'poor' if no
+        hand has been seen for 0.6 s."""
+        del confidence  # accepted for API parity; unused
         now = time.monotonic()
         if found:
             self._last_hand_ts = now
-            new_state = "good" if confidence >= 0.65 else ("fair" if confidence >= 0.45 else "poor")
+            new_state = "good"
         elif now - self._last_hand_ts >= 0.6:
             new_state = "poor"
         else:
