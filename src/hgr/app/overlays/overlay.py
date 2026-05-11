@@ -871,8 +871,8 @@ class ProcessingOverlay(QWidget):
     # the transparent area invisible *in theory*, but some
     # compositors / GPU drivers leave a 1-pixel residue at the
     # window edge.
-    _PILL_WIDTH = 360
-    _PILL_HEIGHT = 56
+    _PILL_WIDTH = 220
+    _PILL_HEIGHT = 88
     _SCREEN_BOTTOM_GAP = 64
 
     def __init__(self, parent=None):
@@ -953,9 +953,9 @@ class ProcessingOverlay(QWidget):
         self.hide()
 
     def _draw_loading_dots(self, painter: QPainter, cx: float, cy: float, accent: QColor) -> None:
-        # 5-dot wave pulsing left-to-right -- visually identical to
-        # VoiceStatusOverlay's recognising indicator so the user
-        # reads them as the same family.
+        # Verbatim copy of VoiceStatusOverlay._draw_loading_dots so
+        # the indicator reads exactly like the voice "recognising"
+        # dots.
         painter.setPen(Qt.NoPen)
         phase = time.monotonic() * 6.0
         for index in range(5):
@@ -965,7 +965,7 @@ class ProcessingOverlay(QWidget):
             dot.setAlpha(int(90 + 150 * pulse))
             painter.setBrush(dot)
             x = cx + (index - 2) * 14
-            y = cy - 6 * wave
+            y = cy - 2 - 6 * wave
             size = 8.0 + 3.0 * pulse
             painter.drawEllipse(QRectF(x - size / 2.0, y - size / 2.0, size, size))
 
@@ -991,16 +991,19 @@ class ProcessingOverlay(QWidget):
         painter.setBrush(panel)
         painter.drawRoundedRect(rect, 18.0, 18.0)
 
-        # Label on the left half, animated dots on the right.
+        # Stacked layout: label on top, animated dots below — same
+        # ordering the voice processing pill uses (just inverted: voice
+        # has dots on top + text below; user asked for text on top
+        # here so the label reads first).
         font = QFont("Segoe UI", 12)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QPen(text_color))
-        label_rect = QRectF(rect.left() + 18, rect.top(), rect.width() - 110, rect.height())
-        painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, self._label)
+        label_rect = QRectF(rect.left() + 12, rect.top() + 14, rect.width() - 24, 24)
+        painter.drawText(label_rect, Qt.AlignCenter, self._label)
 
-        dots_cx = rect.right() - 50
-        dots_cy = rect.center().y()
+        dots_cx = rect.center().x()
+        dots_cy = rect.bottom() - 22
         self._draw_loading_dots(painter, dots_cx, dots_cy, accent)
 
 

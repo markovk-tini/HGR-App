@@ -581,6 +581,92 @@ class _VoiceMicArrow(QWidget):
         self.hide()
 
 
+class _TutorialStartingPill(QWidget):
+    """Bottom-centred pill shown over the tutorial dialog while the
+    session is spinning up. Paints exactly like the desktop
+    ProcessingOverlay (translucent blue panel, teal border, label
+    on top, animated wave dots below) but as a child widget of the
+    dialog -- no top-level translucency / DWM games needed."""
+
+    _WIDTH = 220
+    _HEIGHT = 88
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
+        self._label = "Starting tutorial"
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(self._WIDTH, self._HEIGHT)
+        self.setVisible(False)
+
+    def show_pill(self, label: str = "Starting tutorial") -> None:
+        self._label = str(label or "Starting tutorial")
+        self.setVisible(True)
+        self.raise_()
+        self._timer.start()
+        self.update()
+
+    def hide_pill(self) -> None:
+        self._timer.stop()
+        self.setVisible(False)
+
+    def set_label(self, label: str) -> None:
+        self._label = str(label or "")
+        if self.isVisible():
+            self.update()
+
+    def _tick(self) -> None:
+        if self.isVisible():
+            self.update()
+
+    def _draw_loading_dots(self, painter: QPainter, cx: float, cy: float, accent: QColor) -> None:
+        # Verbatim copy of VoiceStatusOverlay._draw_loading_dots.
+        painter.setPen(Qt.NoPen)
+        phase = time.monotonic() * 6.0
+        for index in range(5):
+            wave = max(0.0, math.sin(phase - index * 0.48))
+            pulse = 0.38 + 0.62 * wave
+            dot = QColor(accent)
+            dot.setAlpha(int(90 + 150 * pulse))
+            painter.setBrush(dot)
+            x = cx + (index - 2) * 14
+            y = cy - 2 - 6 * wave
+            size = 8.0 + 3.0 * pulse
+            painter.drawEllipse(QRectF(x - size / 2.0, y - size / 2.0, size, size))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt API name
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        panel = QColor(25, 73, 143, 164)
+        border = QColor(29, 233, 182, 210)
+        text_color = QColor(232, 246, 255, 238)
+        accent = QColor(29, 233, 182)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(panel)
+        painter.drawRoundedRect(rect, 18.0, 18.0)
+
+        font = QFont("Segoe UI", 12)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(text_color))
+        label_rect = QRectF(rect.left() + 12, rect.top() + 14, rect.width() - 24, 24)
+        painter.drawText(label_rect, Qt.AlignCenter, self._label)
+
+        dots_cx = rect.center().x()
+        dots_cy = rect.bottom() - 22
+        self._draw_loading_dots(painter, dots_cx, dots_cy, accent)
+
+
 class TutorialWindow(QDialog):
     tutorial_closed = Signal(bool, bool, bool)
     gesture_guide_requested = Signal(bool)
@@ -787,27 +873,8 @@ class TutorialWindow(QDialog):
         # indicator inside the dialog so it doesn't compete with the
         # main app's desktop-pill if they overlap). Visible during
         # _start_session() until the first camera frame arrives.
-        self._starting_pill = QLabel("Starting tutorial", self)
-        self._starting_pill.setObjectName("tutorialStartingPill")
-        self._starting_pill.setAlignment(Qt.AlignCenter)
-        self._starting_pill.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._starting_pill.setStyleSheet(
-            "QLabel#tutorialStartingPill {"
-            "  background: rgba(25, 73, 143, 0.92);"
-            "  color: #E8F6FF;"
-            "  border: 1px solid rgba(29, 233, 182, 0.65);"
-            "  border-radius: 22px;"
-            "  font-size: 15px;"
-            "  font-weight: 700;"
-            "  padding: 10px 22px;"
-            "}"
-        )
+        self._starting_pill = _TutorialStartingPill(self)
         self._starting_pill.setVisible(False)
-        self._starting_pill_dot_count = 0
-        self._starting_pill_label_base = "Starting tutorial"
-        self._starting_pill_timer = QTimer(self)
-        self._starting_pill_timer.setInterval(380)
-        self._starting_pill_timer.timeout.connect(self._advance_starting_pill_dots)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -3829,40 +3896,21 @@ class TutorialWindow(QDialog):
         pill = getattr(self, "_starting_pill", None)
         if pill is None or not pill.isVisible():
             return
-        pill.adjustSize()
         x = max(8, (self.width() - pill.width()) // 2)
         y = max(8, self.height() - pill.height() - 64)
         pill.move(x, y)
-
-    def _advance_starting_pill_dots(self) -> None:
-        self._starting_pill_dot_count = (self._starting_pill_dot_count + 1) % 4
-        pill = getattr(self, "_starting_pill", None)
-        if pill is None:
-            return
-        dots = "." * self._starting_pill_dot_count
-        pill.setText(self._starting_pill_label_base + dots)
-        self._reposition_starting_pill()
 
     def _show_starting_pill(self, label: str = "Starting tutorial") -> None:
         pill = getattr(self, "_starting_pill", None)
         if pill is None:
             return
-        self._starting_pill_label_base = str(label or "Starting tutorial")
-        self._starting_pill_dot_count = 0
-        pill.setText(self._starting_pill_label_base)
-        pill.adjustSize()
+        pill.show_pill(label)
         self._reposition_starting_pill()
-        pill.setVisible(True)
-        pill.raise_()
-        self._starting_pill_timer.start()
 
     def _hide_starting_pill(self) -> None:
-        timer = getattr(self, "_starting_pill_timer", None)
-        if timer is not None:
-            timer.stop()
         pill = getattr(self, "_starting_pill", None)
         if pill is not None:
-            pill.setVisible(False)
+            pill.hide_pill()
 
     def moveEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().moveEvent(event)
