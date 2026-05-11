@@ -2055,6 +2055,24 @@ class GestureWorker(QObject):
         self._drawing_control_text = "drawing wheel active"
         return True
 
+    def get_camera_draw_canvas_snapshot(self):
+        """Return a numpy copy of the current camera-target drawing
+        canvas (BGRA) without doing any compositing or disk I/O.
+        Callable from the UI thread; cheap (just np.copy of a
+        camera-sized array). Returns None when there's no canvas."""
+        canvas = self._camera_draw_canvas
+        if canvas is None:
+            return None
+        if self._camera_draw_active_stroke_points:
+            try:
+                self._commit_camera_draw_stroke()
+            except Exception:
+                pass
+        try:
+            return canvas.copy()
+        except Exception:
+            return None
+
     def save_camera_draw_snapshot(self, target_path) -> bool:
         """Write the current camera-target drawing canvas to a PNG.
 

@@ -593,6 +593,25 @@ class ScreenDrawOverlay(QWidget):
         saved = output.save(str(path), "PNG")
         return path if saved else None
 
+    def build_canvas_image(self) -> "QImage | None":
+        """Return a QImage copy of the current canvas WITHOUT saving
+        to disk. Used by the async save path so the UI thread only
+        builds the image (fast) and a worker thread does the PNG
+        encode. Returns None if the canvas isn't ready."""
+        try:
+            self._ensure_canvas_size()
+        except Exception:
+            return None
+        try:
+            output = QImage(self._canvas.size(), QImage.Format_ARGB32_Premultiplied)
+            output.fill(Qt.transparent)
+            painter = QPainter(output)
+            painter.drawImage(0, 0, self._canvas)
+            painter.end()
+            return output
+        except Exception:
+            return None
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._ensure_canvas_size()

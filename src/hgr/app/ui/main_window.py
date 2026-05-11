@@ -4882,6 +4882,27 @@ def _gesture_bind_pose_lookup() -> dict[str, tuple[str, str, str, str]]:
     return {p[0]: p for p in _GESTURE_BIND_POSES}
 
 
+class _CurrentSizedStack(QStackedWidget):
+    """QStackedWidget that reports only the CURRENT widget's size hints.
+
+    The stock QStackedWidget takes max-of-all-children for sizeHint and
+    minimumSizeHint. Wrapped in a QScrollArea with widgetResizable=True
+    that means short panels (e.g. Camera) still inherit the tallest
+    sibling's minimum height — so the scroll area allows scrolling into
+    empty space below the short panel. Returning only the current
+    widget's hints keeps the scroll area in sync with whatever panel
+    is actually visible.
+    """
+
+    def sizeHint(self):  # type: ignore[override]
+        w = self.currentWidget()
+        return w.sizeHint() if w is not None else super().sizeHint()
+
+    def minimumSizeHint(self):  # type: ignore[override]
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
+
+
 class MainWindow(QMainWindow):
     # Cross-thread bridge for the off-thread clip export. The
     # worker thread emits this signal after stashing its result on
@@ -4895,6 +4916,14 @@ class MainWindow(QMainWindow):
     # callback would never fire — leaving the processing overlay
     # stuck on screen forever.
     _clip_export_finished_signal = Signal()
+    # Background-save bridge. Emitted from a worker thread when an
+    # async screenshot / drawing save has completed; the payload is a
+    # dict {ok, path, kind, label_ok, label_fail}. Lets the UI thread
+    # (which has frozen during the encoder I/O if we tried to save
+    # in-line) keep painting the camera viewers during the save, and
+    # then update last_action_label + queue the post-action save
+    # prompt once the file actually exists.
+    _async_save_finished_signal = Signal(object)
     # Cross-thread bridge for the phone-camera server's status callback.
     # The server runs on its own daemon thread; emitting this signal
     # marshals the (event, data) payload onto the GUI thread before we
@@ -5751,8 +5780,16 @@ class MainWindow(QMainWindow):
         # styled sidebar box can end above the buttons and the buttons
         # can size to their text without squashing each other).
 
-        self.settings_content_stack = QStackedWidget()
+        self.settings_content_stack = _CurrentSizedStack()
         self.settings_content_stack.setObjectName("settingsContentStack")
+        # When the active page changes, the stack's reported sizeHint /
+        # minimumSizeHint changes too (each panel has its own height).
+        # updateGeometry() re-asks the enclosing layout / scroll area to
+        # respect the new hints so the outer content_scroll stops
+        # exposing the previous (taller) panel's leftover scroll range.
+        self.settings_content_stack.currentChanged.connect(
+            lambda _i: self.settings_content_stack.updateGeometry()
+        )
         self.settings_content_stack.addWidget(self._build_instructions_panel())
         self.settings_content_stack.addWidget(self._build_gesture_guide_panel())
         self.settings_content_stack.addWidget(self._build_custom_gesture_panel())
@@ -5788,6 +5825,16 @@ class MainWindow(QMainWindow):
         content_scroll.setWidgetResizable(True)
         content_scroll.setFrameShape(QFrame.NoFrame)
         content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Vertical scrollbar is AsNeeded — but the stack itself is now
+        # a _CurrentSizedStack so its sizeHint / minimumSizeHint reflect
+        # only the CURRENT panel (not the max of all panels). That means
+        # short panels like Camera report small minimum sizes and the
+        # outer scroll stays inactive at default window size; only when
+        # the window is shrunk below the active panel's natural content
+        # height does the outer scroll engage. Note: setting
+        # ScrollBarAlwaysOff hides the bar but does NOT disable wheel
+        # scrolling — so the actual fix has to come from the stack
+        # reporting accurate hints, which is what _CurrentSizedStack does.
         content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         content_scroll.setStyleSheet(
             "QScrollArea#settingsContentScroll, QScrollArea#settingsContentScroll > QWidget,"
@@ -17363,36 +17410,91 @@ Admin elevation
             _show_saved_pill(source_path)
 
     def _save_drawing_snapshot(self) -> None:
-        # Brief processing-pill flash during the (typically fast)
-        # PNG write so the user sees the same UX cadence
-        # as the heavier clip / recording saves.
+        # Async PNG encode: UI thread builds the in-memory image
+        # (cheap) and a worker thread does the disk write so the
+        # camera viewers keep painting during the save.
         try:
             self.processing_overlay.show_processing("Processing drawing")
         except Exception:
             pass
-        try:
-            target_path = self._next_output_path("drawings", ".png")
-            path = None
-            if self._drawing_render_target == "camera":
-                worker = self._worker
-                if worker is not None and hasattr(worker, "save_camera_draw_snapshot"):
-                    try:
-                        saved = bool(worker.save_camera_draw_snapshot(target_path))
-                    except Exception:
-                        saved = False
-                    path = target_path if saved else None
-            else:
-                path = self.draw_overlay.save_canvas_snapshot(target_path=target_path)
-            if path is not None:
-                self.last_action_label.setText(f"Last action: saved drawing to {path}")
-                self._queue_post_action_save_prompt("drawings", path)
-            else:
+        target_path = self._next_output_path("drawings", ".png")
+        if self._drawing_render_target == "camera":
+            worker = self._worker
+            snapshot = None
+            if worker is not None and hasattr(worker, "get_camera_draw_canvas_snapshot"):
+                try:
+                    snapshot = worker.get_camera_draw_canvas_snapshot()
+                except Exception:
+                    snapshot = None
+            if snapshot is None:
+                try:
+                    self.processing_overlay.hide_processing()
+                except Exception:
+                    pass
                 self.last_action_label.setText("Last action: could not save drawing")
-        finally:
+                return
+            self._save_camera_drawing_array_async(snapshot, target_path)
+            return
+        # Screen overlay path: build the QImage on UI thread, then
+        # save it async.
+        image = None
+        try:
+            image = self.draw_overlay.build_canvas_image()
+        except Exception:
+            image = None
+        if image is None or image.isNull():
             try:
                 self.processing_overlay.hide_processing()
             except Exception:
                 pass
+            self.last_action_label.setText("Last action: could not save drawing")
+            return
+        self._save_qimage_async(
+            image, target_path,
+            kind="drawings",
+            label_ok="Last action: saved drawing to {path}",
+            label_fail="Last action: could not save drawing",
+        )
+
+    def _save_camera_drawing_array_async(self, snapshot, path) -> None:
+        """Composite a camera-drawing BGRA snapshot onto a contrast
+        background and write it to disk on a worker thread. The
+        compositing math (alpha blend, mean-stroke colour pick) all
+        happens off the UI thread so the viewers keep painting."""
+        self._ensure_async_save_signal_wired()
+        kind = "drawings"
+        label_ok = "Last action: saved drawing to {path}"
+        label_fail = "Last action: could not save drawing"
+
+        def _worker() -> None:
+            ok = False
+            try:
+                height, width = snapshot.shape[:2]
+                alpha = snapshot[:, :, 3:4].astype(np.float32) / 255.0
+                fg = snapshot[:, :, :3].astype(np.float32)
+                mean_stroke_bgr = fg.sum(axis=(0, 1)) / max(float(alpha.sum()) * 3.0, 1.0)
+                bg_color = (255.0, 255.0, 255.0) if float(mean_stroke_bgr.mean()) < 60.0 else (0.0, 0.0, 0.0)
+                bg = np.zeros((height, width, 3), dtype=np.float32)
+                bg[:, :, 0] = bg_color[0]
+                bg[:, :, 1] = bg_color[1]
+                bg[:, :, 2] = bg_color[2]
+                composite = (fg * alpha + bg * (1.0 - alpha)).clip(0.0, 255.0).astype(np.uint8)
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                ok = bool(cv2.imwrite(str(path), composite))
+            except Exception:
+                ok = False
+            try:
+                self._async_save_finished_signal.emit({
+                    "ok": ok,
+                    "path": path if ok else None,
+                    "kind": kind,
+                    "label_ok": label_ok,
+                    "label_fail": label_fail,
+                })
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="hgr-save-drawing").start()
 
     def _screens_union_geometry(self) -> QRect:
         screens = [screen for screen in QGuiApplication.screens() if screen is not None]
@@ -17841,40 +17943,166 @@ Admin elevation
             return None
         path = self._next_output_path("screenshots", ".png")
         return path if pixmap.save(str(path), "PNG") else None
+
+    def _save_qimage_async(
+        self,
+        image,
+        path: Path,
+        *,
+        kind: str,
+        label_ok: str,
+        label_fail: str,
+        fmt: str = "PNG",
+    ) -> None:
+        """Same contract as _save_pixmap_async but takes an already-
+        prepared QImage (QImage is safe to use from a worker thread;
+        QPixmap is not). Used by drawing-snapshot saves where the
+        caller has already built a QImage on the UI thread."""
+        if image is None or image.isNull():
+            self._on_async_save_finished({
+                "ok": False, "path": None, "kind": kind,
+                "label_ok": label_ok, "label_fail": label_fail,
+            })
+            return
+        self._ensure_async_save_signal_wired()
+
+        def _worker() -> None:
+            try:
+                ok = bool(image.save(str(path), fmt))
+            except Exception:
+                ok = False
+            try:
+                self._async_save_finished_signal.emit({
+                    "ok": ok,
+                    "path": path if ok else None,
+                    "kind": kind,
+                    "label_ok": label_ok,
+                    "label_fail": label_fail,
+                })
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name=f"hgr-save-{kind}").start()
+
+    def _save_pixmap_async(
+        self,
+        pixmap: QPixmap,
+        path: Path,
+        *,
+        kind: str,
+        label_ok: str,
+        label_fail: str,
+    ) -> None:
+        """Save a QPixmap to disk on a worker thread so the camera
+        viewers keep painting during the PNG encode. Result lands
+        back on the UI thread via _async_save_finished_signal, which
+        is connected to _on_async_save_finished by
+        _ensure_async_save_signal_wired().
+
+        Pixmap is converted to QImage on the calling (UI) thread
+        because QPixmap is GUI-thread-only; QImage is safe to touch
+        from any thread."""
+        try:
+            image = pixmap.toImage()
+        except Exception:
+            self._on_async_save_finished({
+                "ok": False, "path": None, "kind": kind,
+                "label_ok": label_ok, "label_fail": label_fail,
+            })
+            return
+        self._ensure_async_save_signal_wired()
+
+        def _worker() -> None:
+            try:
+                ok = bool(image.save(str(path), "PNG"))
+            except Exception:
+                ok = False
+            try:
+                self._async_save_finished_signal.emit({
+                    "ok": ok,
+                    "path": path if ok else None,
+                    "kind": kind,
+                    "label_ok": label_ok,
+                    "label_fail": label_fail,
+                })
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name=f"hgr-save-{kind}").start()
+
+    def _ensure_async_save_signal_wired(self) -> None:
+        if getattr(self, "_async_save_signal_wired", False):
+            return
+        try:
+            self._async_save_finished_signal.connect(self._on_async_save_finished)
+            self._async_save_signal_wired = True
+        except Exception:
+            pass
+
+    def _on_async_save_finished(self, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        kind = str(payload.get("kind") or "")
+        ok = bool(payload.get("ok"))
+        path = payload.get("path")
+        label_ok = str(payload.get("label_ok") or "")
+        label_fail = str(payload.get("label_fail") or "")
+        try:
+            self.processing_overlay.hide_processing()
+        except Exception:
+            pass
+        if ok and path is not None:
+            if label_ok:
+                self.last_action_label.setText(label_ok.format(path=path))
+            try:
+                self._queue_post_action_save_prompt(kind, path)
+            except Exception:
+                pass
+        else:
+            if label_fail:
+                self.last_action_label.setText(label_fail)
+
     def _save_full_screen_screenshot(self) -> None:
         try:
             self.processing_overlay.show_processing("Processing screenshot")
         except Exception:
             pass
-        try:
-            path = self._save_screenshot_pixmap(self._grab_global_region_pixmap(None))
-            if path is not None:
-                self.last_action_label.setText(f"Last action: saved screenshot to {path}")
-                self._queue_post_action_save_prompt("screenshots", path)
-            else:
-                self.last_action_label.setText("Last action: could not save screenshot")
-        finally:
+        pixmap = self._grab_global_region_pixmap(None)
+        if pixmap.isNull():
             try:
                 self.processing_overlay.hide_processing()
             except Exception:
                 pass
+            self.last_action_label.setText("Last action: could not save screenshot")
+            return
+        path = self._next_output_path("screenshots", ".png")
+        self._save_pixmap_async(
+            pixmap, path,
+            kind="screenshots",
+            label_ok="Last action: saved screenshot to {path}",
+            label_fail="Last action: could not save screenshot",
+        )
+
     def _save_custom_region_screenshot(self, region: QRect) -> None:
         try:
             self.processing_overlay.show_processing("Processing screenshot")
         except Exception:
             pass
-        try:
-            path = self._save_screenshot_pixmap(self._grab_global_region_pixmap(region))
-            if path is not None:
-                self.last_action_label.setText(f"Last action: saved custom screenshot to {path}")
-                self._queue_post_action_save_prompt("screenshots", path)
-            else:
-                self.last_action_label.setText("Last action: could not save custom screenshot")
-        finally:
+        pixmap = self._grab_global_region_pixmap(region)
+        if pixmap.isNull():
             try:
                 self.processing_overlay.hide_processing()
             except Exception:
                 pass
+            self.last_action_label.setText("Last action: could not save custom screenshot")
+            return
+        path = self._next_output_path("screenshots", ".png")
+        self._save_pixmap_async(
+            pixmap, path,
+            kind="screenshots",
+            label_ok="Last action: saved custom screenshot to {path}",
+            label_fail="Last action: could not save custom screenshot",
+        )
     def _set_worker_utility_recording_active(self, active: bool) -> None:
         if self._worker is not None and hasattr(self._worker, "set_utility_recording_active"):
             try:
