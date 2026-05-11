@@ -902,28 +902,6 @@ class ProcessingOverlay(QWidget):
         x = geo.center().x() - self._PILL_WIDTH // 2
         y = geo.bottom() - self._PILL_HEIGHT - self._SCREEN_BOTTOM_GAP
         self.move(x, y)
-        self._apply_pill_mask()
-
-    def _apply_pill_mask(self) -> None:
-        """Clip the window region to the pill's rounded-rect shape
-        so the compositor doesn't leave a transparent rectangular
-        halo around the pill. WA_TranslucentBackground alone leaves
-        a 1-2 px residue on some Windows / GPU combinations -- the
-        mask kills it at the system level. Called after every
-        resize so the mask tracks dynamic pill sizing."""
-        try:
-            from PySide6.QtGui import QPainterPath, QRegion
-            from PySide6.QtCore import QRectF
-            rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect, 18.0, 18.0)
-            self.setMask(QRegion(path.toFillPolygon().toPolygon()))
-        except Exception:
-            pass
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._apply_pill_mask()
 
     def _advance_dots(self) -> None:
         self._dot_count = (self._dot_count + 1) % 4
@@ -1080,26 +1058,6 @@ class SavedLocationOverlay(QWidget):
         x = geo.center().x() - self.width() // 2
         y = geo.bottom() - self.height() - self._SCREEN_BOTTOM_GAP
         self.move(x, y)
-        self._apply_pill_mask()
-
-    def _apply_pill_mask(self) -> None:
-        """Clip window region to the pill shape -- mirrors
-        ProcessingOverlay._apply_pill_mask. Without this the
-        compositor leaves a transparent rectangular halo around
-        the rounded pill on some Windows / GPU combinations."""
-        try:
-            from PySide6.QtGui import QPainterPath, QRegion
-            from PySide6.QtCore import QRectF
-            rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect, 18.0, 18.0)
-            self.setMask(QRegion(path.toFillPolygon().toPolygon()))
-        except Exception:
-            pass
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._apply_pill_mask()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
