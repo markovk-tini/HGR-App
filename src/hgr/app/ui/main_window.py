@@ -105,6 +105,11 @@ SECTION_UPDATES = 9
 # right after Instructions. Decoupling stack-order from nav-order
 # means existing SECTION_X constants don't need renumbering.
 SECTION_GENERAL = 10
+# About / Privacy panel — added with v1.1.0b7 for the Microsoft
+# Store launch. Holds the same privacy disclosure shown in the
+# first-run dialog plus the analytics opt-in toggle so users can
+# change their mind anytime.
+SECTION_ABOUT = 11
 
 # Ordered sequence the guided walkthrough visits. Click Next on
 # any page auto-navigates to the next entry — no "click on the X
@@ -857,8 +862,9 @@ class StartTutorialDialog(QDialog):
                 background: rgba(255,255,255,0.05);
             }}
             QCheckBox#startDialogCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
+                background: rgba(255,255,255,0.05);
+                border: 1.5px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' stroke='%23FFFFFF' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             QPushButton#startDialogButton {{
                 background-color: {self.config.primary_color};
@@ -1054,8 +1060,9 @@ class WalkthroughStartDialog(QDialog):
                 background: rgba(255,255,255,0.05);
             }}
             QCheckBox#startDialogCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
+                background: rgba(255,255,255,0.05);
+                border: 1.5px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' stroke='%23FFFFFF' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             QPushButton#startDialogButton {{
                 background-color: {self.config.primary_color};
@@ -1236,8 +1243,9 @@ class CameraSelectionDialog(QDialog):
                 background: rgba(255,255,255,0.05);
             }}
             QCheckBox#cameraDialogCheckbox::indicator:checked {{
-                background: {self.config.accent_color};
-                border: 1px solid {self.config.accent_color};
+                background: rgba(255,255,255,0.05);
+                border: 1.5px solid {self.config.accent_color};
+                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' stroke='%23FFFFFF' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
             }}
             QPushButton#cameraDialogButton {{
                 background-color: {self.config.primary_color};
@@ -4451,6 +4459,281 @@ class TouchlessNotice(QDialog):
         return dlg.exec() == QDialog.Accepted
 
 
+class TouchlessPrivacyDialog(QDialog):
+    """First-run privacy & data dialog.
+
+    Shows the user how Touchless handles their data (camera/mic
+    processed locally, optional Spotify integration, etc.) and asks
+    for explicit opt-in consent for anonymous usage analytics.
+
+    Two-pane layout:
+      1. Privacy explanation — what stays on-device, what doesn't.
+      2. Analytics opt-in checkbox (default unchecked = opt-out).
+
+    Single "Got it" button latches both decisions: the disclosure
+    is acknowledged AND the analytics choice is captured. The
+    caller flips the corresponding config flags and saves.
+
+    Same dark/teal theme as TouchlessNotice so it feels native to
+    the rest of the app rather than a system QMessageBox.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self._analytics_choice = False
+        self._details_open = False
+        # Window/taskbar title is just "Touchless" — the question
+        # ("Help improve Touchless?") is already the in-window
+        # heading, so duplicating it in the OS title bar reads as
+        # noise.
+        self.setWindowTitle("Touchless")
+        # Plain top-level modal (no Qt.Tool). Tool-flag variant let
+        # the parent window's "Touchless" wordmark widget bleed
+        # through the dialog rect. ApplicationModal blocks the
+        # parent until the user answers — fits the semantic ("we
+        # need a yes/no before any data leaves").
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setSizeGripEnabled(False)
+        self.setFixedWidth(460)
+        self.setObjectName("privacyDialog")
+        self.setStyleSheet(
+            "TouchlessPrivacyDialog, QDialog#privacyDialog {"
+            "  background: #0F172A;"
+            "  color: #E5F6FF;"
+            "}"
+            "QLabel { color: #E5F6FF; background: transparent; }"
+            "QPushButton#privacyAllow {"
+            # Font family / weight / size are set programmatically
+            # via setFont() with grayscale-AA hints (see the QFont
+            # block where the buttons are constructed). QSS rules
+            # for font properties are intentionally omitted here —
+            # if specified, QSS takes priority over setFont() and
+            # the AA hints are ignored.
+            #
+            # Teal dimmed ~15% from the previous #1DE9B6 / #29f0c1
+            # pair. Brighter teal was visually loud against the
+            # dark dialog body and made the black text feel harsh.
+            # The dimmer shade still reads clearly as the primary
+            # action without screaming.
+            "  background: #16C9A0;"
+            "  color: #000000;"
+            "  border: none;"
+            "  border-radius: 8px;"
+            "  padding: 8px 22px;"
+            "  min-width: 110px;"
+            "}"
+            "QPushButton#privacyAllow:hover { background: #1FD3AC; }"
+            "QPushButton#privacyDeny {"
+            # Solid colors (not rgba) — the dialog uses
+            # WA_OpaquePaintEvent so Qt doesn't auto-clear the
+            # background between paints. Translucent rgba fills
+            # accumulated on every hover, making the button get
+            # progressively brighter each pass. Solid hex values
+            # fully replace the pixels so hover stays consistent.
+            "  background: #1E2638;"
+            "  color: #E5F6FF;"
+            "  border: 1px solid #3B4356;"
+            "  border-radius: 8px;"
+            "  padding: 8px 18px;"
+            "  min-width: 110px;"
+            "}"
+            "QPushButton#privacyDeny:hover { background: #2A3245; }"
+            "QPushButton#privacyDeny:pressed { background: #161D2C; }"
+            "QPushButton#privacyDetailsToggle {"
+            "  background: transparent;"
+            "  color: #1DE9B6;"
+            "  border: none;"
+            "  text-align: left;"
+            "  padding: 4px 0;"
+            "  font-size: 12px;"
+            "  font-weight: 500;"
+            "}"
+            "QPushButton#privacyDetailsToggle:hover { color: #29f0c1; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        layout.setSpacing(SPACE_SM)
+
+        title = QLabel("Help improve Touchless?")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(
+            f"font-size: {FONT_HEADING}px; "
+            f"font-weight: {WEIGHT_BOLD};"
+        )
+        layout.addWidget(title)
+
+        # Lead with the trust statement — what STAYS on device.
+        # That's the user's biggest concern; addressing it first
+        # makes the analytics ask easier to evaluate.
+        lead = QLabel(
+            "Camera, microphone, and dictation stay on your PC and "
+            "never leave it.\n\n"
+            "Optionally, share anonymous usage data so I can see what "
+            "features get used and where bugs happen. No audio, no "
+            "video, no personal info."
+        )
+        lead.setWordWrap(True)
+        lead.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        lead.setStyleSheet(
+            f"font-size: {FONT_BODY}px; "
+            f"font-weight: {WEIGHT_REGULAR}; "
+            f"line-height: 150%;"
+        )
+        layout.addWidget(lead)
+
+        # Inline expandable details — exact list of what's collected
+        # and (just as importantly) what isn't. Hidden by default
+        # so the dialog stays compact for users who just want to
+        # decide quickly.
+        self._details_button = QPushButton("Show details")
+        self._details_button.setObjectName("privacyDetailsToggle")
+        self._details_button.setCursor(Qt.PointingHandCursor)
+        self._details_button.clicked.connect(self._toggle_details)
+        layout.addWidget(self._details_button, 0, Qt.AlignLeft)
+
+        self._details_label = QLabel(self._details_html())
+        self._details_label.setWordWrap(True)
+        self._details_label.setTextFormat(Qt.RichText)
+        self._details_label.setStyleSheet(
+            "color: #E5F6FF; "
+            "background: rgba(255,255,255,0.04); "
+            "border: 1px solid rgba(229,246,255,0.10); "
+            "border-radius: 8px; "
+            "padding: 12px 14px; "
+            "font-size: 12px; "
+            "line-height: 150%;"
+        )
+        self._details_label.setVisible(False)
+        layout.addWidget(self._details_label)
+
+        layout.addSpacing(SPACE_SM)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        deny_button = QPushButton("Don't Allow")
+        deny_button.setObjectName("privacyDeny")
+        deny_button.clicked.connect(self._on_deny)
+        allow_button = QPushButton("Allow")
+        allow_button.setObjectName("privacyAllow")
+        allow_button.setDefault(True)
+        allow_button.clicked.connect(self._on_allow)
+        # Render the button text with high-quality anti-aliasing
+        # at a slightly larger size than the previous 10 pt.
+        # 10 pt was too small for the bold glyphs to anti-alias
+        # cleanly — there weren't enough pixels per stroke, so
+        # the edges read as pixely. Bumping to 11 pt with
+        # `PreferAntialias | PreferQuality` (and dropping the
+        # NoSubpixelAntialias override) lets Qt pick the best AA
+        # mode for the display, and at this size the glyphs are
+        # clean even on the teal background. Full hinting keeps
+        # the stems pixel-aligned so they don't drift fuzzy.
+        # Pinning the font family to Segoe UI ensures a font with
+        # a real Bold cut is used (no synthesised bold).
+        from PySide6.QtGui import QFont as _PrivacyQFont
+        for btn, weight in ((deny_button, _PrivacyQFont.DemiBold),
+                            (allow_button, _PrivacyQFont.Bold)):
+            font = _PrivacyQFont("Segoe UI", 11)
+            font.setWeight(weight)
+            font.setStyleStrategy(
+                _PrivacyQFont.PreferAntialias
+                | _PrivacyQFont.PreferQuality
+            )
+            font.setHintingPreference(_PrivacyQFont.PreferFullHinting)
+            btn.setFont(font)
+        button_row.addStretch(1)
+        button_row.addWidget(deny_button)
+        button_row.addWidget(allow_button)
+        layout.addLayout(button_row)
+
+        change_hint = QLabel("You can change this anytime in Settings → About & Privacy.")
+        change_hint.setWordWrap(True)
+        change_hint.setAlignment(Qt.AlignCenter)
+        change_hint.setStyleSheet(
+            "color: rgba(229,246,255,0.55); font-size: 11px; padding-top: 6px;"
+        )
+        layout.addWidget(change_hint)
+
+    @staticmethod
+    def _details_html() -> str:
+        """Exact list of what every analytics event contains. Kept
+        in sync with the actual track() call sites and the
+        cloudflare-telemetry/ Worker schema — if a new event is
+        added or a property added to an existing event, this list
+        needs to be updated too. Trust requires that this ALWAYS
+        matches reality."""
+        return (
+            "Data goes to a <b>Cloudflare Worker I run myself</b> — not a "
+            "third-party analytics company. Each event row in the database "
+            "stores four fields: a random install ID (UUID, not tied to you), "
+            "the event name, a small JSON blob, and a timestamp.<br><br>"
+            "<b>Events sent (only if you Allow):</b><br>"
+            "&nbsp;&nbsp;• When sessions start / end + how long they last<br>"
+            "&nbsp;&nbsp;• When the gesture engine starts / stops<br>"
+            "&nbsp;&nbsp;• Names of gestures and actions that fire (e.g. <code>swipe_right</code>, <code>play_pause</code>)<br>"
+            "&nbsp;&nbsp;• Voice commands — only the target app (e.g. <code>spotify</code>), never the words you said<br>"
+            "&nbsp;&nbsp;• Which Settings tabs and tutorial steps you open<br>"
+            "&nbsp;&nbsp;• Crash type + short error message (no stack traces, no file paths)<br>"
+            "<br>"
+            "<b>NEVER collected or stored:</b><br>"
+            "&nbsp;&nbsp;• Audio, video, or camera frames<br>"
+            "&nbsp;&nbsp;• Hand landmarks or skeletal data<br>"
+            "&nbsp;&nbsp;• Voice transcripts or dictated text<br>"
+            "&nbsp;&nbsp;• File names, paths, or window titles<br>"
+            "&nbsp;&nbsp;• Your name, email, or any account info<br>"
+            "&nbsp;&nbsp;• IP address — the database row doesn't include it<br>"
+        )
+
+    def _toggle_details(self) -> None:
+        self._details_open = not self._details_open
+        self._details_label.setVisible(self._details_open)
+        self._details_button.setText(
+            "Hide details" if self._details_open else "Show details"
+        )
+        # Re-fit the dialog to the new content height. Without
+        # this, the window keeps its old height and either clips
+        # the details or leaves a big gap when they collapse.
+        self.adjustSize()
+
+    def _on_allow(self) -> None:
+        self._analytics_choice = True
+        self.accept()
+
+    def _on_deny(self) -> None:
+        self._analytics_choice = False
+        self.accept()
+
+    @property
+    def analytics_choice(self) -> bool:
+        """The user's analytics opt-in choice. Defaults to False
+        until the dialog is closed via Got it."""
+        return self._analytics_choice
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Match the rest of the Touchless theme: blue OS title bar.
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                from ctypes import wintypes
+                hwnd = int(self.winId())
+                if hwnd:
+                    caption = ctypes.c_uint32(0x00913D0B)
+                    text = ctypes.c_uint32(0x00FFF6E5)
+                    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        wintypes.HWND(hwnd), ctypes.c_uint32(35),
+                        ctypes.byref(caption), ctypes.sizeof(caption),
+                    )
+                    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        wintypes.HWND(hwnd), ctypes.c_uint32(36),
+                        ctypes.byref(text), ctypes.sizeof(text),
+                    )
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Gesture Binds tab — registries of (1) bindable actions and (2) gesture poses
 # the user can pick from. Source of truth lives in
@@ -4499,6 +4782,15 @@ class MainWindow(QMainWindow):
         # `track(...)` are no-ops when no API key is configured —
         # safe to ship in every build.
         self._init_telemetry()
+        # First-run privacy & analytics opt-in dialog. Trigger is
+        # NOT a fixed-delay timer from here — that fired before the
+        # window finished rendering on the user's machine even
+        # after we bumped the delay. Instead we hook the dialog to
+        # `MainWindow.showEvent` (below) so it only schedules
+        # AFTER the first VISIBLE show actually happens. The
+        # off-screen pre-render in TouchlessSplash.run_with is
+        # filtered out by checking WA_DontShowOnScreen.
+        self._first_visible_show_done = False
         self._phone_camera_qr_server = None
         # If a phone was previously paired, auto-start the embedded
         # server on launch so the user's already-open phone Safari tab
@@ -5151,6 +5443,11 @@ class MainWindow(QMainWindow):
         colors_button = SettingsNavButton("Colors", SECTION_COLORS, self)
         tutorial_button = SettingsNavButton("Tutorial", SECTION_TUTORIAL, self)
         updates_button = SettingsNavButton("Updates", SECTION_UPDATES, self)
+        # Qt treats a single "&" as the keyboard-mnemonic prefix
+        # (so "About & Privacy" rendered as "About  Privacy"). Doubling
+        # the ampersand escapes it so the literal "&" appears in the
+        # rendered button label.
+        about_button = SettingsNavButton("About && Privacy", SECTION_ABOUT, self)
         self._settings_nav_buttons = [
             instructions_button,
             general_button,
@@ -5163,6 +5460,7 @@ class MainWindow(QMainWindow):
             colors_button,
             tutorial_button,
             updates_button,
+            about_button,
         ]
         self._settings_nav_search_keywords = {
             instructions_button: (
@@ -5217,6 +5515,12 @@ class MainWindow(QMainWindow):
                 "updates update version release changelog about check "
                 "history changes news"
             ),
+            about_button: (
+                "about privacy data telemetry analytics opt in opt out "
+                "consent gdpr disclosure version legal local on device "
+                "personal information collect collected microphone camera "
+                "spotify"
+            ),
         }
         # Nav buttons live inside a scroll area so a short window can
         # scroll the button list instead of squishing the buttons until
@@ -5264,7 +5568,10 @@ class MainWindow(QMainWindow):
         nav_inner = QWidget()
         nav_inner.setStyleSheet("background: transparent;")
         nav_inner_layout = QVBoxLayout(nav_inner)
-        nav_inner_layout.setContentsMargins(0, 0, 0, 0)
+        # Right padding leaves clearance for the vertical scrollbar
+        # (6 px wide + ~2 px margin) so the bar doesn't overlap the
+        # nav button labels when the sidebar overflows.
+        nav_inner_layout.setContentsMargins(0, 0, 12, 0)
         nav_inner_layout.setSpacing(10)
         for button in self._settings_nav_buttons:
             nav_inner_layout.addWidget(button)
@@ -5307,6 +5614,10 @@ class MainWindow(QMainWindow):
         # order in the sidebar is set separately to put General
         # right under Instructions.
         self.settings_content_stack.addWidget(self._build_general_panel())
+        # About / Privacy — index 11 (SECTION_ABOUT). Mirrors the
+        # first-run privacy dialog so users can review what gets
+        # collected and toggle analytics opt-in anytime.
+        self.settings_content_stack.addWidget(self._build_about_panel())
 
         # Wrap the content stack in a scroll area so when the window
         # is too short the active panel scrolls instead of squashing
@@ -6541,28 +6852,30 @@ class MainWindow(QMainWindow):
         )
 
     def _general_checkbox_qss(self) -> str:
-        """Visible-on-dark-theme checkbox indicator QSS. The
-        default Qt indicator on the dark surface renders as a
-        nearly-black square that's very hard to see — explicit
-        styling fixes the visibility:
-          - Unchecked: light translucent surface + accent border.
-          - Checked:   solid accent fill + dark navy checkmark
-                       (drawn via background-color + a unicode
-                       check is too fragile across DPI; we use a
-                       data-URI svg checkmark instead).
-          - Hover:     brighter border for affordance.
+        """Unified checkbox style used across the whole app.
+
+          - Box is ALWAYS visibly green (accent color) — outline
+            only when unchecked, fully filled when checked.
+          - Checked state shows a white checkmark (inline SVG via
+            data: URI so it scales clean across DPIs and ships
+            embedded with no resource file).
+          - Hover lifts the box slightly so the affordance is
+            obvious without changing the green identity.
+          - Disabled state desaturates so users can tell the box
+            isn't currently interactive.
         """
         text_color = str(self.config.text_color or "#E5F6FF")
         accent = str(self.config.accent_color or "#1DE9B6")
-        # Inline SVG check mark — embedded as a data-URI so we
-        # don't have to ship an asset file. Drawn in the same
-        # dark navy used by the Save Changes / OK button text so
-        # the checkmark reads against the accent fill.
+        accent_hover = "#29F0C1"   # +6% lightness from the default accent
+        accent_dim = "rgba(29,233,182,0.18)"  # accent at 18% alpha for hover-unchecked tint
+        # White checkmark — shown only in the :checked state. The
+        # %23 is URL-encoded "#" because data: URIs can't carry a
+        # raw "#".
         check_svg = (
             "url(\"data:image/svg+xml;utf8,"
             "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3.5 8.5l3 3 6-7' stroke='%23001B24' "
-            "stroke-width='2.4' fill='none' "
+            "<path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' "
+            "stroke-width='2.6' fill='none' "
             "stroke-linecap='round' stroke-linejoin='round'/>"
             "</svg>\")"
         )
@@ -6571,30 +6884,38 @@ class MainWindow(QMainWindow):
             f"  color: {text_color};"
             f"  spacing: 10px;"
             f"  font-size: 13px;"
+            f"  background: transparent;"
             f"}}"
             f"QCheckBox::indicator {{"
             f"  width: 18px;"
             f"  height: 18px;"
             f"  border-radius: 4px;"
-            f"  border: 1.5px solid rgba(229,246,255,0.55);"
-            f"  background-color: rgba(255,255,255,0.10);"
+            f"  border: 2px solid {accent};"
+            f"  background-color: transparent;"
             f"}}"
             f"QCheckBox::indicator:hover {{"
-            f"  border: 1.5px solid {accent};"
-            f"  background-color: rgba(255,255,255,0.18);"
+            f"  border: 2px solid {accent_hover};"
+            f"  background-color: {accent_dim};"
             f"}}"
             f"QCheckBox::indicator:checked {{"
             f"  background-color: {accent};"
-            f"  border: 1.5px solid {accent};"
+            f"  border: 2px solid {accent};"
             f"  image: {check_svg};"
             f"}}"
             f"QCheckBox::indicator:checked:hover {{"
-            f"  background-color: {accent};"
-            f"  border: 1.5px solid {accent};"
+            f"  background-color: {accent_hover};"
+            f"  border: 2px solid {accent_hover};"
+            f"  image: {check_svg};"
             f"}}"
             f"QCheckBox::indicator:disabled {{"
-            f"  border: 1.5px solid rgba(127,127,127,0.35);"
-            f"  background-color: rgba(127,127,127,0.10);"
+            f"  border: 2px solid rgba(127,127,127,0.45);"
+            f"  background-color: rgba(127,127,127,0.12);"
+            f"  image: none;"
+            f"}}"
+            f"QCheckBox::indicator:checked:disabled {{"
+            f"  background-color: rgba(127,127,127,0.40);"
+            f"  border: 2px solid rgba(127,127,127,0.45);"
+            f"  image: {check_svg};"
             f"}}"
         )
 
@@ -7026,21 +7347,14 @@ class MainWindow(QMainWindow):
         gpu_btn.setText("GPU Mode: ON" if gpu_initial else "GPU Mode")
         self._register_general_baseline("gpu_mode", gpu_initial)
 
-        # GPU probe tooltip — same probe + reasoning the Camera
-        # panel surfaces. Toggle stays enabled regardless because
-        # the runtime falls back to CPU MediaPipe transparently.
-        try:
-            from ...gesture.tracking.gpu_probe import probe_gpu_paths
-            probe = probe_gpu_paths()
-            if probe.has_any_gpu_path:
-                gpu_btn.setToolTip(probe.path_summary())
-            else:
-                gpu_btn.setToolTip(
-                    probe.path_summary()
-                    + "\n\nToggling on is safe — runtime falls back to CPU MediaPipe automatically."
-                )
-        except Exception:
-            pass
+        # GPU probe hover-tooltip removed: the multi-line
+        # path_summary() text rendered as a large dark rectangle
+        # over the button on hover, which read as a UI bug. The
+        # diagnostic info still lives in the engine logs; the
+        # button's behaviour is unchanged (runtime falls back to
+        # CPU MediaPipe transparently if the GPU path isn't
+        # reachable). The expandable note above already explains
+        # what the toggle does for users who want context.
 
         def _on_gpu_clicked(checked: bool) -> None:
             gpu_btn.setText("GPU Mode: ON" if checked else "GPU Mode")
@@ -9100,36 +9414,16 @@ class MainWindow(QMainWindow):
         gpu_mode_row.addWidget(self.gpu_mode_button)
         gpu_mode_row.addStretch(1)
         box_layout.addLayout(gpu_mode_row)
-        # Probe what GPU paths are reachable and surface it via the
-        # tooltip — but DON'T disable the toggle on a probe miss. The
-        # runtime loader falls back to CPU MediaPipe transparently if
-        # no GPU path is reachable, so toggling on with no GPU is at
-        # worst a no-op. Earlier versions disabled the button when
-        # the probe came back empty, which on some machines (probe
-        # false-negative, packaged-app DLL discovery edge cases) made
-        # GPU Mode appear permanently unavailable even when the user
-        # had a perfectly capable GPU.
-        try:
-            from ...gesture.tracking.gpu_probe import probe_gpu_paths
-            probe = probe_gpu_paths()
-            if probe.has_any_gpu_path:
-                self.gpu_mode_button.setToolTip(probe.path_summary())
-            else:
-                # path_summary() now returns an actionable, specific
-                # failure reason ("DirectML.dll could not be loaded
-                # ([WinError 5] Access is denied). Add the Touchless
-                # install folder to your antivirus exclusions...")
-                # rather than the generic "no GPU detected" line that
-                # left users with nothing to act on. Keep the
-                # safe-to-toggle reassurance on its own line so a user
-                # who can't fix the underlying cause still understands
-                # clicking won't break anything.
-                self.gpu_mode_button.setToolTip(
-                    probe.path_summary()
-                    + "\n\nToggling on is safe — runtime falls back to CPU MediaPipe automatically."
-                )
-        except Exception:
-            pass
+        # Hover tooltip removed: the multi-line probe.path_summary()
+        # rendered as a large dark rectangle over the button, which
+        # read as a UI bug. The toggle still works the same way --
+        # the runtime loader falls back to CPU MediaPipe
+        # transparently if no GPU path is reachable, so toggling on
+        # with no GPU is at worst a no-op. The button stays
+        # enabled regardless of probe state (earlier versions
+        # disabled it on probe miss; that made GPU Mode appear
+        # permanently unavailable on some machines where the
+        # probe false-negatived).
         self._refresh_gpu_mode_button_label()
 
         self._refresh_phone_camera_controls()
@@ -10645,6 +10939,185 @@ class MainWindow(QMainWindow):
         except Exception:
             step_index = 0
         self.open_tutorial(from_settings=True, start_step_index=step_index)
+
+    def _build_about_panel(self) -> QWidget:
+        """Settings → About & Privacy panel.
+
+        Shows the same disclosure text the first-run dialog showed,
+        plus a live-toggleable analytics opt-in switch. Users who
+        opted in/out at first run can change their mind anytime
+        from here without having to find the dialog again."""
+        from ... import __version__ as APP_VERSION
+        panel, layout = self._make_content_panel(
+            "About & Privacy",
+            "What Touchless does with your data, and how to change "
+            "your usage-data preference anytime.",
+        )
+
+        # ---- Version ----
+        version_box = QFrame()
+        version_box.setObjectName("innerCard")
+        version_box.setAttribute(Qt.WA_StyledBackground, True)
+        version_layout = QVBoxLayout(version_box)
+        version_layout.setContentsMargins(16, 16, 16, 16)
+        version_layout.setSpacing(6)
+        version_label = QLabel(f"<b>Touchless</b>  v{APP_VERSION}")
+        version_label.setStyleSheet("font-size: 14px;")
+        version_layout.addWidget(version_label)
+        author_label = QLabel("by Konstantin Markov")
+        author_label.setStyleSheet(
+            f"color: {self.config.text_color}; opacity: 0.7; font-size: 12px;"
+        )
+        version_layout.addWidget(author_label)
+        layout.addWidget(version_box)
+
+        # ---- Privacy disclosure ----
+        privacy_box = QFrame()
+        privacy_box.setObjectName("innerCard")
+        privacy_box.setAttribute(Qt.WA_StyledBackground, True)
+        privacy_layout = QVBoxLayout(privacy_box)
+        privacy_layout.setContentsMargins(16, 16, 16, 16)
+        privacy_layout.setSpacing(10)
+
+        privacy_header = QLabel("How Touchless handles your data")
+        privacy_header.setStyleSheet("font-size: 14px; font-weight: 600;")
+        privacy_layout.addWidget(privacy_header)
+
+        privacy_body = QLabel(
+            "Camera, microphone, and dictation data are processed "
+            "<b>locally on this PC</b>. Hand landmarks, voice command audio, "
+            "and dictated text never leave your device.<br><br>"
+            "The only Touchless features that contact the internet are:<br>"
+            "&nbsp;&nbsp;• <b>Spotify integration</b> — plays / pauses / skips tracks via Spotify’s Web API. "
+            "Off until you click <i>Connect Spotify</i> in Settings.<br>"
+            "&nbsp;&nbsp;• <b>Auto-updates</b> — checks GitHub for new Touchless releases when the app launches.<br>"
+            "&nbsp;&nbsp;• <b>Anonymous usage data</b> — opt-in below; details further down."
+        )
+        privacy_body.setWordWrap(True)
+        privacy_body.setTextFormat(Qt.RichText)
+        privacy_body.setStyleSheet(
+            f"color: {self.config.text_color}; font-size: 13px; line-height: 150%;"
+        )
+        privacy_layout.addWidget(privacy_body)
+        layout.addWidget(privacy_box)
+
+        # ---- Analytics opt-in toggle ----
+        analytics_box = QFrame()
+        analytics_box.setObjectName("innerCard")
+        analytics_box.setAttribute(Qt.WA_StyledBackground, True)
+        analytics_layout = QVBoxLayout(analytics_box)
+        analytics_layout.setContentsMargins(16, 16, 16, 16)
+        analytics_layout.setSpacing(10)
+
+        analytics_header = QLabel("Help improve Touchless (optional)")
+        analytics_header.setStyleSheet("font-size: 14px; font-weight: 600;")
+        analytics_layout.addWidget(analytics_header)
+
+        analytics_body = QLabel(
+            "When this is on, Touchless sends a few anonymous events per "
+            "session so I can see what features get used and where the app "
+            "breaks. Data goes to a Cloudflare Worker I run myself — not "
+            "to any third-party analytics company.<br><br>"
+            "<b>Each event row in the database stores exactly four fields:</b><br>"
+            "&nbsp;&nbsp;<code>install_id</code> — a random UUID generated on first launch (not tied to you).<br>"
+            "&nbsp;&nbsp;<code>event</code> — the event name, e.g. <code>action_fired</code>, <code>gesture_detected</code>.<br>"
+            "&nbsp;&nbsp;<code>properties</code> — a small JSON blob with event-specific fields (gesture name, action ID, session length, etc.).<br>"
+            "&nbsp;&nbsp;<code>timestamp</code> — when the event happened.<br><br>"
+            "<b>Events sent (only if this is on):</b><br>"
+            "&nbsp;&nbsp;• <code>app_session_started</code> / <code>app_session_ended</code> + session length<br>"
+            "&nbsp;&nbsp;• <code>engine_started</code> / <code>engine_stopped</code><br>"
+            "&nbsp;&nbsp;• <code>action_fired</code> — name of an action triggered (e.g. <code>play_pause</code>)<br>"
+            "&nbsp;&nbsp;• <code>gesture_detected</code> — name of a gesture (e.g. <code>swipe_right</code>)<br>"
+            "&nbsp;&nbsp;• <code>voice_command_executed</code> — target app only (e.g. <code>spotify</code>), never the words you said<br>"
+            "&nbsp;&nbsp;• <code>settings_tab_opened</code>, <code>walkthrough_next_clicked</code> — UI navigation events<br>"
+            "&nbsp;&nbsp;• <code>error_caught</code> — exception type + short message (no stack traces, no file paths)<br><br>"
+            "<b>Never collected or stored:</b><br>"
+            "&nbsp;&nbsp;• Audio, video, or camera frames<br>"
+            "&nbsp;&nbsp;• Hand landmarks or skeletal data<br>"
+            "&nbsp;&nbsp;• Voice command transcripts or dictated text<br>"
+            "&nbsp;&nbsp;• File names, file paths, or window titles<br>"
+            "&nbsp;&nbsp;• Your name, email, or any account info<br>"
+            "&nbsp;&nbsp;• IP address (Cloudflare sees it during the request as it does for any HTTPS call, but the database row never stores it)<br>"
+            "&nbsp;&nbsp;• Anything from outside the Touchless app"
+        )
+        analytics_body.setWordWrap(True)
+        analytics_body.setTextFormat(Qt.RichText)
+        analytics_body.setStyleSheet(
+            f"color: {self.config.text_color}; font-size: 12px; "
+            "line-height: 160%;"
+        )
+        analytics_layout.addWidget(analytics_body)
+
+        self._analytics_toggle = QCheckBox("Send anonymous usage data")
+        # Touchless-themed checkbox: visible box (white outline →
+        # teal fill on check) with an explicit WHITE checkmark
+        # rendered from an inline SVG. PySide6 QSS supports data:
+        # URIs for image:, so the checkmark ships embedded — no
+        # external resource file needed.
+        _CHECK_SVG = (
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+            "<path d='M3.5 8.5 l3 3 l6-7' fill='none' stroke='white' "
+            "stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/>"
+            "</svg>"
+        )
+        import base64 as _b64
+        _check_uri = (
+            "data:image/svg+xml;base64,"
+            + _b64.b64encode(_CHECK_SVG.encode("utf-8")).decode("ascii")
+        )
+        self._analytics_toggle.setStyleSheet(
+            "QCheckBox {"
+            f"  color: {self.config.text_color};"
+            "  background: transparent;"
+            f"  font-size: {FONT_BODY}px;"
+            f"  font-weight: {WEIGHT_REGULAR};"
+            "  spacing: 10px;"
+            "  padding: 4px 0;"
+            "}"
+            "QCheckBox::indicator {"
+            "  width: 20px;"
+            "  height: 20px;"
+            "  border: 2px solid #FFFFFF;"
+            "  border-radius: 4px;"
+            "  background: rgba(255,255,255,0.04);"
+            "}"
+            "QCheckBox::indicator:hover {"
+            "  border: 2px solid #1DE9B6;"
+            "}"
+            "QCheckBox::indicator:checked {"
+            "  background: #1DE9B6;"
+            "  border: 2px solid #1DE9B6;"
+            f"  image: url(\"{_check_uri}\");"
+            "}"
+        )
+        self._analytics_toggle.setChecked(
+            bool(getattr(self.config, "analytics_enabled", False))
+        )
+        self._analytics_toggle.toggled.connect(self._on_analytics_toggle_changed)
+        analytics_layout.addWidget(self._analytics_toggle)
+        layout.addWidget(analytics_box)
+
+        layout.addStretch(1)
+        return panel
+
+    def _on_analytics_toggle_changed(self, checked: bool) -> None:
+        """Live opt-in toggle. Persists the choice and flips the
+        TelemetryClient's user-consent flag so the change takes
+        effect immediately — no app restart required."""
+        new_value = bool(checked)
+        if bool(getattr(self.config, "analytics_enabled", False)) == new_value:
+            return
+        self.config.analytics_enabled = new_value
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+        client = getattr(self, "_telemetry", None)
+        if client is not None:
+            try:
+                client.set_user_opt_in(new_value)
+            except Exception:
+                pass
 
     def _build_updates_panel(self) -> QWidget:
         from ... import __version__ as APP_VERSION  # local import keeps top-of-module clean
@@ -14346,6 +14819,59 @@ Admin elevation
                 self.last_action_label.setText("Last action: Spotify connected")
             else:
                 self.last_action_label.setText(f"Last action: Spotify connect failed — {message or 'see browser'}")
+
+    def _maybe_show_privacy_prompt(self) -> None:
+        """First-run privacy & analytics opt-in dialog.
+
+        - Installed app (PyInstaller, `sys.frozen=True`): fires
+          ONCE per install, gated by `config.privacy_disclosure_shown`.
+          Subsequent launches bypass the dialog entirely.
+        - Dev mode (`python run_app.py`, `sys.frozen` unset): ALWAYS
+          fires so it's easy to iterate on copy / layout / button
+          flow without nuking the config flag between runs.
+
+        On any exit (Allow OR Don't Allow): latches
+        `privacy_disclosure_shown=True`, captures the analytics
+        choice, saves config, and flips the live TelemetryClient's
+        user-consent flag so the choice takes effect immediately
+        without an app restart.
+        """
+        is_frozen = bool(getattr(sys, "frozen", False))
+        if is_frozen and bool(getattr(self.config, "privacy_disclosure_shown", False)):
+            return
+        try:
+            dialog = TouchlessPrivacyDialog(self)
+            dialog.exec()
+            self.config.privacy_disclosure_shown = True
+            self.config.analytics_enabled = bool(dialog.analytics_choice)
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
+            # Flip the live client immediately. If the user said
+            # yes, the worker thread starts now; if no, future
+            # track() calls short-circuit silently.
+            client = getattr(self, "_telemetry", None)
+            if client is not None:
+                try:
+                    client.set_user_opt_in(bool(self.config.analytics_enabled))
+                except Exception:
+                    pass
+            # Mirror the dialog's choice into the live Settings →
+            # About & Privacy checkbox if the panel has already been
+            # built. Without this, a user who clicks Allow then
+            # immediately opens Settings sees an unchecked box,
+            # which contradicts what they just agreed to.
+            toggle = getattr(self, "_analytics_toggle", None)
+            if toggle is not None:
+                try:
+                    blocker = toggle.blockSignals(True)
+                    toggle.setChecked(bool(self.config.analytics_enabled))
+                    toggle.blockSignals(blocker)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _maybe_show_spotify_first_active_prompt(self) -> None:
         """First-time Spotify-active gate. Called from the engine
@@ -18639,6 +19165,28 @@ Admin elevation
         if getattr(self, "_spotify_decline_pill", None) is not None and self._spotify_decline_pill.isVisible():
             self._position_spotify_decline_pill()
 
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API name)
+        """Hook the first VISIBLE show to schedule one-time post-
+        startup work — currently the privacy disclosure prompt.
+
+        TouchlessSplash.run_with does an off-screen pre-render of
+        the main window before the user sees it (sets
+        WA_DontShowOnScreen=True, calls show(), processes events,
+        then hides). That fires showEvent too. We filter the off-
+        screen path by checking the WA_DontShowOnScreen attribute
+        and only schedule the privacy prompt on the first VISIBLE
+        show.
+        """
+        super().showEvent(event)
+        if self.testAttribute(Qt.WA_DontShowOnScreen):
+            return
+        if not getattr(self, "_first_visible_show_done", True):
+            self._first_visible_show_done = True
+            # 800 ms after first paint = the home page is up and
+            # registered, then the modal lands. Reads as polite
+            # rather than racing the splash.
+            QTimer.singleShot(800, self._maybe_show_privacy_prompt)
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         try:
             self._stop_mic_test()
@@ -18705,9 +19253,11 @@ Admin elevation
             client = _telemetry.TelemetryClient(
                 install_id=str(self.config.analytics_install_id),
                 app_version=str(_APP_VERSION),
+                user_opt_in=bool(getattr(self.config, "analytics_enabled", False)),
             )
             print(
                 f"[telemetry] init: enabled={client.enabled} "
+                f"opted_in={client.user_opt_in} "
                 f"host={client._host} install={client._install_id[:8]}...",
                 flush=True,
             )
@@ -20213,6 +20763,7 @@ def _stop_screen_recording(self) -> bool:
             client = _telemetry.TelemetryClient(
                 install_id=str(self.config.analytics_install_id),
                 app_version=str(_APP_VERSION),
+                user_opt_in=bool(getattr(self.config, "analytics_enabled", False)),
             )
             _telemetry.set_client(client)
             self._telemetry = client
