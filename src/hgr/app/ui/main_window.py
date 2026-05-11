@@ -19,6 +19,7 @@ from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPointF, QPropertyAnim
 from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPainterPath, QPen, QCursor, QPixmap, QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -9512,33 +9513,19 @@ class MainWindow(QMainWindow):
             f"  font-weight: 700;"
             f"  letter-spacing: 1.2px;"
             f"  text-transform: uppercase;"
-            f"  margin: 0px;"
-            f"  padding: 0px;"
+            f"  margin-top: 0px;"
             f"}}"
         )
 
         def _section_header(text: str) -> QLabel:
+            # Identical shape to the Microphone panel's _section_header
+            # (line ~10671) so the two panels render with the same
+            # vertical rhythm. No setFixedHeight, no contentsMargins —
+            # just the QSS-styled label.
             lbl = QLabel(text)
             lbl.setObjectName("cameraSectionHeader")
             lbl.setStyleSheet(section_style)
-            lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            lbl.setFixedHeight(16)
-            lbl.setContentsMargins(0, 0, 0, 0)
             return lbl
-
-        def _section_header_with_description(title: str, description_widget) -> QWidget:
-            """Pack a section header + its description into a tight
-            sub-VBox (2 px spacing) so the description sits flush
-            under the header instead of picking up the outer
-            layout's 8 px spacing. Accepts either a plain QLabel or
-            a pre-built widget (e.g. an expandable note)."""
-            wrapper = QWidget()
-            wrap_layout = QVBoxLayout(wrapper)
-            wrap_layout.setContentsMargins(0, 0, 0, 0)
-            wrap_layout.setSpacing(2)
-            wrap_layout.addWidget(_section_header(title))
-            wrap_layout.addWidget(description_widget)
-            return wrapper
 
         # Throttle handles for the live-view overlays (FPS, latency,
         # tracking quality). debug_frame_ready fires at camera FPS
@@ -9550,16 +9537,24 @@ class MainWindow(QMainWindow):
         # ============================================================
         # 1. CONNECTED DEVICES (local camera selection)
         # ============================================================
-        self.camera_page_status = QLabel("Detected cameras: scanning...")
+        # camera_page_status is a status label kept around for legacy
+        # call sites (e.g. _on_camera_access_denied). Parented to the
+        # box frame so it follows the panel's lifecycle but never
+        # added to the layout — kept hidden.
+        self.camera_page_status = QLabel("Detected cameras: scanning...", box)
         self.camera_page_status.setWordWrap(True)
         self.camera_page_status.hide()
+
+        box_layout.addWidget(_section_header("Connected Devices"))
 
         note = QLabel(
             "Choose from the list of cameras connected to your device. Preview shows the selected camera."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
-        box_layout.addWidget(_section_header_with_description("Connected Devices", note))
+        note.setContentsMargins(0, 0, 0, 0)
+        note.setIndent(0)
+        box_layout.addWidget(note)
 
         self.camera_combo = _RefreshingCameraCombo()
         self.camera_combo.setObjectName("settingsCameraCombo")
@@ -9613,11 +9608,13 @@ class MainWindow(QMainWindow):
         #    related toggles still exist in AppConfig for backwards
         #    compatibility but the UI surface is gone.)
         # ============================================================
+        box_layout.addWidget(_section_header("Phone Camera — Via QR Code"))
+
         qr_note = self._build_expandable_note(
             "Use your phone as the camera by scanning a QR code from its browser.",
             "No phone app is needed. Touchless opens a small phone page that streams the camera directly to this PC after you scan the QR code and works on iPhone and Android.",
         )
-        box_layout.addWidget(_section_header_with_description("Phone Camera — Via QR Code", qr_note))
+        box_layout.addWidget(qr_note)
 
         qr_row = QHBoxLayout()
         qr_row.setSpacing(8)
@@ -9696,6 +9693,11 @@ class MainWindow(QMainWindow):
         # ON/OFF state — the rendering itself lives in
         # live_view_window.py and reads these config flags on every
         # debug-frame update.
+        # Same layout pattern as the Microphone panel: section header,
+        # then a note QLabel, then each control as a direct child of
+        # box_layout. Picks up the outer setSpacing(8) between every
+        # item — no nested wrappers, no manual addSpacing, no special-
+        # case captions. FPS and Latency labels are self-explanatory.
         box_layout.addWidget(_section_header("Live View Overlays"))
 
         live_overlay_intro = QLabel(
@@ -9708,19 +9710,6 @@ class MainWindow(QMainWindow):
 
         live_overlay_checkbox_qss = self._general_checkbox_qss()
 
-        def _add_overlay_toggle(checkbox: QCheckBox, caption_widget) -> None:
-            """Pack a toggle + its caption into a tight sub-layout so
-            the caption sits flush under the checkbox rather than
-            picking up the outer layout's full 8 px spacing."""
-            wrapper = QWidget()
-            wrapper_layout = QVBoxLayout(wrapper)
-            wrapper_layout.setContentsMargins(0, 0, 0, 0)
-            wrapper_layout.setSpacing(2)
-            wrapper_layout.addWidget(checkbox)
-            wrapper_layout.addWidget(caption_widget)
-            box_layout.addWidget(wrapper)
-
-        # ---- FPS toggle ----
         self.live_view_fps_checkbox = QCheckBox("Show FPS in live view")
         self.live_view_fps_checkbox.setStyleSheet(live_overlay_checkbox_qss)
         self.live_view_fps_checkbox.setChecked(
@@ -9729,15 +9718,8 @@ class MainWindow(QMainWindow):
         self.live_view_fps_checkbox.toggled.connect(
             lambda checked: self._on_live_view_overlay_toggle("live_view_show_fps", checked)
         )
-        fps_caption = QLabel(
-            "Frames-per-second the engine is actually processing."
-        )
-        fps_caption.setObjectName("cameraNote")
-        fps_caption.setWordWrap(True)
-        fps_caption.setContentsMargins(26, 0, 0, 0)
-        _add_overlay_toggle(self.live_view_fps_checkbox, fps_caption)
+        box_layout.addWidget(self.live_view_fps_checkbox)
 
-        # ---- Latency toggle ----
         self.live_view_latency_checkbox = QCheckBox("Show display latency (ms) in live view")
         self.live_view_latency_checkbox.setStyleSheet(live_overlay_checkbox_qss)
         self.live_view_latency_checkbox.setChecked(
@@ -9746,15 +9728,8 @@ class MainWindow(QMainWindow):
         self.live_view_latency_checkbox.toggled.connect(
             lambda checked: self._on_live_view_overlay_toggle("live_view_show_latency", checked)
         )
-        latency_caption = QLabel(
-            "Time from camera-frame decode to the current paint."
-        )
-        latency_caption.setObjectName("cameraNote")
-        latency_caption.setWordWrap(True)
-        latency_caption.setContentsMargins(26, 0, 0, 0)
-        _add_overlay_toggle(self.live_view_latency_checkbox, latency_caption)
+        box_layout.addWidget(self.live_view_latency_checkbox)
 
-        # ---- Tracking quality toggle ----
         self.live_view_tracking_quality_checkbox = QCheckBox("Show tracking quality pill in live view")
         self.live_view_tracking_quality_checkbox.setStyleSheet(live_overlay_checkbox_qss)
         self.live_view_tracking_quality_checkbox.setChecked(
@@ -9763,6 +9738,11 @@ class MainWindow(QMainWindow):
         self.live_view_tracking_quality_checkbox.toggled.connect(
             lambda checked: self._on_live_view_overlay_toggle("live_view_show_tracking_quality", checked)
         )
+        box_layout.addWidget(self.live_view_tracking_quality_checkbox)
+
+        # Tracking quality keeps a show-more details note because the
+        # four colour states (Good / Marginal / No hand seen / Idle)
+        # aren't obvious from the checkbox label.
         tracking_caption = self._build_expandable_note(
             "A colored pill that reflects how cleanly your hand is being detected.",
             "How it works:\n"
@@ -9780,8 +9760,7 @@ class MainWindow(QMainWindow):
             "The pill updates ~4 times per second so a single bad frame "
             "doesn't flicker it red.",
         )
-        tracking_caption.setContentsMargins(26, 0, 0, 0)
-        _add_overlay_toggle(self.live_view_tracking_quality_checkbox, tracking_caption)
+        box_layout.addWidget(tracking_caption)
 
         self._refresh_phone_camera_controls()
         self._refresh_camera_settings_save_state()
@@ -13191,8 +13170,6 @@ Admin elevation
         }}
         QLabel#cameraNote {{
             color: {dim_text_strong};
-            margin: 0px;
-            padding: 0px;
         }}
         /* Native QMessageBox has a light-gray background and relies on a
            dark label color for its message text. Our window-wide
@@ -15750,6 +15727,30 @@ Admin elevation
                 _telemetry.track("engine_started")
             except Exception:
                 pass
+
+            # Show the starting-pill BEFORE any heavy work begins.
+            # GestureWorker construction + camera enumeration below
+            # block the UI thread for ~2 s, so showing the pill any
+            # later means it only appears after the user has been
+            # staring at an unresponsive button. Pill is hidden by
+            # _on_running_state_changed(True) once the engine is up,
+            # with a 6 s fallback in case the running_state signal
+            # never fires (engine crash mid-init).
+            try:
+                self.processing_overlay.show_processing("Starting Touchless")
+                self._starting_splash_shown_at = time.monotonic()
+                fallback_timer = getattr(self, "_starting_splash_fallback_timer", None)
+                if fallback_timer is None:
+                    fallback_timer = QTimer(self)
+                    fallback_timer.setSingleShot(True)
+                    fallback_timer.timeout.connect(
+                        lambda: self.processing_overlay.hide_processing()
+                    )
+                    self._starting_splash_fallback_timer = fallback_timer
+                fallback_timer.stop()
+                fallback_timer.start(6000)
+            except Exception:
+                pass
     
             cameras = self._discovered_cameras if self._discovered_cameras else self.refresh_camera_inventory(update_status=True, notify=False)
             phone_qr_paired = (
@@ -15840,7 +15841,19 @@ Admin elevation
             phone_qr_active = bool(getattr(self.config, "phone_camera_qr_active", False)) and self._current_phone_camera_qr_server() is not None
             phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
             worker_override = None if (phone_qr_active or phone_url_active) else selected_camera_index
+            # Pump events so the starting-pill repaints (and its
+            # animated wave dots advance) before the GestureWorker
+            # constructor, which can block the UI thread for ~1-2 s
+            # the first time it touches MediaPipe / audio devices.
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
             self._worker = GestureWorker(self.config, camera_index_override=worker_override)
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
             self._worker.status_changed.connect(self._on_status_changed)
             self._worker.command_detected.connect(self._on_command_detected)
             self._worker.camera_selected.connect(self._on_camera_selected)
@@ -15908,33 +15921,6 @@ Admin elevation
             self.last_action_label.setText("Last action: starting gesture and voice control")
             self.start_button.setEnabled(False)
             self.end_button.setEnabled(True)
-            # Visual "starting" pill at bottom-center of the monitor
-            # with animated loading dots. Reuses the existing
-            # ProcessingOverlay (same widget the clip-export flow
-            # uses) so the visual idiom is consistent. Hidden by
-            # _on_running_state_changed(True) once the engine is
-            # actually up; falls back to a 6 s timeout in case the
-            # running_state signal never fires (e.g., engine crash
-            # mid-init).
-            try:
-                self.processing_overlay.show_processing("Starting Touchless")
-                # Stamp the show time so _on_running_state_changed
-                # can compute remaining min-show window. Engine
-                # init can finish in ~200 ms on warm caches; without
-                # a min-show the pill flashes too fast to read.
-                self._starting_splash_shown_at = time.monotonic()
-                fallback_timer = getattr(self, "_starting_splash_fallback_timer", None)
-                if fallback_timer is None:
-                    fallback_timer = QTimer(self)
-                    fallback_timer.setSingleShot(True)
-                    fallback_timer.timeout.connect(
-                        lambda: self.processing_overlay.hide_processing()
-                    )
-                    self._starting_splash_fallback_timer = fallback_timer
-                fallback_timer.stop()
-                fallback_timer.start(6000)
-            except Exception:
-                pass
             self._worker.start()
             self._start_clip_cache()
             if (

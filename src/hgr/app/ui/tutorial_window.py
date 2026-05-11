@@ -621,7 +621,7 @@ class _TutorialStartingPill(QWidget):
 
     def _tick(self) -> None:
         if self.isVisible():
-            self.update()
+            self.repaint()
 
     def _draw_loading_dots(self, painter: QPainter, cx: float, cy: float, accent: QColor) -> None:
         # Verbatim copy of VoiceStatusOverlay._draw_loading_dots.

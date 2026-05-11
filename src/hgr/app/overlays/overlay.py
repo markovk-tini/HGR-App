@@ -919,8 +919,13 @@ class ProcessingOverlay(QWidget):
         self.move(x, y)
 
     def _tick(self) -> None:
+        # Synchronous repaint -- on a translucent layered window
+        # with apply_overlay() applied, update() doesn't reliably
+        # schedule a WM_PAINT that DWM actually composites. repaint()
+        # forces the paint to land each tick so the wave dots
+        # actually animate instead of freezing on the initial frame.
         if self.isVisible():
-            self.update()
+            self.repaint()
 
     def show_processing(self, label: str = "Processing") -> None:
         self._label = str(label or "Processing")
