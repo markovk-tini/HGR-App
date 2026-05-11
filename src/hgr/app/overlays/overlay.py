@@ -1250,6 +1250,113 @@ class SavedLocationOverlay(QWidget):
         painter.drawText(rect, Qt.AlignCenter, self._displayed_text)
 
 
+class TrackingQualityPill(QWidget):
+    """Bottom-centre desktop pill mirroring the diagnostic
+    'Tracking: ...' chip from LiveViewWindow. Visible whenever
+    the user has enabled the 'show tracking quality' overlay AND
+    the engine is running, so the readout sticks with the user
+    even when the live-view window is closed."""
+
+    _PILL_HEIGHT = 32
+    _SCREEN_BOTTOM_GAP = 28
+    _PADDING_X = 18
+
+    _STATES = {
+        "good": ("Tracking: Good",          QColor(29, 233, 182),  QColor(29, 233, 182, 60), QColor(29, 233, 182, 200)),
+        "fair": ("Tracking: Marginal",       QColor(245, 180, 80),  QColor(245, 180, 80, 60), QColor(245, 180, 80, 200)),
+        "poor": ("Tracking: No hand seen",   QColor(255, 138, 138), QColor(255, 107, 107, 60), QColor(255, 107, 107, 200)),
+        "idle": ("Tracking: —",         QColor(229, 246, 255, 200), QColor(20, 30, 50, 160), QColor(127, 127, 127, 120)),
+    }
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._state = "idle"
+        self._last_hand_ts = 0.0
+        self._fit_size_for_state()
+
+    def _fit_size_for_state(self) -> None:
+        text, _fg, _bg, _border = self._STATES.get(self._state, self._STATES["idle"])
+        font = QFont("Segoe UI", 10)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        w = metrics.horizontalAdvance(text) + 2 * self._PADDING_X
+        self.resize(max(170, w), self._PILL_HEIGHT)
+
+    def _place_on_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        geo = screen.availableGeometry()
+        x = geo.center().x() - self.width() // 2
+        y = geo.bottom() - self.height() - self._SCREEN_BOTTOM_GAP
+        self.move(x, y)
+
+    def update_state(self, *, found: bool, confidence: float) -> None:
+        """Feed a per-engine-frame tracking observation. State
+        decays to 'poor' if no hand seen for 0.6 s (down from the
+        live-view chip's 1.5 s -- user reported the desktop pill
+        feeling laggy with the longer window)."""
+        now = time.monotonic()
+        if found:
+            self._last_hand_ts = now
+            new_state = "good" if confidence >= 0.65 else ("fair" if confidence >= 0.45 else "poor")
+        elif now - self._last_hand_ts >= 0.6:
+            new_state = "poor"
+        else:
+            new_state = self._state
+        if new_state != self._state:
+            self._state = new_state
+            self._fit_size_for_state()
+            if self.isVisible():
+                self._place_on_screen()
+                self.repaint()
+
+    def show_pill(self) -> None:
+        self._fit_size_for_state()
+        self._place_on_screen()
+        self.show()
+        self.raise_()
+        self.repaint()
+        try:
+            apply_overlay(self)
+        except Exception:
+            pass
+
+    def hide_pill(self) -> None:
+        self.hide()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 — Qt API name
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        text, fg, bg, border_color = self._STATES.get(self._state, self._STATES["idle"])
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(border_color, 1.2))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, rect.height() / 2.0, rect.height() / 2.0)
+        font = QFont("Segoe UI", 10)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(fg))
+        painter.drawText(rect, Qt.AlignCenter, text)
+
+
 class CaptureRegionOverlay(QWidget):
     selection_finished = Signal(QRect)
     selection_canceled = Signal()

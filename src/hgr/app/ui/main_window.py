@@ -85,7 +85,7 @@ from ...debug.voice_command_listener import list_input_microphones
 from ...utils.runtime_paths import app_base_path
 from ...voice.save_prompt import SavePromptProcessor
 from ..integration.noop_engine import GestureWorker
-from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, ProcessingOverlay, RecordingIndicatorOverlay, SavedLocationOverlay
+from ..overlays.overlay import HelloOverlay, ScreenDrawOverlay, DrawingSettingsDialog, CountdownOverlay, CaptureRegionOverlay, ProcessingOverlay, RecordingIndicatorOverlay, SavedLocationOverlay, TrackingQualityPill
 from .mini_live_viewer import MiniLiveViewer
 from .live_view_window import LiveViewWindow
 from .tutorial_window import TutorialWindow
@@ -4993,6 +4993,12 @@ class MainWindow(QMainWindow):
         # out after 3 s — fires for every successful save in
         # _on_save_prompt_completed.
         self.saved_location_overlay = SavedLocationOverlay()
+        # Bottom-center desktop pill mirroring the diagnostic
+        # 'Tracking: Good / Marginal / No hand seen' chip from
+        # LiveViewWindow. Visible when the engine is running AND
+        # the user has 'Tracking quality' enabled in Settings →
+        # Camera → Live View Overlays.
+        self.tracking_quality_pill = TrackingQualityPill()
         # Active clip-export worker thread, if any. Held so we can
         # query state and so Python doesn't garbage-collect it
         # while it's still running.
@@ -9409,12 +9415,18 @@ class MainWindow(QMainWindow):
         # settings-stack background instead of an empty card.
         panel.setStyleSheet("QFrame#settingsContentPanel { background: transparent; border: none; }")
         # Tighten the panel's outer margins so the camera content
-        # fits within the default settings viewport without
-        # triggering the outer scroll. The default 20 px top/bottom
-        # margin was just enough to push the camera content over
-        # the edge of the viewport at default window size.
+        # fits within the default settings viewport.
         layout.setContentsMargins(16, 8, 16, 8)
         layout.setSpacing(8)
+        # Tell the outer QStackedWidget to IGNORE this panel's
+        # vertical sizeHint when sizing itself. The stack normally
+        # takes the MAX of all children's sizeHints; without this
+        # the camera panel pushed the stack past the viewport,
+        # which made the OUTER settings content_scroll show a
+        # scrollbar that scrolled into nothing. With Ignored vertical
+        # the panel sizes to whatever the viewport gives it and the
+        # inner cameraScroll handles overflow locally.
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         title_item = layout.takeAt(0)
         title_label = title_item.widget() if title_item is not None else None
         header_row = QHBoxLayout()
@@ -11437,24 +11449,11 @@ class MainWindow(QMainWindow):
         version_label = QLabel(f"<b>Touchless</b>  v{APP_VERSION}")
         version_label.setStyleSheet("font-size: 14px;")
         version_layout.addWidget(version_label)
-        # Footer row: © author • Privacy Policy • Support. The
-        # last two are anchor tags with `href=` so they open in
-        # the user's default browser via Qt's `openExternalLinks`.
-        accent = self.config.accent_color or "#1DE9B6"
-        footer_label = QLabel(
-            f"© Konstantin Markov &nbsp;·&nbsp; "
-            f"<a style='color:{accent}; text-decoration:none;' "
-            f"href='https://touchless-control.pages.dev/privacy.html'>Privacy Policy</a> "
-            f"&nbsp;·&nbsp; "
-            f"<a style='color:{accent}; text-decoration:none;' "
-            f"href='https://touchless-control.pages.dev/'>Support</a>"
+        author_label = QLabel("by Konstantin Markov")
+        author_label.setStyleSheet(
+            f"color: {self.config.text_color}; opacity: 0.7; font-size: 12px;"
         )
-        footer_label.setTextFormat(Qt.RichText)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet(
-            f"color: {self.config.text_color}; opacity: 0.85; font-size: 12px;"
-        )
-        version_layout.addWidget(footer_label)
+        version_layout.addWidget(author_label)
         layout.addWidget(version_box)
 
         # ---- Privacy disclosure ----
@@ -11545,6 +11544,30 @@ class MainWindow(QMainWindow):
         self._analytics_toggle.toggled.connect(self._on_analytics_toggle_changed)
         analytics_layout.addWidget(self._analytics_toggle)
         layout.addWidget(analytics_box)
+
+        # ---- Footer row (bottom of page) -----------------------
+        # © author • Privacy Policy link • Support link. The two
+        # links are anchor tags inside a single QLabel with
+        # openExternalLinks=True so they open in the user's
+        # default browser. Sits below all the content cards as a
+        # quiet page footer.
+        accent = self.config.accent_color or "#1DE9B6"
+        about_footer_label = QLabel(
+            f"© Konstantin Markov &nbsp;·&nbsp; "
+            f"<a style='color:{accent}; text-decoration:none;' "
+            f"href='https://touchless-control.pages.dev/privacy.html'>Privacy Policy</a> "
+            f"&nbsp;·&nbsp; "
+            f"<a style='color:{accent}; text-decoration:none;' "
+            f"href='https://touchless-control.pages.dev/'>Support</a>"
+        )
+        about_footer_label.setTextFormat(Qt.RichText)
+        about_footer_label.setOpenExternalLinks(True)
+        about_footer_label.setAlignment(Qt.AlignCenter)
+        about_footer_label.setStyleSheet(
+            f"color: {self.config.text_color}; opacity: 0.7; "
+            f"font-size: 12px; padding-top: 8px;"
+        )
+        layout.addWidget(about_footer_label)
 
         layout.addStretch(1)
         return panel
@@ -15097,6 +15120,11 @@ Admin elevation
                         )
                     except Exception:
                         pass
+            # Desktop tracking-quality pill follows the same toggle.
+            try:
+                self._reapply_tracking_quality_pill_visibility()
+            except Exception:
+                pass
         return changed
 
     def clear_camera_preference(self) -> None:
@@ -16397,6 +16425,26 @@ Admin elevation
                     QTimer.singleShot(remaining_ms, _hide_now)
                 else:
                     _hide_now()
+            # Desktop tracking-quality pill: show when engine is up
+            # AND the user has the overlay toggle on; hide otherwise.
+            try:
+                self._reapply_tracking_quality_pill_visibility()
+            except Exception:
+                pass
+
+    def _reapply_tracking_quality_pill_visibility(self) -> None:
+        pill = getattr(self, "tracking_quality_pill", None)
+        if pill is None:
+            return
+        worker = getattr(self, "_worker", None)
+        engine_running = worker is not None and bool(getattr(worker, "is_running", False))
+        show_toggle = bool(getattr(self.config, "live_view_show_tracking_quality", False))
+        if engine_running and show_toggle:
+            if not pill.isVisible():
+                pill.show_pill()
+        else:
+            if pill.isVisible():
+                pill.hide_pill()
 
     def _on_command_detected(self, command: str) -> None:
         action_text = str(command or "").strip() or "none"
@@ -19609,6 +19657,20 @@ Admin elevation
     def _on_worker_debug_frame(self, frame, info) -> None:
         if not isinstance(info, dict):
             return
+        # Desktop tracking-quality pill: feeds the bottom-centre
+        # 'Tracking: ...' pill at engine-frame rate so it follows
+        # hand reacquisition / loss with minimal lag. Only updates
+        # when the pill is visible (config toggle is on AND engine
+        # is running) so we don't pay the per-frame work otherwise.
+        pill = getattr(self, "tracking_quality_pill", None)
+        if pill is not None and pill.isVisible():
+            try:
+                pill.update_state(
+                    found=bool(info.get("found", False)),
+                    confidence=float(info.get("confidence", 0.0) or 0.0),
+                )
+            except Exception:
+                pass
         # First-time Spotify-active prompt — fires once per install,
         # the first time we see Spotify running while the engine is
         # up AND the user has no saved Spotify tokens. Catches every

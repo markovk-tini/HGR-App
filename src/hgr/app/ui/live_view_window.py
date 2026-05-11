@@ -665,10 +665,12 @@ class LiveViewWindow(QMainWindow):
                 self._set_tracking_quality_state("good")
             elif found and confidence >= 0.45:
                 self._set_tracking_quality_state("fair")
-            elif time_since_hand >= 1.5:
+            elif time_since_hand >= 0.6:
                 self._set_tracking_quality_state("poor")
-            # Between found=False and 1.5 s timeout, keep the prior
+            # Between found=False and 0.6 s timeout, keep the prior
             # state to avoid flashing red on single-frame drops.
+            # Down from 1.5 s — user reported the chip's reactions
+            # to hand removal/reappearance feeling very delayed.
 
     def _apply_fps_chip_color(self, kind: str) -> None:
         """Recolor the FPS chip — green when comfortably high,
