@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime
 from itertools import cycle
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Optional
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+
+from ..ui.native_overlay import apply_overlay
 
 
 class HelloOverlay(QWidget):
@@ -895,10 +898,10 @@ class ProcessingOverlay(QWidget):
         self.setAutoFillBackground(False)
         self.setStyleSheet("background: transparent; border: none;")
         self._label = "Processing"
-        self._dot_count = 0
         self._timer = QTimer(self)
-        self._timer.setInterval(380)
-        self._timer.timeout.connect(self._advance_dots)
+        # Animated wave dots redraw at ~25 fps for smooth pulsing.
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
         self.resize(self._PILL_WIDTH, self._PILL_HEIGHT)
 
     def _place_on_screen(self) -> None:
@@ -915,14 +918,12 @@ class ProcessingOverlay(QWidget):
         y = geo.bottom() - self._PILL_HEIGHT - self._SCREEN_BOTTOM_GAP
         self.move(x, y)
 
-    def _advance_dots(self) -> None:
-        self._dot_count = (self._dot_count + 1) % 4
+    def _tick(self) -> None:
         if self.isVisible():
             self.update()
 
     def show_processing(self, label: str = "Processing") -> None:
         self._label = str(label or "Processing")
-        self._dot_count = 0
         self._place_on_screen()
         self.show()
         self.raise_()
@@ -938,11 +939,35 @@ class ProcessingOverlay(QWidget):
             QApplication.processEvents()
         except Exception:
             pass
+        # apply_overlay() strips the DWM rectangle halo around the
+        # layered window (DwmSetWindowAttribute disables the system
+        # border-color + non-client rendering). Must be called AFTER
+        # show() and AFTER the first repaint -- before that the HWND
+        # isn't fully realized and DwmSetWindowAttribute returns
+        # E_HANDLE silently.
+        apply_overlay(self)
         self._timer.start()
 
     def hide_processing(self) -> None:
         self._timer.stop()
         self.hide()
+
+    def _draw_loading_dots(self, painter: QPainter, cx: float, cy: float, accent: QColor) -> None:
+        # 5-dot wave pulsing left-to-right -- visually identical to
+        # VoiceStatusOverlay's recognising indicator so the user
+        # reads them as the same family.
+        painter.setPen(Qt.NoPen)
+        phase = time.monotonic() * 6.0
+        for index in range(5):
+            wave = max(0.0, math.sin(phase - index * 0.48))
+            pulse = 0.38 + 0.62 * wave
+            dot = QColor(accent)
+            dot.setAlpha(int(90 + 150 * pulse))
+            painter.setBrush(dot)
+            x = cx + (index - 2) * 14
+            y = cy - 6 * wave
+            size = 8.0 + 3.0 * pulse
+            painter.drawEllipse(QRectF(x - size / 2.0, y - size / 2.0, size, size))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -956,6 +981,7 @@ class ProcessingOverlay(QWidget):
         panel = QColor(25, 73, 143, 164)
         border = QColor(29, 233, 182, 210)
         text_color = QColor(232, 246, 255, 238)
+        accent = QColor(29, 233, 182)
 
         # Inset the rect by 0.5 px to keep the antialiased border
         # fully inside the window bounds (otherwise the outermost
@@ -965,12 +991,17 @@ class ProcessingOverlay(QWidget):
         painter.setBrush(panel)
         painter.drawRoundedRect(rect, 18.0, 18.0)
 
+        # Label on the left half, animated dots on the right.
         font = QFont("Segoe UI", 12)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QPen(text_color))
-        text = f"{self._label}{'.' * self._dot_count}"
-        painter.drawText(rect, Qt.AlignCenter, text)
+        label_rect = QRectF(rect.left() + 18, rect.top(), rect.width() - 110, rect.height())
+        painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, self._label)
+
+        dots_cx = rect.right() - 50
+        dots_cy = rect.center().y()
+        self._draw_loading_dots(painter, dots_cx, dots_cy, accent)
 
 
 class SavedLocationOverlay(QWidget):
@@ -1042,6 +1073,7 @@ class SavedLocationOverlay(QWidget):
             QApplication.processEvents()
         except Exception:
             pass
+        apply_overlay(self)
         self._fade_total_ms = max(50, int(fade_ms))
         hold_ms = max(0, int(total_ms) - self._fade_total_ms)
         self._hold_timer.start(hold_ms)
