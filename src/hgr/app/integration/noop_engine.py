@@ -358,7 +358,29 @@ class _EngineRunner:
         thread = self._thread
         self._thread = None
         if thread is not None:
-            thread.join(timeout=timeout)
+            # Pump the Qt event loop in 50 ms slices while waiting
+            # for the engine thread to finish so the UI thread (which
+            # calls this from stop_engine / start_engine on a hot
+            # camera swap) keeps painting the camera viewers and
+            # processing input. Without the pumps the viewer freezes
+            # for up to `timeout` seconds on every swap.
+            try:
+                from PySide6.QtWidgets import QApplication as _QApp
+                _qapp = _QApp.instance()
+            except Exception:
+                _qapp = None
+            if _qapp is not None:
+                elapsed = 0.0
+                step = 0.05
+                while elapsed < timeout and thread.is_alive():
+                    thread.join(timeout=step)
+                    elapsed += step
+                    try:
+                        _qapp.processEvents()
+                    except Exception:
+                        pass
+            else:
+                thread.join(timeout=timeout)
         self._busy = False
         self._result_callback = None
 
