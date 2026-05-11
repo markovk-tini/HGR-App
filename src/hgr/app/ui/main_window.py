@@ -9399,6 +9399,15 @@ class MainWindow(QMainWindow):
             "Camera",
             "",
         )
+        # The global QSS gives `#settingsContentPanel` the same
+        # rounded-card background as the inner `#innerCard`. With
+        # only one inner card in the camera panel, the outer panel's
+        # tinted background showed up as visible "empty space"
+        # extending past the inner card's bottom border. Override
+        # the camera panel to be transparent so the inner box is the
+        # only visible card — the surrounding area reads as plain
+        # settings-stack background instead of an empty card.
+        panel.setStyleSheet("QFrame#settingsContentPanel { background: transparent; border: none; }")
         title_item = layout.takeAt(0)
         title_label = title_item.widget() if title_item is not None else None
         header_row = QHBoxLayout()
@@ -9684,33 +9693,40 @@ class MainWindow(QMainWindow):
 
         live_overlay_checkbox_qss = self._general_checkbox_qss()
 
+        # Baselines for the deferred-save flow: capture each
+        # checkbox's saved value at build time so the Save Changes
+        # button can detect when any toggle has been flipped away
+        # from its persisted state. Toggling a checkbox no longer
+        # saves immediately; it only marks the panel as having
+        # pending changes (Save Changes button lights up). Clicking
+        # Save Changes applies the new values to config.
+        self._live_view_overlay_baseline = {
+            "live_view_show_fps": bool(getattr(self.config, "live_view_show_fps", False)),
+            "live_view_show_latency": bool(getattr(self.config, "live_view_show_latency", False)),
+            "live_view_show_tracking_quality": bool(getattr(self.config, "live_view_show_tracking_quality", False)),
+        }
+
         self.live_view_fps_checkbox = QCheckBox("Show FPS in live view")
         self.live_view_fps_checkbox.setStyleSheet(live_overlay_checkbox_qss)
-        self.live_view_fps_checkbox.setChecked(
-            bool(getattr(self.config, "live_view_show_fps", False))
-        )
+        self.live_view_fps_checkbox.setChecked(self._live_view_overlay_baseline["live_view_show_fps"])
         self.live_view_fps_checkbox.toggled.connect(
-            lambda checked: self._on_live_view_overlay_toggle("live_view_show_fps", checked)
+            lambda _checked: self._refresh_camera_settings_save_state()
         )
         box_layout.addWidget(self.live_view_fps_checkbox)
 
         self.live_view_latency_checkbox = QCheckBox("Show display latency (ms) in live view")
         self.live_view_latency_checkbox.setStyleSheet(live_overlay_checkbox_qss)
-        self.live_view_latency_checkbox.setChecked(
-            bool(getattr(self.config, "live_view_show_latency", False))
-        )
+        self.live_view_latency_checkbox.setChecked(self._live_view_overlay_baseline["live_view_show_latency"])
         self.live_view_latency_checkbox.toggled.connect(
-            lambda checked: self._on_live_view_overlay_toggle("live_view_show_latency", checked)
+            lambda _checked: self._refresh_camera_settings_save_state()
         )
         box_layout.addWidget(self.live_view_latency_checkbox)
 
         self.live_view_tracking_quality_checkbox = QCheckBox("Show tracking quality pill in live view")
         self.live_view_tracking_quality_checkbox.setStyleSheet(live_overlay_checkbox_qss)
-        self.live_view_tracking_quality_checkbox.setChecked(
-            bool(getattr(self.config, "live_view_show_tracking_quality", False))
-        )
+        self.live_view_tracking_quality_checkbox.setChecked(self._live_view_overlay_baseline["live_view_show_tracking_quality"])
         self.live_view_tracking_quality_checkbox.toggled.connect(
-            lambda checked: self._on_live_view_overlay_toggle("live_view_show_tracking_quality", checked)
+            lambda _checked: self._refresh_camera_settings_save_state()
         )
         box_layout.addWidget(self.live_view_tracking_quality_checkbox)
 
@@ -9803,41 +9819,6 @@ class MainWindow(QMainWindow):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not enabled)
-
-    def _on_live_view_overlay_toggle(self, config_field: str, checked: bool) -> None:
-        """Flip a live-view overlay on or off. Saves to config
-        immediately (no Save Changes button — these are tiny UI
-        prefs) and pokes the live-view window so the overlay
-        appears / disappears without needing the user to re-toggle
-        anything else."""
-        try:
-            setattr(self.config, config_field, bool(checked))
-            try:
-                save_config(self.config)
-            except Exception:
-                pass
-            live_view = getattr(self, "live_view_window", None)
-            if live_view is not None and hasattr(live_view, "set_overlay_visibility"):
-                try:
-                    live_view.set_overlay_visibility(
-                        show_fps=bool(getattr(self.config, "live_view_show_fps", False)),
-                        show_latency=bool(getattr(self.config, "live_view_show_latency", False)),
-                        show_tracking_quality=bool(getattr(self.config, "live_view_show_tracking_quality", False)),
-                    )
-                except Exception:
-                    pass
-            mini_viewer = getattr(self, "mini_live_viewer", None)
-            if mini_viewer is not None and hasattr(mini_viewer, "set_overlay_visibility"):
-                try:
-                    mini_viewer.set_overlay_visibility(
-                        show_fps=bool(getattr(self.config, "live_view_show_fps", False)),
-                        show_latency=bool(getattr(self.config, "live_view_show_latency", False)),
-                        show_tracking_quality=bool(getattr(self.config, "live_view_show_tracking_quality", False)),
-                    )
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def _set_camera_health_pill_state(self, state: str, *, custom_text: str | None = None) -> None:
         """Apply one of four visual states to the Camera Settings
@@ -11200,80 +11181,17 @@ class MainWindow(QMainWindow):
 
         scroll_layout.addWidget(name_box)
 
-        # ---- Mouse Control section ------------------------------------
-        # Persistent default for the monitor that mouse-mode controls.
-        # Lives here in Save Locations because there's no dedicated
-        # Mouse settings panel today; the mouse-mode-on activation
-        # popup links here via a "Monitor Choices" button so users
-        # can flip the default and see a visual preview of the
-        # camera-frame split mapping. None / "All Monitors" =
-        # historical full-virtual-desktop behavior.
-        mouse_box = QFrame()
-        mouse_box.setObjectName("innerCard")
-        mouse_box.setAttribute(Qt.WA_StyledBackground, True)
-        mouse_box.setStyleSheet(self._settings_inner_card_stylesheet())
-        mouse_box.setObjectName("saveLocationsMouseControlBox")
-        mouse_box_layout = QVBoxLayout(mouse_box)
-        mouse_box_layout.setContentsMargins(18, 18, 18, 18)
-        mouse_box_layout.setSpacing(14)
-        mouse_header = QLabel("Mouse Control")
-        mouse_header.setObjectName("settingsPanelTitle")
-        mouse_box_layout.addWidget(mouse_header)
-        mouse_note = QLabel(
-            "Choose which monitor mouse-mode controls. Selecting a single "
-            "display restricts the cursor to that screen and reshapes the "
-            "camera-frame mouse box to match its aspect. \"All Monitors\" "
-            "uses the full virtual desktop (the original behavior)."
-        )
-        mouse_note.setObjectName("cameraNote")
-        mouse_note.setWordWrap(True)
-        mouse_box_layout.addWidget(mouse_note)
-
-        # Discover monitors via QGuiApplication. Layout label uses
-        # the same "Monitor 1 (1920x1080 @ 0,0)" shape the
-        # CaptureMonitorDialog uses, so users see consistent
-        # device naming in both places.
-        from PySide6.QtGui import QGuiApplication as _MQGui
-
-        self._save_locations_mouse_monitor_combo = QComboBox()
-        self._save_locations_mouse_monitor_combo.setObjectName("settingsCameraCombo")
-        self._save_locations_mouse_monitor_combo.addItem("All Monitors (full virtual desktop)", None)
-        try:
-            screens = list(_MQGui.screens() or [])
-        except Exception:
-            screens = []
-        for idx, screen in enumerate(screens):
-            try:
-                geo = screen.geometry()
-                label = f"Monitor {idx + 1} ({geo.width()}x{geo.height()} @ {geo.x()},{geo.y()})"
-            except Exception:
-                label = f"Monitor {idx + 1}"
-            self._save_locations_mouse_monitor_combo.addItem(label, idx)
-        # Restore the saved selection.
-        saved_monitor = getattr(self.config, "mouse_active_monitor_index", None)
-        if saved_monitor is None:
-            self._save_locations_mouse_monitor_combo.setCurrentIndex(0)
-        else:
-            for i in range(self._save_locations_mouse_monitor_combo.count()):
-                if self._save_locations_mouse_monitor_combo.itemData(i) == saved_monitor:
-                    self._save_locations_mouse_monitor_combo.setCurrentIndex(i)
-                    break
-        self._save_locations_mouse_monitor_combo.currentIndexChanged.connect(
-            self._on_save_locations_mouse_monitor_changed
-        )
-        mouse_box_layout.addWidget(self._save_locations_mouse_monitor_combo)
-
-        # Visual preview: mini camera-frame with the chosen monitor's
-        # region highlighted in red. Repaints whenever the dropdown
-        # changes (handled in _on_save_locations_mouse_monitor_changed).
-        self._save_locations_mouse_preview = _MouseControlMonitorPreview(self.config)
-        mouse_box_layout.addWidget(self._save_locations_mouse_preview)
-        # Initial paint reflects whatever the dropdown is currently on.
-        self._save_locations_mouse_preview.set_monitor_index(
-            self._save_locations_mouse_monitor_combo.currentData()
-        )
-
-        scroll_layout.addWidget(mouse_box)
+        # Mouse Control section removed from this panel — was a
+        # leftover from when there was no dedicated mouse settings
+        # surface. The monitor choice now lives in the mouse-mode
+        # activation popup (and is editable from the engine's own
+        # state), so duplicating it here was just clutter. The
+        # underlying `_save_locations_mouse_monitor_combo` attr and
+        # its preview widget are intentionally NOT created here
+        # anymore; callers that look for them with getattr() will
+        # gracefully see None.
+        self._save_locations_mouse_monitor_combo = None
+        self._save_locations_mouse_preview = None
 
         scroll_layout.addStretch(1)
 
@@ -12698,6 +12616,13 @@ Admin elevation
             border: 1px solid {card_border};
             border-radius: 18px;
             color: {self.config.text_color};
+        }}
+        /* Leave clearance below the settings content panel so its
+           rounded bottom corner isn't clipped against the scroll
+           viewport — previously the user had to nudge-scroll 1-2 px
+           to see the bottom outline of any non-overflowing panel. */
+        #settingsContentPanel {{
+            margin-bottom: 10px;
         }}
         /* Fallback so labels that don't already have an inline color
            string inherit the active theme color. Inline setStyleSheet
@@ -14628,6 +14553,22 @@ Admin elevation
                 pending = combo.currentData() != self._saved_camera_settings_combo_value()
         except Exception:
             pending = False
+        # Live View Overlay checkboxes are also pending-save: any
+        # checkbox flipped away from its captured baseline marks
+        # the panel as having unsaved changes.
+        baseline = getattr(self, "_live_view_overlay_baseline", None)
+        if baseline is not None and not pending:
+            checks = (
+                (getattr(self, "live_view_fps_checkbox", None), "live_view_show_fps"),
+                (getattr(self, "live_view_latency_checkbox", None), "live_view_show_latency"),
+                (getattr(self, "live_view_tracking_quality_checkbox", None), "live_view_show_tracking_quality"),
+            )
+            for checkbox, key in checks:
+                if checkbox is None:
+                    continue
+                if bool(checkbox.isChecked()) != bool(baseline.get(key, False)):
+                    pending = True
+                    break
         self._set_settings_save_button_pending(button, pending)
 
     def _on_camera_settings_selection_changed(self, _index: int) -> None:
@@ -15033,8 +14974,63 @@ Admin elevation
             TouchlessNotice.show_info(self, "Camera Saved", confirmation)
 
     def save_camera_preference_from_settings(self) -> None:
-        self._save_camera_preference_from_combo(self.camera_combo, show_notice=True)
+        # Apply the Live View Overlay checkbox values first, then
+        # save the camera selection (which calls save_config()). If
+        # only the checkboxes changed (camera selection same as
+        # saved), the combo-save path is a no-op but we still need
+        # to persist the overlay flags — _save_live_view_overlay_changes
+        # handles both cases.
+        overlay_changed = self._save_live_view_overlay_changes()
+        self._save_camera_preference_from_combo(self.camera_combo, show_notice=not overlay_changed or self.camera_combo.currentData() != self._saved_camera_settings_combo_value())
+        if overlay_changed and self.camera_combo.currentData() == self._saved_camera_settings_combo_value():
+            # Combo-save shows its own confirmation toast; when only
+            # the overlay toggles changed, surface a small note so
+            # the user sees Save Changes was acknowledged.
+            TouchlessNotice.show_info(self, "Settings Saved", "Live view overlays updated.")
         self._refresh_camera_settings_save_state()
+
+    def _save_live_view_overlay_changes(self) -> bool:
+        """Apply the three Live View Overlay checkboxes to config,
+        persist, and re-broadcast the new visibility state to any
+        open live-view / mini-view windows. Returns True if any
+        value actually changed."""
+        baseline = getattr(self, "_live_view_overlay_baseline", None)
+        if baseline is None:
+            return False
+        checks = (
+            (getattr(self, "live_view_fps_checkbox", None), "live_view_show_fps"),
+            (getattr(self, "live_view_latency_checkbox", None), "live_view_show_latency"),
+            (getattr(self, "live_view_tracking_quality_checkbox", None), "live_view_show_tracking_quality"),
+        )
+        changed = False
+        for checkbox, key in checks:
+            if checkbox is None:
+                continue
+            new_value = bool(checkbox.isChecked())
+            if new_value != bool(baseline.get(key, False)):
+                changed = True
+            setattr(self.config, key, new_value)
+            baseline[key] = new_value
+        if changed:
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
+            # Push the new visibility state to any currently-open
+            # live view + mini-viewer immediately so the user sees
+            # the toggles take effect without reopening the window.
+            for attr in ("live_view_window", "mini_live_viewer"):
+                widget = getattr(self, attr, None)
+                if widget is not None and hasattr(widget, "set_overlay_visibility"):
+                    try:
+                        widget.set_overlay_visibility(
+                            show_fps=bool(getattr(self.config, "live_view_show_fps", False)),
+                            show_latency=bool(getattr(self.config, "live_view_show_latency", False)),
+                            show_tracking_quality=bool(getattr(self.config, "live_view_show_tracking_quality", False)),
+                        )
+                    except Exception:
+                        pass
+        return changed
 
     def clear_camera_preference(self) -> None:
         self.config.preferred_camera_index = None
@@ -16302,10 +16298,17 @@ Admin elevation
                     elapsed_ms = (now - shown_at) * 1000.0
                     remaining_ms = max(0, int(MIN_SHOW_MS - elapsed_ms))
                 def _hide_now():
+                    # complete_and_hide eases the bar to 100 % first
+                    # and THEN hides. Without that, the bar was
+                    # disappearing at ~95 % and the eye never caught
+                    # the final fill.
                     try:
-                        self.processing_overlay.hide_processing()
+                        self.processing_overlay.complete_and_hide()
                     except Exception:
-                        pass
+                        try:
+                            self.processing_overlay.hide_processing()
+                        except Exception:
+                            pass
                     timer = getattr(self, "_starting_splash_fallback_timer", None)
                     if timer is not None:
                         try:

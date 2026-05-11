@@ -898,13 +898,27 @@ class ProcessingOverlay(QWidget):
         self.setAutoFillBackground(False)
         self.setStyleSheet("background: transparent; border: none;")
         self._label = "Processing"
-        # Progress fraction 0.0..1.0 for the bar below the text.
-        # Defaults to 0.0; show_processing resets it. Callers update
-        # it via set_progress() as init steps complete. Replaces the
-        # animated wave dots: a bar that steps forward on real work
-        # reads as "loading" even when the UI thread is intermittently
-        # blocked, whereas the wave looked broken when frozen.
+        # Two progress fields: _progress_target is the goal pushed
+        # by set_progress() callers at each init checkpoint, and
+        # _progress is the currently-rendered fraction. _tick eases
+        # _progress toward _progress_target every frame so the bar
+        # animates SMOOTHLY between checkpoints instead of jumping
+        # in one big step. Also _progress keeps creeping forward at
+        # a slow idle rate so the bar never looks stuck even if no
+        # new checkpoint arrives for a while.
         self._progress = 0.0
+        self._progress_target = 0.0
+        # Idle creep: when target hasn't advanced recently, push
+        # the target up slowly so the bar visibly moves even
+        # between checkpoints. Capped at 0.92 so we never overrun
+        # the "real work done" signal.
+        self._progress_idle_creep_rate = 0.05  # fraction/sec
+        self._progress_idle_creep_cap = 0.92
+        self._last_tick_time = time.monotonic()
+        # When True, the timer will hide the pill once _progress
+        # has eased to ~1.0. Set by complete_and_hide(); lets the
+        # bar visibly fill before disappearing.
+        self._hide_when_complete = False
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.PreciseTimer)
         self._timer.setInterval(16)
@@ -926,37 +940,76 @@ class ProcessingOverlay(QWidget):
         self.move(x, y)
 
     def _tick(self) -> None:
-        # Synchronous repaint -- on a translucent layered window
-        # with apply_overlay() applied, update() doesn't reliably
-        # schedule a WM_PAINT that DWM actually composites. repaint()
-        # forces the paint to land each tick so the wave dots
-        # actually animate instead of freezing on the initial frame.
-        if self.isVisible():
-            self.repaint()
+        # Smooth-easing tick: nudge _progress toward _progress_target,
+        # and (when no new checkpoint has arrived) creep _progress_target
+        # forward slowly so the bar never sits still long enough to
+        # look broken.
+        if not self.isVisible():
+            return
+        now = time.monotonic()
+        dt = max(0.0, min(0.1, now - self._last_tick_time))
+        self._last_tick_time = now
+        # Idle creep: lifts the target toward the cap when not at
+        # the hide-on-complete phase. Stops once a real checkpoint
+        # pushes the target above the cap.
+        if not self._hide_when_complete and self._progress_target < self._progress_idle_creep_cap:
+            self._progress_target = min(
+                self._progress_idle_creep_cap,
+                self._progress_target + self._progress_idle_creep_rate * dt,
+            )
+        # Ease toward target. Cap dt for the easing factor to 40 ms
+        # so that when the UI thread comes back from a long block
+        # the bar doesn't snap straight to the target in one frame —
+        # it catches up over several 16 ms ticks instead, which the
+        # eye reads as smooth motion rather than a jump.
+        delta = self._progress_target - self._progress
+        if abs(delta) > 0.0005:
+            dt_capped = min(dt, 0.04)
+            factor = 1.0 - math.exp(-10.0 * dt_capped)
+            self._progress += delta * factor
+            if self._progress > 1.0:
+                self._progress = 1.0
+        if self._hide_when_complete and self._progress >= 0.998:
+            self._progress = 1.0
+            self._hide_when_complete = False
+            self.repaint()  # final 100 % frame
+            self._timer.stop()
+            self.hide()
+            return
+        self.repaint()
 
     def set_progress(self, fraction: float) -> None:
-        """Set the progress bar fill from 0.0 to 1.0. Forces a
-        synchronous repaint + processEvents so the new bar position
-        is visible even when the caller is about to enter another
-        blocking section of work."""
+        """Bump the progress TARGET. The displayed bar eases toward
+        it in _tick() so jumps between checkpoints look smooth
+        instead of stepped."""
         try:
-            new_progress = max(0.0, min(1.0, float(fraction)))
+            new_target = max(0.0, min(1.0, float(fraction)))
         except Exception:
             return
-        # Don't shrink — protects against out-of-order updates.
-        if new_progress < self._progress:
+        # Don't shrink the target — protects against out-of-order updates.
+        if new_target < self._progress_target:
             return
-        self._progress = new_progress
-        if self.isVisible():
-            self.repaint()
-            try:
-                QApplication.processEvents()
-            except Exception:
-                pass
+        self._progress_target = new_target
+
+    def complete_and_hide(self) -> None:
+        """Smoothly fill the bar to 100 %, then hide. Use this on
+        the success path so the user sees the bar actually finish
+        before the pill disappears (otherwise we hide while the bar
+        is mid-fill and the eye doesn't register the completion)."""
+        self._progress_target = 1.0
+        self._hide_when_complete = True
+        # Make sure the timer is running so _tick can do the
+        # easing. If the pill was hidden somehow without stopping
+        # the timer, the isVisible() guard in _tick is a no-op.
+        if not self._timer.isActive():
+            self._timer.start()
 
     def show_processing(self, label: str = "Processing") -> None:
         self._label = str(label or "Processing")
         self._progress = 0.0
+        self._progress_target = 0.0
+        self._hide_when_complete = False
+        self._last_tick_time = time.monotonic()
         self._place_on_screen()
         self.show()
         self.raise_()
