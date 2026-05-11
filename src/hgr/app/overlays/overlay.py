@@ -8,7 +8,7 @@ from typing import Optional
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
 
 
 class HelloOverlay(QWidget):
@@ -874,14 +874,26 @@ class ProcessingOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
-        transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
-        if transparent_flag is not None:
-            flags |= transparent_flag
-        self.setWindowFlags(flags)
+        # Window flags mirror VoiceStatusOverlay (which renders
+        # correctly on this user's stack). We deliberately do NOT
+        # use Qt.WindowTransparentForInput: that flag interacts
+        # badly with translucent layered windows on some Win32/GPU
+        # combinations and was blocking paint events from landing.
+        # WA_TransparentForMouseEvents already covers the
+        # "ignore mouse input" goal.
+        self.setWindowFlags(
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.NoDropShadowWindowHint
+        )
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_StyledBackground, False)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background: transparent; border: none;")
         self._label = "Processing"
         self._dot_count = 0
         self._timer = QTimer(self)
@@ -914,8 +926,19 @@ class ProcessingOverlay(QWidget):
         self._place_on_screen()
         self.show()
         self.raise_()
+        # Force a synchronous paint + event flush BEFORE returning.
+        # show_processing("Starting Touchless") is called immediately
+        # before start_engine blocks the UI thread with worker spin-
+        # up; without forcing the paint here, Qt schedules it async,
+        # the UI thread is then busy for ~200 ms+, and DWM ends up
+        # composting an empty frame (which the user sees as a
+        # transparent rectangle with no pill content).
+        self.repaint()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
         self._timer.start()
-        self.update()
 
     def hide_processing(self) -> None:
         self._timer.stop()
@@ -975,14 +998,19 @@ class SavedLocationOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
-        transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
-        if transparent_flag is not None:
-            flags |= transparent_flag
-        self.setWindowFlags(flags)
+        self.setWindowFlags(
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.NoDropShadowWindowHint
+        )
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_StyledBackground, False)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background: transparent; border: none;")
         self._text = ""
         self._displayed_text = ""
         # Hold-then-fade timers. Hold duration = total_ms - fade_ms.
@@ -1009,7 +1037,11 @@ class SavedLocationOverlay(QWidget):
         self.setWindowOpacity(1.0)
         self.show()
         self.raise_()
-        self.update()
+        self.repaint()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
         self._fade_total_ms = max(50, int(fade_ms))
         hold_ms = max(0, int(total_ms) - self._fade_total_ms)
         self._hold_timer.start(hold_ms)
