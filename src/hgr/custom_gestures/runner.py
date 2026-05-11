@@ -211,16 +211,45 @@ class CustomGestureRunner:
         background thread so the first hand-in-frame after a gesture
         is added doesn't pay the 1-3 s model-load cost on the main
         thread. Idempotent — repeated calls are no-ops while a load
-        is in flight or already complete."""
+        is in flight or already complete.
+
+        IMPORTANT: the `import mediapipe` itself runs on the CALLING
+        thread (main, in practice), NOT the background thread. A
+        previous version did the import on the bg thread, which
+        raced against the engine's own `import mediapipe` in
+        start_engine -> HandDetector -> _load_mediapipe_cpu_runtime.
+        Python's import lock detects the cross-thread cycle and
+        aborts one of the imports mid-way -- leaving a
+        partially-built mediapipe module in sys.modules and the
+        engine then crashes with `NameError: name 'core' is not
+        defined` when it touches mediapipe.tasks.python.audio.
+        Doing the import here (main thread) loads + caches the
+        module into sys.modules before any worker thread can race
+        against it; subsequent `import mediapipe` calls (from
+        engine workers, prewarm threads, etc.) hit the cached
+        module and don't take the import lock at all.
+
+        The slow part is the actual `mp.solutions.hands.Hands(...)`
+        construction (~1-3 s model load), which still runs on the
+        background thread so the main thread doesn't block."""
         if self._mp_hands is not None or self._mp_init_in_flight:
             return
         if not self.has_gestures:
+            return
+        # Synchronous import on the calling thread. Cheap if the
+        # module is already cached, ~0.5 s on cold cache. Avoids
+        # the deadlock that bit users in v1.1.0b6.
+        try:
+            import mediapipe as mp  # noqa: F401  -- import side-effect is the point
+        except Exception as exc:
+            print(f"[custom-gestures] MediaPipe import failed: {exc}")
+            self._mp_hands = None
             return
         self._mp_init_in_flight = True
 
         def _runner() -> None:
             try:
-                import mediapipe as mp  # heavy import; deferred to bg thread
+                import mediapipe as mp  # already cached; just for the binding
                 instance = mp.solutions.hands.Hands(
                     static_image_mode=False,
                     max_num_hands=2,
@@ -234,7 +263,7 @@ class CustomGestureRunner:
                 # partially-initialised one.
                 self._mp_hands = instance
             except Exception as exc:
-                print(f"[custom-gestures] MediaPipe init failed: {exc}")
+                print(f"[custom-gestures] MediaPipe Hands ctor failed: {exc}")
                 self._mp_hands = None
             finally:
                 self._mp_init_in_flight = False
