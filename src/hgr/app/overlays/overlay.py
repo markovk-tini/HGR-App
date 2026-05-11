@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from datetime import datetime
 from itertools import cycle
 from pathlib import Path
@@ -10,8 +9,6 @@ from typing import Optional
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
-
-from ..ui.native_overlay import apply_overlay
 
 
 class HelloOverlay(QWidget):
@@ -877,71 +874,52 @@ class ProcessingOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Window setup mirrors VoiceStatusOverlay so the OS treats
-        # this as the same kind of layered overlay (no Win32 frame,
-        # no DWM border halo). Critically, we do NOT use
-        # WindowTransparentForInput: on some Windows/GPU stacks that
-        # flag stops the layered window from compositing its painted
-        # content at all, leaving a fully transparent rectangle.
-        self.setWindowFlags(
-            Qt.Tool
-            | Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.NoDropShadowWindowHint
-        )
+        flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
+        transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
+        if transparent_flag is not None:
+            flags |= transparent_flag
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setAttribute(Qt.WA_StyledBackground, False)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAutoFillBackground(False)
-        self.setStyleSheet("background: transparent; border: none;")
         self._label = "Processing"
+        self._dot_count = 0
         self._timer = QTimer(self)
-        self._timer.setInterval(40)
-        self._timer.timeout.connect(self._tick)
-        self.setFixedSize(self._PILL_WIDTH, self._PILL_HEIGHT)
+        self._timer.setInterval(380)
+        self._timer.timeout.connect(self._advance_dots)
+        self.resize(self._PILL_WIDTH, self._PILL_HEIGHT)
 
     def _place_on_screen(self) -> None:
+        # Bottom-center of the primary screen — same pattern the
+        # voice status overlay uses, so the user reads them as
+        # related.
         screen = self.screen() or QGuiApplication.primaryScreen()
         if screen is None:
             self.move(40, 40)
             return
         geo = screen.availableGeometry()
+        self.resize(self._PILL_WIDTH, self._PILL_HEIGHT)
         x = geo.center().x() - self._PILL_WIDTH // 2
         y = geo.bottom() - self._PILL_HEIGHT - self._SCREEN_BOTTOM_GAP
         self.move(x, y)
 
-    def _tick(self) -> None:
+    def _advance_dots(self) -> None:
+        self._dot_count = (self._dot_count + 1) % 4
         if self.isVisible():
             self.update()
 
     def show_processing(self, label: str = "Processing") -> None:
         self._label = str(label or "Processing")
+        self._dot_count = 0
         self._place_on_screen()
         self.show()
         self.raise_()
-        self.repaint()
-        apply_overlay(self)
         self._timer.start()
+        self.update()
 
     def hide_processing(self) -> None:
         self._timer.stop()
         self.hide()
-
-    def _draw_loading_dots(self, painter: QPainter, cx: float, cy: float, accent: QColor) -> None:
-        painter.setPen(Qt.NoPen)
-        phase = time.monotonic() * 6.0
-        for index in range(5):
-            wave = max(0.0, math.sin(phase - index * 0.48))
-            pulse = 0.38 + 0.62 * wave
-            dot = QColor(accent)
-            dot.setAlpha(int(90 + 150 * pulse))
-            painter.setBrush(dot)
-            x = cx + (index - 2) * 14
-            y = cy - 2 - 6 * wave
-            size = 8.0 + 3.0 * pulse
-            painter.drawEllipse(QRectF(x - size / 2.0, y - size / 2.0, size, size))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -950,11 +928,15 @@ class ProcessingOverlay(QWidget):
         painter.fillRect(self.rect(), Qt.transparent)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
+        # Same palette as VoiceStatusOverlay's command panel —
+        # translucent blue body, teal border, light foreground.
         panel = QColor(25, 73, 143, 164)
         border = QColor(29, 233, 182, 210)
         text_color = QColor(232, 246, 255, 238)
-        accent = QColor(29, 233, 182)
 
+        # Inset the rect by 0.5 px to keep the antialiased border
+        # fully inside the window bounds (otherwise the outermost
+        # half-pixel of the border would clip).
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         painter.setPen(QPen(border, 1.2))
         painter.setBrush(panel)
@@ -964,12 +946,8 @@ class ProcessingOverlay(QWidget):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QPen(text_color))
-        text_rect = QRectF(rect.left() + 14, rect.top(), rect.width() - 88, rect.height())
-        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self._label)
-
-        dots_cx = rect.right() - 46
-        dots_cy = rect.center().y()
-        self._draw_loading_dots(painter, dots_cx, dots_cy, accent)
+        text = f"{self._label}{'.' * self._dot_count}"
+        painter.drawText(rect, Qt.AlignCenter, text)
 
 
 class SavedLocationOverlay(QWidget):
@@ -997,19 +975,14 @@ class SavedLocationOverlay(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(
-            Qt.Tool
-            | Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.NoDropShadowWindowHint
-        )
+        flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
+        transparent_flag = getattr(Qt, "WindowTransparentForInput", None)
+        if transparent_flag is not None:
+            flags |= transparent_flag
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setAttribute(Qt.WA_StyledBackground, False)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAutoFillBackground(False)
-        self.setStyleSheet("background: transparent; border: none;")
         self._text = ""
         self._displayed_text = ""
         # Hold-then-fade timers. Hold duration = total_ms - fade_ms.
@@ -1036,8 +1009,7 @@ class SavedLocationOverlay(QWidget):
         self.setWindowOpacity(1.0)
         self.show()
         self.raise_()
-        self.repaint()
-        apply_overlay(self)
+        self.update()
         self._fade_total_ms = max(50, int(fade_ms))
         hold_ms = max(0, int(total_ms) - self._fade_total_ms)
         self._hold_timer.start(hold_ms)
