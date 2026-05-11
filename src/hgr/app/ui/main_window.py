@@ -5761,6 +5761,11 @@ class MainWindow(QMainWindow):
         nav_inner_layout.addStretch(1)
         nav_scroll.setWidget(nav_inner)
         left_layout.addWidget(nav_scroll, 1)
+        # Cached so show_settings_page() can reset the sidebar scroll to
+        # the top every time the user re-enters Settings (otherwise the
+        # nav remembers wherever the user last scrolled and the first
+        # row — Instructions — can be off-screen).
+        self._settings_nav_scroll = nav_scroll
         # Keep the walk-through target glow latched to the sidebar
         # button when the user scrolls the nav. Without this signal
         # connection, mapTo()-based geometry isn't recomputed on
@@ -7304,10 +7309,11 @@ class MainWindow(QMainWindow):
                 setattr(self.config, key, value)
             except Exception:
                 pass
-        try:
-            save_config(self.config)
-        except Exception:
-            pass
+        # Persist off the UI thread so Save Changes feels instant.
+        threading.Thread(
+            target=save_config, args=(self.config,),
+            daemon=True, name="hgr-save-config-general",
+        ).start()
         # Refresh baselines so future changes compare against the
         # newly-saved values.
         for key, value in self._general_pending.items():
@@ -7965,19 +7971,19 @@ class MainWindow(QMainWindow):
                 border: none;
             }}
             QScrollArea#gestureBindsScroll QScrollBar:vertical {{
-                background: rgba(255,255,255,0.04);
-                width: 10px;
-                margin: 6px 3px 6px 3px;
-                border-radius: 5px;
+                background: rgba(255,255,255,0.10);
+                width: 12px;
+                margin: 6px 2px 6px 2px;
+                border-radius: 6px;
             }}
             QScrollArea#gestureBindsScroll QScrollBar::handle:vertical {{
                 background: {accent};
-                border-radius: 5px;
-                min-height: 32px;
+                border-radius: 6px;
+                min-height: 40px;
             }}
             QScrollArea#gestureBindsScroll QScrollBar::handle:vertical:hover {{
                 background: {accent};
-                border: 1px solid rgba(255,255,255,0.25);
+                border: 1px solid rgba(255,255,255,0.35);
             }}
             QScrollArea#gestureBindsScroll QScrollBar::add-line:vertical,
             QScrollArea#gestureBindsScroll QScrollBar::sub-line:vertical {{
@@ -12302,6 +12308,18 @@ Admin elevation
 
     def show_settings_page(self, section_index: int = SECTION_INSTRUCTIONS) -> None:
         self.page_stack.setCurrentWidget(self.settings_page)
+        # Reset the sidebar nav scroll to the top so re-entering Settings
+        # always lands on the first row (Instructions) instead of wherever
+        # the user last scrolled. The content scroll already resets via
+        # show_settings_section → _reset_settings_scroll_to_top.
+        nav = getattr(self, "_settings_nav_scroll", None)
+        if nav is not None:
+            try:
+                bar = nav.verticalScrollBar()
+                if bar is not None:
+                    bar.setValue(0)
+            except Exception:
+                pass
         self.show_settings_section(section_index)
 
     def show_home_page(self) -> None:
@@ -15063,7 +15081,16 @@ Admin elevation
         phone_qr_active = chose_phone_qr and self._current_phone_camera_qr_server() is not None
         phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
 
-        save_config(self.config)
+        # Persist config off the UI thread — the JSON write is fast
+        # but still adds ~10-50 ms of disk I/O to the click handler
+        # and the user-visible 'Save' click should feel instant.
+        # The in-memory self.config is already updated (above), so
+        # any code that reads from it sees the new values right
+        # away; only the file-on-disk lags briefly.
+        threading.Thread(
+            target=save_config, args=(self.config,),
+            daemon=True, name="hgr-save-config",
+        ).start()
         self._refresh_camera_combo_selection(
             self._PHONE_CAMERA_DROPDOWN_VALUE if chose_phone_qr else self.config.preferred_camera_index
         )
@@ -15075,10 +15102,19 @@ Admin elevation
 
         engine_was_running = self._worker is not None
         if engine_was_running:
-            try:
-                self.start_engine(skip_tutorial_prompt=True)
-            except Exception:
-                pass
+            # Defer the hot worker swap to the next event-loop tick
+            # so the click handler returns IMMEDIATELY. Without this,
+            # the rest of start_engine (~3-4 s of stop-old + construct-
+            # new + new-engine-warmup) runs synchronously inside the
+            # click handler and the UI thread can't paint the button-
+            # release frame or refresh the dropdown until it returns —
+            # which the user reads as 'freezes on click'. Single-shot
+            # at 0 ms hands control back to the event loop before the
+            # heavy work begins.
+            QTimer.singleShot(
+                0,
+                lambda: self._safe_start_engine(skip_tutorial_prompt=True),
+            )
 
         if phone_qr_active:
             self.last_action_label.setText("Last action: saved phone camera (QR) as source")
@@ -15149,10 +15185,12 @@ Admin elevation
             setattr(self.config, key, new_value)
             baseline[key] = new_value
         if changed:
-            try:
-                save_config(self.config)
-            except Exception:
-                pass
+            # Persist off the UI thread so the click handler returns
+            # instantly (config in-memory is already up to date).
+            threading.Thread(
+                target=save_config, args=(self.config,),
+                daemon=True, name="hgr-save-config-overlay",
+            ).start()
             # Push the new visibility state to any currently-open
             # live view + mini-viewer immediately so the user sees
             # the toggles take effect without reopening the window.
@@ -16116,6 +16154,16 @@ Admin elevation
         callee doesn't need to know about the overlay layout."""
         try:
             self.processing_overlay.set_progress(float(fraction))
+        except Exception:
+            pass
+
+    def _safe_start_engine(self, *, skip_tutorial_prompt: bool = True) -> None:
+        """Exception-swallowing wrapper around start_engine. Used as
+        the target of QTimer.singleShot deferrals from save-changes
+        handlers so a transient failure in the hot worker swap
+        doesn't crash the deferred event."""
+        try:
+            self.start_engine(skip_tutorial_prompt=skip_tutorial_prompt)
         except Exception:
             pass
 
