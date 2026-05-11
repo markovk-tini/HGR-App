@@ -533,6 +533,22 @@ class GestureWorker(QObject):
 
     def __init__(self, config, camera_index_override: Optional[int] = None, parent=None):
         super().__init__(parent)
+        # Helper: pumps the Qt event loop briefly so the
+        # starting-pill's repaint timer can fire between heavy
+        # controller / overlay constructions below. Without these
+        # pumps the entire __init__ is one ~2 s blocking Python
+        # call and the pill's wave dots freeze mid-bounce because
+        # no paint event ever lands until __init__ returns.
+        def _pump_events() -> None:
+            try:
+                from PySide6.QtWidgets import QApplication as _QApp
+                app = _QApp.instance()
+                if app is not None:
+                    app.processEvents()
+            except Exception:
+                pass
+
+        self._pump_events = _pump_events
         self.config = config
         self.camera_index_override = camera_index_override
         self._running = False
@@ -645,9 +661,11 @@ class GestureWorker(QObject):
         self.low_fps_suggestion_overlay.activateRequested.connect(self._handle_low_fps_suggestion_activate)
         self.low_fps_suggestion_overlay.dismissed.connect(self._handle_low_fps_suggestion_dismissed)
 
+        _pump_events()
         self.volume_controller = VolumeController()
         self.volume_overlay = ScreenVolumeOverlay(config)
         self.volume_overlay.attach_controller(self.volume_controller)
+        _pump_events()
         self.voice_status_overlay = VoiceStatusOverlay(config)
         try:
             self.voice_status_overlay.selectionChosen.connect(self._handle_voice_overlay_selection)
@@ -717,9 +735,11 @@ class GestureWorker(QObject):
         self._youtube_wheel_pose_grace_until = 0.0
         self._youtube_wheel_cooldown_until = 0.0
         self._youtube_wheel_cursor_offset: tuple[float, float] | None = None
+        _pump_events()
         self.spotify_wheel_overlay = SpotifyWheelOverlay(config)
         self.chrome_wheel_overlay = SpotifyWheelOverlay(config)
         self.youtube_wheel_overlay = SpotifyWheelOverlay(config)
+        _pump_events()
         self.mouse_controller = MouseController()
         self.mouse_tracker = self._build_mouse_tracker()
         self._last_mouse_update = SimpleNamespace(
@@ -735,15 +755,18 @@ class GestureWorker(QObject):
         self._mouse_control_text = "mouse mode off" if self.mouse_controller.available else self.mouse_controller.message
         self._mouse_status_text = "off" if self.mouse_controller.available else "unavailable"
 
+        _pump_events()
         self.chrome_controller = ChromeController()
         self.chrome_router = ChromeGestureRouter(static_hold_seconds=0.5, static_cooldown_seconds=1.5, dynamic_cooldown_seconds=1.5)
         self._chrome_mode_enabled = False
         self._chrome_control_text = self.chrome_controller.message
 
+        _pump_events()
         self.spotify_controller = SpotifyController()
         self.spotify_router = SpotifyGestureRouter(static_hold_seconds=0.5, static_cooldown_seconds=1.5, dynamic_cooldown_seconds=1.5)
         self._spotify_control_text = self.spotify_controller.message
 
+        _pump_events()
         self.youtube_controller = YouTubeController(volume_controller=self.volume_controller)
         self.youtube_router = YouTubeGestureRouter(static_hold_seconds=0.5, static_cooldown_seconds=1.5, dynamic_cooldown_seconds=1.0)
         self._youtube_control_text = "youtube idle"
@@ -764,6 +787,7 @@ class GestureWorker(QObject):
         self._spotify_vol_last_sent: int | None = None
         self._spotify_vol_worker: threading.Thread | None = None
 
+        _pump_events()
         self.voice_listener = VoiceCommandListener(
             preferred_input_device=getattr(config, "preferred_microphone_name", None),
             input_gain=getattr(config, "mic_input_gain", 1.0),
@@ -772,11 +796,13 @@ class GestureWorker(QObject):
             chrome_controller=self.chrome_controller,
             spotify_controller=self.spotify_controller,
         )
+        _pump_events()
         self.live_dictation_streamer = LiveDictationStreamer(
             preferred_microphone_name=getattr(config, "preferred_microphone_name", None),
         )
         self.text_input_controller = TextInputController()
         self.dictation_processor = DictationProcessor()
+        _pump_events()
         self.llama_server = LlamaServer()
         try:
             print(f"[hgr] llama_server: available={self.llama_server.available} backend={self.llama_server.backend} message={self.llama_server.message}")
