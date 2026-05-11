@@ -9412,49 +9412,16 @@ class MainWindow(QMainWindow):
         self._set_settings_save_button_pending(self.save_camera_button, False)
         self.clear_camera_button = None
 
-        # The camera section has outgrown a single viewport. Wrap it in a
-        # scroll area so long content (phone-camera URL + QR block, etc.)
-        # scrolls vertically instead of squishing buttons horizontally.
-        scroll = QScrollArea()
-        scroll.setObjectName("cameraScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setStyleSheet(
-            f"""
-            QScrollArea#cameraScroll, QScrollArea#cameraScroll > QWidget,
-            QScrollArea#cameraScroll QWidget#qt_scrollarea_viewport {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollArea#cameraScroll QScrollBar:vertical {{
-                background: rgba(255,255,255,0.04);
-                width: 10px;
-                margin: 6px 3px 6px 3px;
-                border-radius: 5px;
-            }}
-            QScrollArea#cameraScroll QScrollBar::handle:vertical {{
-                background: {self.config.accent_color};
-                border-radius: 5px;
-                min-height: 32px;
-            }}
-            QScrollArea#cameraScroll QScrollBar::handle:vertical:hover {{
-                background: {self.config.accent_color};
-                /* slight brighten on hover via a subtle outer ring */
-                border: 1px solid rgba(255,255,255,0.25);
-            }}
-            QScrollArea#cameraScroll QScrollBar::add-line:vertical,
-            QScrollArea#cameraScroll QScrollBar::sub-line:vertical {{
-                height: 0px;
-                background: transparent;
-            }}
-            QScrollArea#cameraScroll QScrollBar::add-page:vertical,
-            QScrollArea#cameraScroll QScrollBar::sub-page:vertical {{
-                background: transparent;
-            }}
-            """
-        )
+        # No inner QScrollArea — the outer settings content stack
+        # already owns a scroll area (see `content_scroll` in
+        # `_build_ui`), so wrapping the camera panel in its own
+        # scroll on top of that left a visible scrollbar at the
+        # default window size whenever the panel content was even
+        # slightly taller than the inner viewport. Now the camera
+        # panel renders at its natural height: at default size or
+        # larger there's no scrolling, and only when the user shrinks
+        # the window below the natural height does the outer
+        # settings scroll kick in.
 
         box = QFrame()
         box.setObjectName("innerCard")
@@ -9765,9 +9732,17 @@ class MainWindow(QMainWindow):
         self._refresh_phone_camera_controls()
         self._refresh_camera_settings_save_state()
 
-        scroll.setWidget(box)
-        self._install_scroll_wheel_forwarder(scroll)
-        layout.addWidget(scroll, 1)
+        # Cap the inner card's vertical size to its sizeHint so it
+        # can't expand into the empty space below the last widget.
+        # QFrame's default size policy (Preferred / Preferred) lets
+        # it grow even when the layout has a trailing addStretch —
+        # which is what was leaving visible empty space inside the
+        # rounded card's bottom border. QSizePolicy.Maximum means
+        # "never grow beyond sizeHint", which keeps the card tightly
+        # wrapped around its content.
+        box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout.addWidget(box, 0)
+        layout.addStretch(1)
         return panel
 
     def _install_scroll_wheel_forwarder(self, scroll_area: QScrollArea) -> None:
@@ -11483,11 +11458,24 @@ class MainWindow(QMainWindow):
         version_label = QLabel(f"<b>Touchless</b>  v{APP_VERSION}")
         version_label.setStyleSheet("font-size: 14px;")
         version_layout.addWidget(version_label)
-        author_label = QLabel("by Konstantin Markov")
-        author_label.setStyleSheet(
-            f"color: {self.config.text_color}; opacity: 0.7; font-size: 12px;"
+        # Footer row: © author • Privacy Policy • Support. The
+        # last two are anchor tags with `href=` so they open in
+        # the user's default browser via Qt's `openExternalLinks`.
+        accent = self.config.accent_color or "#1DE9B6"
+        footer_label = QLabel(
+            f"© Konstantin Markov &nbsp;·&nbsp; "
+            f"<a style='color:{accent}; text-decoration:none;' "
+            f"href='https://touchless-control.pages.dev/privacy.html'>Privacy Policy</a> "
+            f"&nbsp;·&nbsp; "
+            f"<a style='color:{accent}; text-decoration:none;' "
+            f"href='https://touchless-control.pages.dev/'>Support</a>"
         )
-        version_layout.addWidget(author_label)
+        footer_label.setTextFormat(Qt.RichText)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setStyleSheet(
+            f"color: {self.config.text_color}; opacity: 0.85; font-size: 12px;"
+        )
+        version_layout.addWidget(footer_label)
         layout.addWidget(version_box)
 
         # ---- Privacy disclosure ----
@@ -15910,6 +15898,10 @@ Admin elevation
             # back to the local sounddevice mic even while `/audio`
             # POSTs are flowing from the phone.
             self._apply_phone_mic_preference()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
 
             if phone_qr_active and selected_camera_index is None:
                 self._set_home_camera_display_text("Phone Camera (QR)")
@@ -15922,12 +15914,24 @@ Admin elevation
             self.start_button.setEnabled(False)
             self.end_button.setEnabled(True)
             self._worker.start()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
             self._start_clip_cache()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
             if (
                 (self.live_view_window is None or not self.live_view_window.isVisible())
                 and (self.debugger_window is None or not self.debugger_window.isVisible())
             ):
                 self._show_mini_live_viewer()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
 
     def stop_engine(self) -> None:
             try:
