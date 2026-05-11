@@ -9512,7 +9512,8 @@ class MainWindow(QMainWindow):
             f"  font-weight: 700;"
             f"  letter-spacing: 1.2px;"
             f"  text-transform: uppercase;"
-            f"  margin-top: 0px;"
+            f"  margin: 0px;"
+            f"  padding: 0px;"
             f"}}"
         )
 
@@ -9520,78 +9521,45 @@ class MainWindow(QMainWindow):
             lbl = QLabel(text)
             lbl.setObjectName("cameraSectionHeader")
             lbl.setStyleSheet(section_style)
+            lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            lbl.setFixedHeight(16)
+            lbl.setContentsMargins(0, 0, 0, 0)
             return lbl
 
-        # ============================================================
-        # 0. LIVE STATUS (tracking quality + FPS, engine-driven)
-        # ============================================================
-        box_layout.addWidget(_section_header("Live Status"))
+        def _section_header_with_description(title: str, description_widget) -> QWidget:
+            """Pack a section header + its description into a tight
+            sub-VBox (2 px spacing) so the description sits flush
+            under the header instead of picking up the outer
+            layout's 8 px spacing. Accepts either a plain QLabel or
+            a pre-built widget (e.g. an expandable note)."""
+            wrapper = QWidget()
+            wrap_layout = QVBoxLayout(wrapper)
+            wrap_layout.setContentsMargins(0, 0, 0, 0)
+            wrap_layout.setSpacing(2)
+            wrap_layout.addWidget(_section_header(title))
+            wrap_layout.addWidget(description_widget)
+            return wrapper
 
-        status_hint = QLabel(
-            "Real-time signals from the gesture engine. Visible while the engine is running."
-        )
-        status_hint.setObjectName("cameraNote")
-        status_hint.setWordWrap(True)
-        box_layout.addWidget(status_hint)
-
-        status_row = QHBoxLayout()
-        status_row.setSpacing(10)
-        status_row.setContentsMargins(0, 4, 0, 0)
-
-        # Tracking-quality pill. Drives off (found, confidence) from
-        # the worker payload — green = clean detection, amber =
-        # marginal, red = no hand / very low confidence, idle =
-        # engine not running.
-        self.camera_health_quality_pill = QLabel("Engine not running")
-        self.camera_health_quality_pill.setObjectName("cameraHealthPill")
-        self.camera_health_quality_pill.setAlignment(Qt.AlignCenter)
-        self.camera_health_quality_pill.setFixedHeight(30)
-        self.camera_health_quality_pill.setMinimumWidth(170)
-        self._set_camera_health_pill_state("idle")
-        status_row.addWidget(self.camera_health_quality_pill)
-
-        # Live FPS readout. Pulled straight from the worker's
-        # per-frame measurement, so it reflects what the engine is
-        # actually achieving (not the camera's advertised rate).
-        self.camera_health_fps_label = QLabel("FPS: —")
-        self.camera_health_fps_label.setObjectName("cameraHealthFps")
-        self.camera_health_fps_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        self.camera_health_fps_label.setStyleSheet(
-            f"QLabel#cameraHealthFps {{"
-            f"  color: {self.config.text_color};"
-            f"  font-size: 14px;"
-            f"  font-weight: 700;"
-            f"  background: transparent;"
-            f"  padding: 0 4px;"
-            f"}}"
-        )
-        status_row.addWidget(self.camera_health_fps_label)
-        status_row.addStretch(1)
-        box_layout.addLayout(status_row)
-        # Throttle handle — debug_frame_ready fires at camera FPS
-        # (~30 Hz). Updating these widgets every frame is wasteful;
-        # 4 Hz reads as smooth without burning CPU on label sets.
+        # Throttle handles for the live-view overlays (FPS, latency,
+        # tracking quality). debug_frame_ready fires at camera FPS
+        # (~30 Hz); updating the overlay widgets every frame is
+        # wasteful, so we cap label sets to ~4 Hz.
         self._camera_health_last_update_ts = 0.0
-        # Track when we last saw a hand so the pill goes red once
-        # the hand has been out of frame for >1.5 s.
         self._camera_health_last_hand_ts = 0.0
-        box_layout.addSpacing(16)
 
         # ============================================================
         # 1. CONNECTED DEVICES (local camera selection)
         # ============================================================
-        box_layout.addWidget(_section_header("Connected Devices"))
-
         self.camera_page_status = QLabel("Detected cameras: scanning...")
         self.camera_page_status.setWordWrap(True)
         self.camera_page_status.hide()
 
         note = QLabel(
-            "Choose from the list of cameras connected to your device. Test Camera opens a quick live preview of the selected camera."
+            "Choose from the list of cameras connected to your device. Preview shows the selected camera."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
-        box_layout.addWidget(note)
+        box_layout.addWidget(_section_header_with_description("Connected Devices", note))
 
         self.camera_combo = _RefreshingCameraCombo()
         self.camera_combo.setObjectName("settingsCameraCombo")
@@ -9609,15 +9577,12 @@ class MainWindow(QMainWindow):
         self.camera_combo.currentIndexChanged.connect(self._on_camera_settings_selection_changed)
         box_layout.addWidget(self.camera_combo)
 
-        # "Test Camera" button row — opens a Touchless-themed live
-        # preview of whichever camera is currently selected in the
-        # dropdown above. Renamed from "Preview" so the affordance is
-        # obvious for first-time users diagnosing "is the camera
-        # working" before they start the engine.
+        # Preview button row — opens a Touchless-themed live preview of
+        # whichever camera is currently selected in the dropdown above.
         preview_row = QHBoxLayout()
         preview_row.setContentsMargins(0, 0, 0, 0)
         preview_row.setSpacing(10)
-        self.camera_preview_button = QPushButton("Test Camera")
+        self.camera_preview_button = QPushButton("Preview")
         self.camera_preview_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.camera_preview_button.clicked.connect(self._open_camera_preview)
         self.camera_preview_button.setStyleSheet(camera_button_style)
@@ -9648,13 +9613,11 @@ class MainWindow(QMainWindow):
         #    related toggles still exist in AppConfig for backwards
         #    compatibility but the UI surface is gone.)
         # ============================================================
-        box_layout.addWidget(_section_header("Phone Camera — Via QR Code"))
-
         qr_note = self._build_expandable_note(
             "Use your phone as the camera by scanning a QR code from its browser.",
             "No phone app is needed. Touchless opens a small phone page that streams the camera directly to this PC after you scan the QR code and works on iPhone and Android.",
         )
-        box_layout.addWidget(qr_note)
+        box_layout.addWidget(_section_header_with_description("Phone Camera — Via QR Code", qr_note))
 
         qr_row = QHBoxLayout()
         qr_row.setSpacing(8)
@@ -9725,6 +9688,101 @@ class MainWindow(QMainWindow):
         # so leaving these attributes unset is safe: those paths
         # short-circuit on the None default.
 
+        # ============================================================
+        # 4. LIVE VIEW OVERLAYS (FPS / latency / tracking quality)
+        # ============================================================
+        # Three toggles that flip per-overlay visibility inside the
+        # gesture Live View window. The Camera panel only owns the
+        # ON/OFF state — the rendering itself lives in
+        # live_view_window.py and reads these config flags on every
+        # debug-frame update.
+        box_layout.addWidget(_section_header("Live View Overlays"))
+
+        live_overlay_intro = QLabel(
+            "Optional diagnostic pills layered on the gesture live view. "
+            "Off by default for a clean feed."
+        )
+        live_overlay_intro.setObjectName("cameraNote")
+        live_overlay_intro.setWordWrap(True)
+        box_layout.addWidget(live_overlay_intro)
+
+        live_overlay_checkbox_qss = self._general_checkbox_qss()
+
+        def _add_overlay_toggle(checkbox: QCheckBox, caption_widget) -> None:
+            """Pack a toggle + its caption into a tight sub-layout so
+            the caption sits flush under the checkbox rather than
+            picking up the outer layout's full 8 px spacing."""
+            wrapper = QWidget()
+            wrapper_layout = QVBoxLayout(wrapper)
+            wrapper_layout.setContentsMargins(0, 0, 0, 0)
+            wrapper_layout.setSpacing(2)
+            wrapper_layout.addWidget(checkbox)
+            wrapper_layout.addWidget(caption_widget)
+            box_layout.addWidget(wrapper)
+
+        # ---- FPS toggle ----
+        self.live_view_fps_checkbox = QCheckBox("Show FPS in live view")
+        self.live_view_fps_checkbox.setStyleSheet(live_overlay_checkbox_qss)
+        self.live_view_fps_checkbox.setChecked(
+            bool(getattr(self.config, "live_view_show_fps", False))
+        )
+        self.live_view_fps_checkbox.toggled.connect(
+            lambda checked: self._on_live_view_overlay_toggle("live_view_show_fps", checked)
+        )
+        fps_caption = QLabel(
+            "Frames-per-second the engine is actually processing."
+        )
+        fps_caption.setObjectName("cameraNote")
+        fps_caption.setWordWrap(True)
+        fps_caption.setContentsMargins(26, 0, 0, 0)
+        _add_overlay_toggle(self.live_view_fps_checkbox, fps_caption)
+
+        # ---- Latency toggle ----
+        self.live_view_latency_checkbox = QCheckBox("Show display latency (ms) in live view")
+        self.live_view_latency_checkbox.setStyleSheet(live_overlay_checkbox_qss)
+        self.live_view_latency_checkbox.setChecked(
+            bool(getattr(self.config, "live_view_show_latency", False))
+        )
+        self.live_view_latency_checkbox.toggled.connect(
+            lambda checked: self._on_live_view_overlay_toggle("live_view_show_latency", checked)
+        )
+        latency_caption = QLabel(
+            "Time from camera-frame decode to the current paint."
+        )
+        latency_caption.setObjectName("cameraNote")
+        latency_caption.setWordWrap(True)
+        latency_caption.setContentsMargins(26, 0, 0, 0)
+        _add_overlay_toggle(self.live_view_latency_checkbox, latency_caption)
+
+        # ---- Tracking quality toggle ----
+        self.live_view_tracking_quality_checkbox = QCheckBox("Show tracking quality pill in live view")
+        self.live_view_tracking_quality_checkbox.setStyleSheet(live_overlay_checkbox_qss)
+        self.live_view_tracking_quality_checkbox.setChecked(
+            bool(getattr(self.config, "live_view_show_tracking_quality", False))
+        )
+        self.live_view_tracking_quality_checkbox.toggled.connect(
+            lambda checked: self._on_live_view_overlay_toggle("live_view_show_tracking_quality", checked)
+        )
+        tracking_caption = self._build_expandable_note(
+            "A colored pill that reflects how cleanly your hand is being detected.",
+            "How it works:\n"
+            "• Green (Tracking: Good) — your hand is clearly in frame and "
+            "the recognizer is confident (≥ 0.65). Gestures should feel "
+            "responsive.\n"
+            "• Amber (Tracking: Marginal) — your hand is visible but the "
+            "recognizer is uncertain (0.45–0.65). Usually caused by partial "
+            "occlusion, an extreme angle, dim lighting, or motion blur. "
+            "Gestures may take an extra moment to register.\n"
+            "• Red (Tracking: No hand seen) — no hand has been visible in "
+            "the camera for over 1.5 s. Bring your hand back into frame.\n"
+            "• Idle — engine isn't running. Start the engine from the home "
+            "page to see live tracking.\n\n"
+            "The pill updates ~4 times per second so a single bad frame "
+            "doesn't flicker it red.",
+        )
+        tracking_caption.setContentsMargins(26, 0, 0, 0)
+        _add_overlay_toggle(self.live_view_tracking_quality_checkbox, tracking_caption)
+
         self._refresh_phone_camera_controls()
         self._refresh_camera_settings_save_state()
 
@@ -9778,6 +9836,41 @@ class MainWindow(QMainWindow):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not enabled)
+
+    def _on_live_view_overlay_toggle(self, config_field: str, checked: bool) -> None:
+        """Flip a live-view overlay on or off. Saves to config
+        immediately (no Save Changes button — these are tiny UI
+        prefs) and pokes the live-view window so the overlay
+        appears / disappears without needing the user to re-toggle
+        anything else."""
+        try:
+            setattr(self.config, config_field, bool(checked))
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
+            live_view = getattr(self, "live_view_window", None)
+            if live_view is not None and hasattr(live_view, "set_overlay_visibility"):
+                try:
+                    live_view.set_overlay_visibility(
+                        show_fps=bool(getattr(self.config, "live_view_show_fps", False)),
+                        show_latency=bool(getattr(self.config, "live_view_show_latency", False)),
+                        show_tracking_quality=bool(getattr(self.config, "live_view_show_tracking_quality", False)),
+                    )
+                except Exception:
+                    pass
+            mini_viewer = getattr(self, "mini_live_viewer", None)
+            if mini_viewer is not None and hasattr(mini_viewer, "set_overlay_visibility"):
+                try:
+                    mini_viewer.set_overlay_visibility(
+                        show_fps=bool(getattr(self.config, "live_view_show_fps", False)),
+                        show_latency=bool(getattr(self.config, "live_view_show_latency", False)),
+                        show_tracking_quality=bool(getattr(self.config, "live_view_show_tracking_quality", False)),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _set_camera_health_pill_state(self, state: str, *, custom_text: str | None = None) -> None:
         """Apply one of four visual states to the Camera Settings
@@ -13098,6 +13191,8 @@ Admin elevation
         }}
         QLabel#cameraNote {{
             color: {dim_text_strong};
+            margin: 0px;
+            padding: 0px;
         }}
         /* Native QMessageBox has a light-gray background and relies on a
            dark label color for its message text. Our window-wide
@@ -15823,6 +15918,11 @@ Admin elevation
             # mid-init).
             try:
                 self.processing_overlay.show_processing("Starting Touchless")
+                # Stamp the show time so _on_running_state_changed
+                # can compute remaining min-show window. Engine
+                # init can finish in ~200 ms on warm caches; without
+                # a min-show the pill flashes too fast to read.
+                self._starting_splash_shown_at = time.monotonic()
                 fallback_timer = getattr(self, "_starting_splash_fallback_timer", None)
                 if fallback_timer is None:
                     fallback_timer = QTimer(self)
@@ -15849,7 +15949,6 @@ Admin elevation
                 _telemetry.track("engine_stopped")
             except Exception:
                 pass
-            self._reset_camera_health_widgets()
             self._hide_mini_live_viewer()
             if self.live_view_window is not None:
                 self.live_view_window.detach_from_worker()
@@ -16160,19 +16259,36 @@ Admin elevation
             self.start_button.setEnabled(not is_running)
             self.end_button.setEnabled(is_running)
             self.debugger_button.setEnabled(True)
-            # Engine is up — kill the "Starting Touchless" splash
-            # pill. Cancels the 6 s safety-net fallback timer too.
+            # Engine is up — hide the "Starting Touchless" splash
+            # pill. Honour a minimum-show window of 1.2 s so even
+            # fast engine starts (warm caches, ~200 ms init) leave
+            # the pill on screen long enough to read; if the
+            # min-show hasn't elapsed yet, defer the hide via a
+            # QTimer.singleShot for the remainder.
             if is_running:
-                try:
-                    self.processing_overlay.hide_processing()
-                except Exception:
-                    pass
-                timer = getattr(self, "_starting_splash_fallback_timer", None)
-                if timer is not None:
+                MIN_SHOW_MS = 1200
+                shown_at = getattr(self, "_starting_splash_shown_at", None)
+                now = time.monotonic()
+                if shown_at is None:
+                    remaining_ms = 0
+                else:
+                    elapsed_ms = (now - shown_at) * 1000.0
+                    remaining_ms = max(0, int(MIN_SHOW_MS - elapsed_ms))
+                def _hide_now():
                     try:
-                        timer.stop()
+                        self.processing_overlay.hide_processing()
                     except Exception:
                         pass
+                    timer = getattr(self, "_starting_splash_fallback_timer", None)
+                    if timer is not None:
+                        try:
+                            timer.stop()
+                        except Exception:
+                            pass
+                if remaining_ms > 0:
+                    QTimer.singleShot(remaining_ms, _hide_now)
+                else:
+                    _hide_now()
 
     def _on_command_detected(self, command: str) -> None:
         action_text = str(command or "").strip() or "none"
@@ -20879,11 +20995,6 @@ def _stop_screen_recording(self) -> bool:
     def _on_worker_debug_frame(self, frame, info) -> None:
         if not isinstance(info, dict):
             return
-        # Throttled update for the Camera page's Live Status pill +
-        # FPS readout. The check is cheap (one time.monotonic()) so
-        # it's fine to call on every frame; the actual widget set
-        # only fires ~4× per second.
-        self._update_camera_health_widgets(info)
         drawing_target = str(info.get("drawing_render_target", self._drawing_render_target) or self._drawing_render_target)
         self._set_drawing_render_target(drawing_target)
         request_token = int(info.get("drawing_request_token", 0) or 0)
