@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import cv2
@@ -124,16 +125,105 @@ class LiveViewWindow(QMainWindow):
         self._frozen_overlay.hide()
         self._frozen_overlay.setText("Paused\nCustom gesture tool active...")
 
+        # Engine-required pill: shown when the live view is opened
+        # but the gesture engine isn't running, so the user knows
+        # why they're seeing a blank canvas. Positioned by
+        # _reposition_engine_required_pill() on every resize.
+        self._engine_required_pill = QLabel(self.video_label)
+        self._engine_required_pill.setObjectName("debugEngineRequiredPill")
+        self._engine_required_pill.setAlignment(Qt.AlignCenter)
+        self._engine_required_pill.setWordWrap(True)
+        self._engine_required_pill.setText(
+            "Start the engine from the home page to enable\n"
+            "gesture controls and see the live camera feed."
+        )
+        self._engine_required_pill.setStyleSheet(
+            "QLabel#debugEngineRequiredPill {"
+            "  background: rgba(13, 28, 50, 0.86);"
+            "  color: #FFFFFF;"
+            "  font-weight: 700;"
+            "  font-size: 14px;"
+            "  padding: 12px 18px;"
+            "  border: 1px solid rgba(29,233,182,0.55);"
+            "  border-radius: 14px;"
+            "}"
+        )
+        self._engine_required_pill.hide()
+
+        # Top-left HUD: tiny always-on FPS + display-lag readout in
+        # the accent green. Child of the video widget so it sits
+        # ON TOP of the camera frame; positioned by _reposition_diag_hud()
+        # on every resize. Mouse-transparent so it doesn't intercept
+        # clicks meant for the underlying video / overlay widgets.
+        self._diag_hud = QLabel(self.video_label)
+        self._diag_hud.setObjectName("liveViewDiagHud")
+        self._diag_hud.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._diag_hud.setStyleSheet(
+            "QLabel#liveViewDiagHud {"
+            "  color: #1DE9B6;"
+            "  font-family: 'Consolas', 'Segoe UI Mono', monospace;"
+            "  font-size: 11px;"
+            "  font-weight: 700;"
+            "  background: rgba(0, 0, 0, 0.42);"
+            "  padding: 2px 6px;"
+            "  border-radius: 4px;"
+            "}"
+        )
+        self._diag_hud.setText("FPS: --  Lag: --ms")
+        self._diag_hud.adjustSize()
+        self._diag_hud_fps_text = "--"
+        self._diag_hud_lag_text = "--"
+
+        # ---- Diagnostic overlay row (FPS · Latency · Tracking) ----
+        # Three optional pills that sit between the video panel and
+        # the gesture chip. Each one is hidden by default and shown
+        # only when the user enables it in Settings → Camera → Live
+        # View Overlays. The whole row hides when nothing is enabled
+        # so a clean feed remains the default look.
+        self.diagnostic_row = QWidget()
+        diag_layout = QHBoxLayout(self.diagnostic_row)
+        diag_layout.setContentsMargins(0, 0, 0, 0)
+        diag_layout.setSpacing(8)
+        diag_layout.addStretch(1)
+
+        self.fps_chip = QLabel("FPS: —")
+        self.fps_chip.setObjectName("fpsChip")
+        self.fps_chip.setAlignment(Qt.AlignCenter)
+        self.fps_chip.hide()
+        diag_layout.addWidget(self.fps_chip)
+
         # Live latency readout: time from camera-frame decode to
         # this very paint, in milliseconds. EWMA-smoothed so the
-        # display number doesn't strobe. Sits between the video
-        # and the gesture chip so it's visible at a glance.
+        # display number doesn't strobe.
         self.latency_label = QLabel("Display lag: --")
         self.latency_label.setObjectName("latencyChip")
         self.latency_label.setAlignment(Qt.AlignCenter)
-        video_layout.addWidget(self.latency_label, 0, Qt.AlignCenter)
-        # Per-paint EWMA state.
+        self.latency_label.hide()
+        diag_layout.addWidget(self.latency_label)
+
+        self.tracking_quality_chip = QLabel("Tracking: —")
+        self.tracking_quality_chip.setObjectName("trackingQualityChip")
+        self.tracking_quality_chip.setAlignment(Qt.AlignCenter)
+        self.tracking_quality_chip.hide()
+        diag_layout.addWidget(self.tracking_quality_chip)
+
+        diag_layout.addStretch(1)
+        video_layout.addWidget(self.diagnostic_row, 0, Qt.AlignCenter)
+        # Per-paint EWMA state for the latency chip.
         self._lag_ms_smoothed: float = 0.0
+        # Tracking-quality state. last_hand_ts records the most
+        # recent frame where `found=True` so the "No hand seen"
+        # state only triggers after the hand has been absent for
+        # >1.5 s. Throttle prevents the chip from churning at 30 Hz.
+        self._tracking_quality_state = "idle"
+        self._tracking_quality_last_hand_ts = 0.0
+        self._tracking_quality_last_update_ts = 0.0
+        # Apply initial visibility from config.
+        self.set_overlay_visibility(
+            show_fps=bool(getattr(self.config, "live_view_show_fps", False)),
+            show_latency=bool(getattr(self.config, "live_view_show_latency", False)),
+            show_tracking_quality=bool(getattr(self.config, "live_view_show_tracking_quality", False)),
+        )
 
         self.gesture_chip = QLabel("Gesture: neutral")
         self.gesture_chip.setObjectName("gestureChip")
@@ -473,6 +563,9 @@ class LiveViewWindow(QMainWindow):
             f"Display lag: {self._lag_ms_smoothed:.0f} ms  |  "
             f"Frames in: {self._arrival_rate_smoothed:.0f}/s"
         )
+        # Always-on top-left HUD mirrors the lag value.
+        self._diag_hud_lag_text = f"{self._lag_ms_smoothed:.0f}"
+        self._update_diag_hud()
 
     def _on_worker_landmarks(self, hands_xy_norm) -> None:
         # GPU landmark overlay path. Same rationale as in
@@ -504,6 +597,148 @@ class LiveViewWindow(QMainWindow):
         self._volume_muted = bool(payload.get("volume_muted", False))
         self._volume_active = bool(payload.get("volume_active", False))
         self._update_volume_widgets()
+        self._update_diagnostic_chips(payload)
+
+    def _update_diagnostic_chips(self, payload: dict) -> None:
+        """Update FPS + tracking-quality chips from the worker
+        payload. Throttled to ~4 Hz so the chips don't churn at the
+        camera's full frame rate. Latency is updated separately
+        from raw frames (different signal, different EWMA)."""
+        if not (
+            self.fps_chip.isVisibleTo(self)
+            or self.tracking_quality_chip.isVisibleTo(self)
+        ):
+            # Nothing visible — still keep the last-hand timestamp
+            # current so toggling on doesn't flash "No hand seen"
+            # immediately.
+            try:
+                if bool(payload.get("found", False)):
+                    self._tracking_quality_last_hand_ts = time.monotonic()
+            except Exception:
+                pass
+            return
+        now = time.monotonic()
+        if (now - self._tracking_quality_last_update_ts) < 0.25:
+            try:
+                if bool(payload.get("found", False)):
+                    self._tracking_quality_last_hand_ts = now
+            except Exception:
+                pass
+            return
+        self._tracking_quality_last_update_ts = now
+
+        # ---- FPS ----
+        try:
+            fps_value = float(payload.get("fps", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            fps_value = 0.0
+        # Always feed the top-left HUD; chip update is gated on its
+        # own visibility for the diagnostic-row pills.
+        self._diag_hud_fps_text = "--" if fps_value <= 0.0 else f"{fps_value:.1f}"
+        self._update_diag_hud()
+        if self.fps_chip.isVisibleTo(self):
+            if fps_value <= 0.0:
+                self.fps_chip.setText("FPS: —")
+                self._apply_fps_chip_color("neutral")
+            else:
+                self.fps_chip.setText(f"FPS: {fps_value:.1f}")
+                if fps_value >= 22.0:
+                    self._apply_fps_chip_color("good")
+                elif fps_value >= 15.0:
+                    self._apply_fps_chip_color("warn")
+                else:
+                    self._apply_fps_chip_color("bad")
+
+        # ---- Tracking quality ----
+        if self.tracking_quality_chip.isVisibleTo(self):
+            try:
+                found = bool(payload.get("found", False))
+                confidence = float(payload.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                found = False
+                confidence = 0.0
+            if found:
+                self._tracking_quality_last_hand_ts = now
+            time_since_hand = now - self._tracking_quality_last_hand_ts
+            if found and confidence >= 0.65:
+                self._set_tracking_quality_state("good")
+            elif found and confidence >= 0.45:
+                self._set_tracking_quality_state("fair")
+            elif time_since_hand >= 1.5:
+                self._set_tracking_quality_state("poor")
+            # Between found=False and 1.5 s timeout, keep the prior
+            # state to avoid flashing red on single-frame drops.
+
+    def _apply_fps_chip_color(self, kind: str) -> None:
+        """Recolor the FPS chip — green when comfortably high,
+        amber when in the Low FPS Mode zone, red when very low."""
+        palette = {
+            "good":    ("#1DE9B6", "rgba(29,233,182,0.18)", "rgba(29,233,182,0.55)"),
+            "warn":    ("#F5B450", "rgba(245,180,80,0.18)",  "rgba(245,180,80,0.55)"),
+            "bad":     ("#FF8A8A", "rgba(255,107,107,0.18)", "rgba(255,107,107,0.55)"),
+            "neutral": ("rgba(229,246,255,0.75)", "rgba(255,255,255,0.05)", "rgba(127,127,127,0.30)"),
+        }
+        fg, bg, border = palette.get(kind, palette["neutral"])
+        self.fps_chip.setStyleSheet(
+            "QLabel#fpsChip {"
+            f"  background: {bg};"
+            f"  color: {fg};"
+            f"  border: 1px solid {border};"
+            "  border-radius: 12px;"
+            "  padding: 3px 12px;"
+            "  font-size: 12px;"
+            "  font-weight: 700;"
+            "  letter-spacing: 0.3px;"
+            "}"
+        )
+
+    def _set_tracking_quality_state(self, state: str) -> None:
+        if state == self._tracking_quality_state:
+            return
+        self._tracking_quality_state = state
+        states = {
+            "good": ("Tracking: Good",       "#1DE9B6", "rgba(29,233,182,0.18)", "rgba(29,233,182,0.55)"),
+            "fair": ("Tracking: Marginal",   "#F5B450", "rgba(245,180,80,0.18)", "rgba(245,180,80,0.55)"),
+            "poor": ("Tracking: No hand seen","#FF8A8A","rgba(255,107,107,0.18)","rgba(255,107,107,0.55)"),
+            "idle": ("Tracking: —",          "rgba(229,246,255,0.75)", "rgba(255,255,255,0.05)", "rgba(127,127,127,0.30)"),
+        }
+        text, fg, bg, border = states.get(state, states["idle"])
+        self.tracking_quality_chip.setText(text)
+        self.tracking_quality_chip.setStyleSheet(
+            "QLabel#trackingQualityChip {"
+            f"  background: {bg};"
+            f"  color: {fg};"
+            f"  border: 1px solid {border};"
+            "  border-radius: 12px;"
+            "  padding: 3px 12px;"
+            "  font-size: 12px;"
+            "  font-weight: 700;"
+            "  letter-spacing: 0.3px;"
+            "}"
+        )
+
+    def set_overlay_visibility(
+        self,
+        *,
+        show_fps: bool,
+        show_latency: bool,
+        show_tracking_quality: bool,
+    ) -> None:
+        """Toggle individual diagnostic-pill visibility. Hides the
+        row container entirely when nothing is enabled so the live
+        view stays clean for users who don't want diagnostics."""
+        self.fps_chip.setVisible(bool(show_fps))
+        self.latency_label.setVisible(bool(show_latency))
+        self.tracking_quality_chip.setVisible(bool(show_tracking_quality))
+        # When tracking quality is freshly enabled and the engine
+        # isn't running, the chip would otherwise stay blank until
+        # the first frame arrives. Seed the idle state so it reads
+        # immediately.
+        if show_tracking_quality and self._tracking_quality_state == "idle":
+            self._set_tracking_quality_state("idle")
+        # When all three are off, hide the wrapper row too.
+        any_visible = bool(show_fps or show_latency or show_tracking_quality)
+        self.diagnostic_row.setVisible(any_visible)
 
     def _on_worker_frozen_changed(self, frozen: bool) -> None:
         self._frozen = bool(frozen)
@@ -525,6 +760,51 @@ class LiveViewWindow(QMainWindow):
     def _reposition_frozen_overlay(self) -> None:
         try:
             self._frozen_overlay.setGeometry(self.video_label.rect())
+        except Exception:
+            pass
+        self._reposition_engine_required_pill()
+        self._reposition_diag_hud()
+
+    def _reposition_diag_hud(self) -> None:
+        hud = getattr(self, "_diag_hud", None)
+        if hud is None:
+            return
+        try:
+            hud.adjustSize()
+            hud.move(8, 8)
+            hud.raise_()
+        except Exception:
+            pass
+
+    def _update_diag_hud(self) -> None:
+        hud = getattr(self, "_diag_hud", None)
+        if hud is None:
+            return
+        hud.setText(f"FPS: {self._diag_hud_fps_text}  Lag: {self._diag_hud_lag_text}ms")
+        hud.adjustSize()
+
+    def _reposition_engine_required_pill(self) -> None:
+        try:
+            video_rect = self.video_label.rect()
+            hint_w = min(420, max(220, int(video_rect.width() * 0.6)))
+            hint_h = max(64, self._engine_required_pill.sizeHint().height())
+            x = (video_rect.width() - hint_w) // 2
+            y = (video_rect.height() - hint_h) // 2
+            self._engine_required_pill.setGeometry(x, y, hint_w, hint_h)
+        except Exception:
+            pass
+
+    def set_engine_required_pill_visible(self, visible: bool) -> None:
+        """Toggle the centered 'Start the engine to use controls' pill.
+        Shown when the live view is opened with no live worker so the
+        user understands why the feed is empty."""
+        try:
+            if bool(visible):
+                self._reposition_engine_required_pill()
+                self._engine_required_pill.show()
+                self._engine_required_pill.raise_()
+            else:
+                self._engine_required_pill.hide()
         except Exception:
             pass
 

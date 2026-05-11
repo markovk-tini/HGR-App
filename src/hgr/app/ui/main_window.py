@@ -9408,6 +9408,13 @@ class MainWindow(QMainWindow):
         # only visible card — the surrounding area reads as plain
         # settings-stack background instead of an empty card.
         panel.setStyleSheet("QFrame#settingsContentPanel { background: transparent; border: none; }")
+        # Tighten the panel's outer margins so the camera content
+        # fits within the default settings viewport without
+        # triggering the outer scroll. The default 20 px top/bottom
+        # margin was just enough to push the camera content over
+        # the edge of the viewport at default window size.
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(8)
         title_item = layout.takeAt(0)
         title_label = title_item.widget() if title_item is not None else None
         header_row = QHBoxLayout()
@@ -9428,24 +9435,64 @@ class MainWindow(QMainWindow):
         self._set_settings_save_button_pending(self.save_camera_button, False)
         self.clear_camera_button = None
 
-        # No inner QScrollArea — the outer settings content stack
-        # already owns a scroll area (see `content_scroll` in
-        # `_build_ui`), so wrapping the camera panel in its own
-        # scroll on top of that left a visible scrollbar at the
-        # default window size whenever the panel content was even
-        # slightly taller than the inner viewport. Now the camera
-        # panel renders at its natural height: at default size or
-        # larger there's no scrolling, and only when the user shrinks
-        # the window below the natural height does the outer
-        # settings scroll kick in.
+        # Inner QScrollArea around the camera content. Without it,
+        # the camera panel's natural height drove the outer settings
+        # content_scroll into a "scrolls to show nothing" state at
+        # default window size — the panel itself was the right size,
+        # but the stack widget rounded UP to a slightly taller value
+        # because of other panels' sizeHints, and the outer scroll
+        # exposed that extra empty space. The inner scroll absorbs
+        # the overflow locally: at default size the content fits and
+        # the scrollbar stays hidden (ScrollBarAsNeeded); when the
+        # user shrinks the window below the natural content height,
+        # the scrollbar appears INSIDE the camera panel.
+        scroll = QScrollArea()
+        scroll.setObjectName("cameraScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea#cameraScroll, QScrollArea#cameraScroll > QWidget,
+            QScrollArea#cameraScroll QWidget#qt_scrollarea_viewport {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#cameraScroll QScrollBar:vertical {{
+                background: rgba(255,255,255,0.04);
+                width: 10px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
+            }}
+            QScrollArea#cameraScroll QScrollBar::handle:vertical {{
+                background: {self.config.accent_color};
+                border-radius: 5px;
+                min-height: 32px;
+            }}
+            QScrollArea#cameraScroll QScrollBar::add-line:vertical,
+            QScrollArea#cameraScroll QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: transparent;
+            }}
+            QScrollArea#cameraScroll QScrollBar::add-page:vertical,
+            QScrollArea#cameraScroll QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            """
+        )
 
         box = QFrame()
         box.setObjectName("innerCard")
         box.setAttribute(Qt.WA_StyledBackground, True)
         box.setStyleSheet(self._settings_inner_card_stylesheet())
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(16, 16, 16, 16)
-        box_layout.setSpacing(8)
+        # Slightly tighter inner-card margins than the default
+        # (16, 16, 16, 16) so the three-section camera content fits
+        # the settings viewport at default window size without
+        # triggering a vertical scrollbar. Spacing also nudged down.
+        box_layout.setContentsMargins(14, 12, 14, 12)
+        box_layout.setSpacing(6)
 
         # Camera-panel checkbox style: matches the unified app-wide
         # green-box-with-white-checkmark look (see
@@ -9755,23 +9802,24 @@ class MainWindow(QMainWindow):
         self._refresh_phone_camera_controls()
         self._refresh_camera_settings_save_state()
 
-        # Lock the inner card's vertical size to its sizeHint so Qt
-        # can't allocate it any extra height. We tried
-        # QSizePolicy.Maximum first but Qt's QVBoxLayout still
-        # grew the box when the panel had spare vertical room;
-        # `Fixed` is the only policy that forces "exactly sizeHint,
-        # no growth at all" regardless of what the parent layout
-        # tries. The trailing addStretch(1) below absorbs the rest
-        # of the panel's vertical space as transparent background.
-        box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        # adjustSize() before pinning the height makes sure the box's
-        # cached sizeHint reflects every child widget that was just
-        # added to box_layout — otherwise the Fixed policy locks the
-        # box to a stale (smaller) size and the last section gets
-        # clipped under the bottom border.
-        box.adjustSize()
-        layout.addWidget(box, 0, Qt.AlignTop)
-        layout.addStretch(1)
+        # Wrap the inner card in a transparent scroll_container with
+        # a terminal addStretch so the box sits at its natural
+        # height inside the scroll viewport. The wrapper absorbs
+        # extra viewport height as invisible background — same
+        # pattern the Microphone panel uses (see _build_microphone_panel).
+        scroll_container = QWidget()
+        scroll_container.setAutoFillBackground(False)
+        scroll_container.setAttribute(Qt.WA_StyledBackground, False)
+        scroll_container.setStyleSheet("background: transparent;")
+        scroll_vbox = QVBoxLayout(scroll_container)
+        scroll_vbox.setContentsMargins(0, 0, 0, 0)
+        scroll_vbox.setSpacing(8)
+        scroll_vbox.addWidget(box)
+        scroll_vbox.addStretch(1)
+
+        scroll.setWidget(scroll_container)
+        self._install_scroll_wheel_forwarder(scroll)
+        layout.addWidget(scroll, 1)
         return panel
 
     def _install_scroll_wheel_forwarder(self, scroll_area: QScrollArea) -> None:
@@ -13249,6 +13297,25 @@ Admin elevation
                 self._refresh_camera_combo_selection(saved)
         except Exception:
             pass
+        # Revert the Live View Overlay checkboxes to their baseline
+        # (= last-saved config value). Without this, the visual
+        # state of the checkbox persists across navigation, making
+        # an unsaved toggle look saved when the user comes back.
+        baseline = getattr(self, "_live_view_overlay_baseline", None)
+        if baseline is not None:
+            checks = (
+                (getattr(self, "live_view_fps_checkbox", None), "live_view_show_fps"),
+                (getattr(self, "live_view_latency_checkbox", None), "live_view_show_latency"),
+                (getattr(self, "live_view_tracking_quality_checkbox", None), "live_view_show_tracking_quality"),
+            )
+            for checkbox, key in checks:
+                if checkbox is None:
+                    continue
+                desired = bool(baseline.get(key, False))
+                if bool(checkbox.isChecked()) != desired:
+                    checkbox.blockSignals(True)
+                    checkbox.setChecked(desired)
+                    checkbox.blockSignals(False)
         try:
             self._set_settings_save_button_pending(button, False)
         except Exception:
@@ -15733,21 +15800,32 @@ Admin elevation
             # _on_running_state_changed(True) once the engine is up,
             # with a 6 s fallback in case the running_state signal
             # never fires (engine crash mid-init).
-            try:
-                self.processing_overlay.show_processing("Starting Touchless")
-                self._starting_splash_shown_at = time.monotonic()
-                fallback_timer = getattr(self, "_starting_splash_fallback_timer", None)
-                if fallback_timer is None:
-                    fallback_timer = QTimer(self)
-                    fallback_timer.setSingleShot(True)
-                    fallback_timer.timeout.connect(
-                        lambda: self.processing_overlay.hide_processing()
-                    )
-                    self._starting_splash_fallback_timer = fallback_timer
-                fallback_timer.stop()
-                fallback_timer.start(6000)
-            except Exception:
-                pass
+            #
+            # SKIP the pill when the engine is already running --
+            # callers like _restart_camera_for_phone_toggle re-enter
+            # start_engine for a hot worker swap, and the splash on
+            # an already-running engine reads as a regression / fake
+            # loading screen.
+            engine_already_running = (
+                self._worker is not None
+                and bool(getattr(self._worker, "is_running", False))
+            )
+            if not engine_already_running:
+                try:
+                    self.processing_overlay.show_processing("Starting Touchless")
+                    self._starting_splash_shown_at = time.monotonic()
+                    fallback_timer = getattr(self, "_starting_splash_fallback_timer", None)
+                    if fallback_timer is None:
+                        fallback_timer = QTimer(self)
+                        fallback_timer.setSingleShot(True)
+                        fallback_timer.timeout.connect(
+                            lambda: self.processing_overlay.hide_processing()
+                        )
+                        self._starting_splash_fallback_timer = fallback_timer
+                    fallback_timer.stop()
+                    fallback_timer.start(6000)
+                except Exception:
+                    pass
     
             cameras = self._discovered_cameras if self._discovered_cameras else self.refresh_camera_inventory(update_status=True, notify=False)
             phone_qr_paired = (
