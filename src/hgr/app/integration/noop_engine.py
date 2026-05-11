@@ -531,15 +531,29 @@ class GestureWorker(QObject):
     _LOW_FPS_SUGGEST_ENTER_SECONDS = 10.0
     _LOW_FPS_SUGGEST_COOLDOWN_SECONDS = 300.0
 
-    def __init__(self, config, camera_index_override: Optional[int] = None, parent=None):
+    def __init__(self, config, camera_index_override: Optional[int] = None, parent=None, progress_callback=None):
         super().__init__(parent)
         # Helper: pumps the Qt event loop briefly so the
         # starting-pill's repaint timer can fire between heavy
         # controller / overlay constructions below. Without these
         # pumps the entire __init__ is one ~2 s blocking Python
-        # call and the pill's wave dots freeze mid-bounce because
-        # no paint event ever lands until __init__ returns.
+        # call and the starting pill's progress bar can't be
+        # repainted until __init__ returns. Each pump_events() call
+        # also advances the optional progress_callback so the bar
+        # steps forward by one checkpoint per pump.
+        self._init_progress_step = 0
+        self._init_progress_total = 10  # ~9 pumps in __init__ + headroom
+        self._init_progress_callback = progress_callback
+
         def _pump_events() -> None:
+            self._init_progress_step += 1
+            cb = self._init_progress_callback
+            if cb is not None:
+                try:
+                    fraction = min(0.85, self._init_progress_step / float(self._init_progress_total))
+                    cb(fraction)
+                except Exception:
+                    pass
             try:
                 from PySide6.QtWidgets import QApplication as _QApp
                 app = _QApp.instance()
@@ -6558,6 +6572,13 @@ class GestureWorker(QObject):
             # _spotify_window_handles cache and answers the same
             # question (is there a visible Spotify top-level window).
             "spotify_window_open": bool(self.spotify_controller.is_window_open()),
+            # Authorization flag exposed so MainWindow can fire the
+            # first-active prompt the moment a Spotify gesture / voice
+            # command is attempted on an unauthorized install — not
+            # just when Spotify is detected running. False both when
+            # the user has never connected AND when the saved token
+            # was revoked.
+            "spotify_has_authorization": bool(getattr(self.spotify_controller, "has_authorization", False)),
             "spotify_control_text": self._spotify_control_text,
             "spotify_last_action": self._last_spotify_action,
             "chrome_mode_enabled": bool(self._chrome_mode_enabled),

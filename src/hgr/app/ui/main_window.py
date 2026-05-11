@@ -5373,6 +5373,13 @@ class MainWindow(QMainWindow):
         self.undo_action_button.setEnabled(False)
         self.undo_action_button.clicked.connect(self._on_undo_last_action)
         recent_actions_header.addWidget(self.undo_action_button)
+        # Clear button — wipes the visible action log without
+        # affecting the engine. Useful after demoing the app.
+        self.clear_action_history_button = QPushButton("Clear")
+        self.clear_action_history_button.setObjectName("undoActionButton")
+        self.clear_action_history_button.setToolTip("Clear the recent-actions list")
+        self.clear_action_history_button.clicked.connect(self._on_clear_action_history)
+        recent_actions_header.addWidget(self.clear_action_history_button)
         recent_actions_layout.addLayout(recent_actions_header)
 
         self.action_history_list = QListWidget()
@@ -9732,16 +9739,22 @@ class MainWindow(QMainWindow):
         self._refresh_phone_camera_controls()
         self._refresh_camera_settings_save_state()
 
-        # Cap the inner card's vertical size to its sizeHint so it
-        # can't expand into the empty space below the last widget.
-        # QFrame's default size policy (Preferred / Preferred) lets
-        # it grow even when the layout has a trailing addStretch —
-        # which is what was leaving visible empty space inside the
-        # rounded card's bottom border. QSizePolicy.Maximum means
-        # "never grow beyond sizeHint", which keeps the card tightly
-        # wrapped around its content.
-        box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        layout.addWidget(box, 0)
+        # Lock the inner card's vertical size to its sizeHint so Qt
+        # can't allocate it any extra height. We tried
+        # QSizePolicy.Maximum first but Qt's QVBoxLayout still
+        # grew the box when the panel had spare vertical room;
+        # `Fixed` is the only policy that forces "exactly sizeHint,
+        # no growth at all" regardless of what the parent layout
+        # tries. The trailing addStretch(1) below absorbs the rest
+        # of the panel's vertical space as transparent background.
+        box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        # adjustSize() before pinning the height makes sure the box's
+        # cached sizeHint reflects every child widget that was just
+        # added to box_layout — otherwise the Fixed policy locks the
+        # box to a stale (smaller) size and the last section gets
+        # clipped under the bottom border.
+        box.adjustSize()
+        layout.addWidget(box, 0, Qt.AlignTop)
         layout.addStretch(1)
         return panel
 
@@ -15829,15 +15842,21 @@ Admin elevation
             phone_qr_active = bool(getattr(self.config, "phone_camera_qr_active", False)) and self._current_phone_camera_qr_server() is not None
             phone_url_active = bool(getattr(self.config, "phone_camera_enabled", False)) and bool(str(getattr(self.config, "phone_camera_url", "") or "").strip())
             worker_override = None if (phone_qr_active or phone_url_active) else selected_camera_index
-            # Pump events so the starting-pill repaints (and its
-            # animated wave dots advance) before the GestureWorker
-            # constructor, which can block the UI thread for ~1-2 s
-            # the first time it touches MediaPipe / audio devices.
+            # Pump events so the starting-pill repaints before the
+            # GestureWorker constructor, which blocks the UI thread
+            # for ~1-2 s on first init.
             try:
                 QApplication.processEvents()
             except Exception:
                 pass
-            self._worker = GestureWorker(self.config, camera_index_override=worker_override)
+            # progress_callback advances the pill's progress bar at
+            # each internal pump point during __init__ -- the user
+            # sees stepped real progress instead of frozen animation.
+            self._worker = GestureWorker(
+                self.config,
+                camera_index_override=worker_override,
+                progress_callback=self._set_starting_splash_progress,
+            )
             try:
                 QApplication.processEvents()
             except Exception:
@@ -15932,6 +15951,24 @@ Admin elevation
                 QApplication.processEvents()
             except Exception:
                 pass
+            # Push the pill to ~95 %. The worker thread is now running
+            # and will fire running_state_changed(True) once MediaPipe
+            # finishes loading, which hides the pill via
+            # _on_running_state_changed.
+            try:
+                self.processing_overlay.set_progress(0.95)
+            except Exception:
+                pass
+
+    def _set_starting_splash_progress(self, fraction: float) -> None:
+        """Forwards progress reports from GestureWorker.__init__ to
+        the starting-pill's progress bar. Wrapped in a tiny method
+        so we can pass it as a callback (bound method) and so the
+        callee doesn't need to know about the overlay layout."""
+        try:
+            self.processing_overlay.set_progress(float(fraction))
+        except Exception:
+            pass
 
     def stop_engine(self) -> None:
             try:
@@ -16758,6 +16795,20 @@ Admin elevation
             return
         try:
             worker.undo_last_action()
+        except Exception:
+            pass
+
+    def _on_clear_action_history(self) -> None:
+        """Clear the visible Recent Actions list. Presentation-only
+        reset — doesn't touch the engine's internal history. Useful
+        for clearing demo clutter from the home-page panel."""
+        try:
+            self.action_history_list.clear()
+        except Exception:
+            pass
+        self._last_action_history_events = []
+        try:
+            self.undo_action_button.setEnabled(False)
         except Exception:
             pass
 
@@ -19486,6 +19537,19 @@ Admin elevation
         # engine ticks each frame.
         if bool(info.get("spotify_window_open", False)):
             self._maybe_show_spotify_first_active_prompt()
+        # Also fire the prompt when the user has just ATTEMPTED a
+        # Spotify gesture / voice command without ever connecting —
+        # the prompt's own gating handles the per-install latch and
+        # the "already authorized" no-op, so it's safe to call
+        # whenever a Spotify action runs against an unauth'd
+        # install. Detected via the per-frame `spotify_last_action`
+        # changing while `spotify_has_authorization` is False.
+        last_action = str(info.get("spotify_last_action") or "")
+        has_auth = bool(info.get("spotify_has_authorization", False))
+        prev_action = getattr(self, "_prev_spotify_last_action_seen", "")
+        if last_action and last_action != prev_action and not has_auth:
+            self._maybe_show_spotify_first_active_prompt()
+        self._prev_spotify_last_action_seen = last_action
         drawing_target = str(info.get("drawing_render_target", self._drawing_render_target) or self._drawing_render_target)
         self._set_drawing_render_target(drawing_target)
         request_token = int(info.get("drawing_request_token", 0) or 0)

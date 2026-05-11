@@ -898,9 +898,16 @@ class ProcessingOverlay(QWidget):
         self.setAutoFillBackground(False)
         self.setStyleSheet("background: transparent; border: none;")
         self._label = "Processing"
+        # Progress fraction 0.0..1.0 for the bar below the text.
+        # Defaults to 0.0; show_processing resets it. Callers update
+        # it via set_progress() as init steps complete. Replaces the
+        # animated wave dots: a bar that steps forward on real work
+        # reads as "loading" even when the UI thread is intermittently
+        # blocked, whereas the wave looked broken when frozen.
+        self._progress = 0.0
         self._timer = QTimer(self)
-        # Animated wave dots redraw at ~25 fps for smooth pulsing.
-        self._timer.setInterval(40)
+        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         self.resize(self._PILL_WIDTH, self._PILL_HEIGHT)
 
@@ -927,8 +934,29 @@ class ProcessingOverlay(QWidget):
         if self.isVisible():
             self.repaint()
 
+    def set_progress(self, fraction: float) -> None:
+        """Set the progress bar fill from 0.0 to 1.0. Forces a
+        synchronous repaint + processEvents so the new bar position
+        is visible even when the caller is about to enter another
+        blocking section of work."""
+        try:
+            new_progress = max(0.0, min(1.0, float(fraction)))
+        except Exception:
+            return
+        # Don't shrink — protects against out-of-order updates.
+        if new_progress < self._progress:
+            return
+        self._progress = new_progress
+        if self.isVisible():
+            self.repaint()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+
     def show_processing(self, label: str = "Processing") -> None:
         self._label = str(label or "Processing")
+        self._progress = 0.0
         self._place_on_screen()
         self.show()
         self.raise_()
@@ -996,10 +1024,12 @@ class ProcessingOverlay(QWidget):
         painter.setBrush(panel)
         painter.drawRoundedRect(rect, 18.0, 18.0)
 
-        # Stacked layout: label on top, animated dots below — same
-        # ordering the voice processing pill uses (just inverted: voice
-        # has dots on top + text below; user asked for text on top
-        # here so the label reads first).
+        # Stacked layout: label on top, progress bar below. Bar
+        # steps forward as init checkpoints complete (volume API
+        # bound, voice listener ready, etc.) -- on a stepped bar
+        # the discontinuities read as real progress instead of a
+        # broken animation, which is what we get for free even when
+        # the UI thread is intermittently blocked during startup.
         font = QFont("Segoe UI", 12)
         font.setBold(True)
         painter.setFont(font)
@@ -1007,9 +1037,22 @@ class ProcessingOverlay(QWidget):
         label_rect = QRectF(rect.left() + 12, rect.top() + 14, rect.width() - 24, 24)
         painter.drawText(label_rect, Qt.AlignCenter, self._label)
 
-        dots_cx = rect.center().x()
-        dots_cy = rect.bottom() - 22
-        self._draw_loading_dots(painter, dots_cx, dots_cy, accent)
+        # Progress bar: thin rounded track + accent-coloured fill
+        # whose width = progress * track_width.
+        bar_h = 6.0
+        bar_y = rect.bottom() - 20
+        bar_left = rect.left() + 18
+        bar_right = rect.right() - 18
+        bar_w = bar_right - bar_left
+        track = QColor(accent.red(), accent.green(), accent.blue(), 55)
+        fill = QColor(accent.red(), accent.green(), accent.blue(), 235)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(track)
+        painter.drawRoundedRect(QRectF(bar_left, bar_y, bar_w, bar_h), bar_h / 2.0, bar_h / 2.0)
+        fill_w = bar_w * float(self._progress)
+        if fill_w > 0.5:
+            painter.setBrush(fill)
+            painter.drawRoundedRect(QRectF(bar_left, bar_y, fill_w, bar_h), bar_h / 2.0, bar_h / 2.0)
 
 
 class SavedLocationOverlay(QWidget):
