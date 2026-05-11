@@ -179,6 +179,32 @@ class MiniLiveViewer(QWidget):
         self._frozen_overlay.hide()
         self._frozen_overlay.setText("Paused\nCustom gesture tool active...")
 
+        # Top-left diagnostic HUD: tiny green text showing
+        # 'FPS: X.X', 'Latency: Y ms', or both depending on the
+        # Settings → Camera → Live View Overlays toggles. Hidden by
+        # default; opt-in via set_overlay_visibility().
+        self._diag_hud = QLabel(self.video_label)
+        self._diag_hud.setObjectName("miniDiagHud")
+        self._diag_hud.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._diag_hud.setStyleSheet(
+            "QLabel#miniDiagHud {"
+            "  color: #1DE9B6;"
+            "  font-family: 'Consolas', 'Segoe UI Mono', monospace;"
+            "  font-size: 11px;"
+            "  font-weight: 700;"
+            "  background: rgba(0, 0, 0, 0.42);"
+            "  padding: 2px 6px;"
+            "  border-radius: 4px;"
+            "}"
+        )
+        self._diag_hud.hide()
+        self._diag_hud_fps_text = "--"
+        self._diag_hud_lag_text = "--"
+        self._diag_hud_show_fps = bool(getattr(self.config, "live_view_show_fps", False))
+        self._diag_hud_show_latency = bool(getattr(self.config, "live_view_show_latency", False))
+        # Per-paint EWMA state for the latency value.
+        self._lag_ms_smoothed: float = 0.0
+
         self.gesture_chip = QLabel("Gesture: neutral")
         self.gesture_chip.setObjectName("miniChip")
         self.gesture_chip.setAlignment(Qt.AlignCenter)
@@ -391,6 +417,17 @@ class MiniLiveViewer(QWidget):
                 return
         self._last_frame = frame
         self._render_frame()
+        # Update top-left HUD latency EWMA when enabled. Same 0.8/0.2
+        # smoothing as LiveViewWindow so the two readouts agree.
+        if self._diag_hud_show_latency and capture_ts > 0.0:
+            import time as _time
+            instant_ms = max(0.0, (_time.monotonic() - capture_ts) * 1000.0)
+            if self._lag_ms_smoothed <= 0.0:
+                self._lag_ms_smoothed = instant_ms
+            else:
+                self._lag_ms_smoothed = 0.8 * self._lag_ms_smoothed + 0.2 * instant_ms
+            self._diag_hud_lag_text = f"{self._lag_ms_smoothed:.0f}"
+            self._update_diag_hud()
 
     def _on_worker_landmarks(self, hands_xy_norm) -> None:
         # Engine-completed landmark overlay. Goes to the GPU widget
@@ -415,6 +452,14 @@ class MiniLiveViewer(QWidget):
         if not self.isVisible():
             return
         self.gesture_chip.setText(str(payload.get("gesture_chip", "Gesture: neutral")))
+        # Top-left HUD FPS readout (when enabled).
+        if self._diag_hud_show_fps:
+            try:
+                fps_value = float(payload.get("fps", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                fps_value = 0.0
+            self._diag_hud_fps_text = "--" if fps_value <= 0.0 else f"{fps_value:.1f}"
+            self._update_diag_hud()
 
     def _on_worker_frozen_changed(self, frozen: bool) -> None:
         self._frozen = bool(frozen)
@@ -446,6 +491,54 @@ class MiniLiveViewer(QWidget):
             self._frozen_overlay.setGeometry(self.video_label.rect())
         except Exception:
             pass
+        self._reposition_diag_hud()
+
+    def _reposition_diag_hud(self) -> None:
+        hud = getattr(self, "_diag_hud", None)
+        if hud is None:
+            return
+        try:
+            hud.adjustSize()
+            hud.move(6, 6)
+            hud.raise_()
+        except Exception:
+            pass
+
+    def _update_diag_hud(self) -> None:
+        hud = getattr(self, "_diag_hud", None)
+        if hud is None:
+            return
+        show_fps = bool(getattr(self, "_diag_hud_show_fps", False))
+        show_lat = bool(getattr(self, "_diag_hud_show_latency", False))
+        if not show_fps and not show_lat:
+            hud.hide()
+            return
+        parts: list[str] = []
+        if show_fps:
+            parts.append(f"FPS: {self._diag_hud_fps_text}")
+        if show_lat:
+            parts.append(f"Latency: {self._diag_hud_lag_text} ms")
+        hud.setText("  ".join(parts))
+        hud.adjustSize()
+        hud.show()
+        hud.raise_()
+
+    def set_overlay_visibility(
+        self,
+        *,
+        show_fps: bool,
+        show_latency: bool,
+        show_tracking_quality: bool = False,
+    ) -> None:
+        """Toggle the top-left diagnostic HUD. Mirrors the same
+        Settings → Camera → Live View Overlays flags the enlarged
+        LiveViewWindow uses. The tracking_quality argument is
+        accepted for signature parity with LiveViewWindow but is
+        not rendered in the mini viewer."""
+        self._diag_hud_show_fps = bool(show_fps)
+        self._diag_hud_show_latency = bool(show_latency)
+        _ = show_tracking_quality
+        self._update_diag_hud()
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)

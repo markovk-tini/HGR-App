@@ -169,10 +169,11 @@ class LiveViewWindow(QMainWindow):
             "  border-radius: 4px;"
             "}"
         )
-        self._diag_hud.setText("FPS: --  Lag: --ms")
-        self._diag_hud.adjustSize()
+        self._diag_hud.hide()  # opt-in via fps / latency toggles
         self._diag_hud_fps_text = "--"
         self._diag_hud_lag_text = "--"
+        self._diag_hud_show_fps = False
+        self._diag_hud_show_latency = False
 
         # ---- Diagnostic overlay row (FPS · Latency · Tracking) ----
         # Three optional pills that sit between the video panel and
@@ -730,6 +731,12 @@ class LiveViewWindow(QMainWindow):
         self.fps_chip.setVisible(bool(show_fps))
         self.latency_label.setVisible(bool(show_latency))
         self.tracking_quality_chip.setVisible(bool(show_tracking_quality))
+        # Top-left HUD mirrors the same toggles independently — text
+        # composes as 'FPS: X.X', 'Latency: Y ms', or both with FPS
+        # left-most.
+        self._diag_hud_show_fps = bool(show_fps)
+        self._diag_hud_show_latency = bool(show_latency)
+        self._update_diag_hud()
         # When tracking quality is freshly enabled and the engine
         # isn't running, the chip would otherwise stay blank until
         # the first frame arrives. Seed the idle state so it reads
@@ -780,8 +787,20 @@ class LiveViewWindow(QMainWindow):
         hud = getattr(self, "_diag_hud", None)
         if hud is None:
             return
-        hud.setText(f"FPS: {self._diag_hud_fps_text}  Lag: {self._diag_hud_lag_text}ms")
+        show_fps = bool(getattr(self, "_diag_hud_show_fps", False))
+        show_lat = bool(getattr(self, "_diag_hud_show_latency", False))
+        if not show_fps and not show_lat:
+            hud.hide()
+            return
+        parts: list[str] = []
+        if show_fps:
+            parts.append(f"FPS: {self._diag_hud_fps_text}")
+        if show_lat:
+            parts.append(f"Latency: {self._diag_hud_lag_text} ms")
+        hud.setText("  ".join(parts))
         hud.adjustSize()
+        hud.show()
+        hud.raise_()
 
     def _reposition_engine_required_pill(self) -> None:
         try:
