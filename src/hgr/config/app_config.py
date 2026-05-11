@@ -161,6 +161,38 @@ class AppConfig:
     # mouse-box on the camera frame still spans the same area but
     # the cursor output gets clamped to the chosen monitor's region.
     mouse_active_monitor_index: Optional[int] = None
+    # Anonymous install UUID for usage telemetry. Generated on
+    # first launch when missing and persisted across sessions so
+    # the analytics dashboard can compute "active install" /
+    # retention numbers. Not a personal identifier — random
+    # uuid4 only.
+    analytics_install_id: str = ""
+    # Privacy & data flags. Both are opt-in.
+    #   privacy_disclosure_shown: latched True after the user
+    #     clicks "Got it" on the first-run privacy dialog. Stops
+    #     us from re-prompting at every launch.
+    #   analytics_enabled: gates ALL telemetry track() calls. The
+    #     install_id + api_key are only "wired" — actual sending
+    #     requires this flag too. Defaults to FALSE so a fresh
+    #     install never sends a single event until the user opts
+    #     in via the first-run dialog or Settings → About toggle.
+    privacy_disclosure_shown: bool = False
+    analytics_enabled: bool = False
+    # The Touchless version that was running the last time this
+    # install opened the main window. Used by the "Updated to
+    # vX.Y.Z" success toast: when the launching __version__
+    # differs from this stored value, the toast fires once per
+    # update. Empty default = no record yet, so the first launch
+    # after this field was added latches without showing a toast
+    # (we don't pretend to have updated when we just added the
+    # tracking field).
+    last_launched_version: str = ""
+    # Persisted Qt main-window geometry (saveGeometry result, base64-
+    # encoded into ASCII). Empty default means "no record yet" — the
+    # first launch falls back to the spec'd resize/move; subsequent
+    # launches call restoreGeometry on this blob to reproduce the
+    # user's last size + position + maximized state.
+    main_window_geometry_b64: str = ""
     drawings_save_dir: str = field(default_factory=lambda: str(default_save_directory("drawings")))
     screenshots_save_dir: str = field(default_factory=lambda: str(default_save_directory("screenshots")))
     screen_recordings_save_dir: str = field(default_factory=lambda: str(default_save_directory("screen_recordings")))

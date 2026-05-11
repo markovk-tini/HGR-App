@@ -205,6 +205,51 @@ def _with_alpha(color: QColor, alpha: int) -> QColor:
     return c
 
 
+_CHECKMARK_PNG_PATH_CACHE: str = ""
+
+
+def _checkmark_image_path() -> str:
+    """Return a forward-slashed file path to a small white-checkmark
+    PNG. Generated once per process with QPainter and cached on disk
+    under tempdir.
+
+    QSS `data:` URIs (utf8 OR base64) didn't render reliably across
+    PySide6 / Qt 6 builds — the indicator stayed empty when checked.
+    A plain PNG referenced by absolute path works on every Qt
+    version. Module-level helper (not a method) so dialog classes
+    AND MainWindow can both call it.
+    """
+    global _CHECKMARK_PNG_PATH_CACHE
+    if _CHECKMARK_PNG_PATH_CACHE:
+        try:
+            if Path(_CHECKMARK_PNG_PATH_CACHE).exists():
+                return _CHECKMARK_PNG_PATH_CACHE
+        except Exception:
+            pass
+    try:
+        from PySide6.QtGui import QPainter, QPen, QPixmap as _QPixmap
+        # 32×32 source rendered with a thick stroke so when Qt
+        # scales it down to the 18-px indicator the line stays crisp.
+        pix = _QPixmap(32, 32)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor("#FFFFFF"))
+        pen.setWidthF(4.0)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.drawLine(QPointF(7, 17), QPointF(13, 23))
+        p.drawLine(QPointF(13, 23), QPointF(25, 9))
+        p.end()
+        tmp = Path(tempfile.gettempdir()) / "touchless_checkmark_white.png"
+        pix.save(str(tmp), "PNG")
+        _CHECKMARK_PNG_PATH_CACHE = str(tmp).replace("\\", "/")
+        return _CHECKMARK_PNG_PATH_CACHE
+    except Exception:
+        return ""
+
+
 if sys.platform.startswith("win"):
     WM_NCHITTEST = 0x0084
     HTLEFT = 10
@@ -870,14 +915,14 @@ class StartTutorialDialog(QDialog):
                 background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#startDialogCheckbox::indicator:checked {{
-                background-color: {self.config.accent_color};
+                background-color: transparent;
                 border: 2px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QCheckBox#startDialogCheckbox::indicator:checked:hover {{
-                background-color: #29F0C1;
+                background-color: rgba(29,233,182,0.10);
                 border: 2px solid #29F0C1;
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QPushButton#startDialogButton {{
                 background-color: {self.config.primary_color};
@@ -944,7 +989,10 @@ class StartTutorialDialog(QDialog):
         # Caption text #E5F6FF → 0x00FFF6E5.
         DWMWA_CAPTION_COLOR = 35
         DWMWA_TEXT_COLOR = 36
-        caption = ctypes.c_uint32(0x00913D0B)
+        # COLORREF is 0x00BBGGRR for #1F2D6B → R=0x1F, G=0x2D, B=0x6B → 0x006B2D1F.
+        # Matches the in-window title bar (#1F2D6B, deep indigo) so popups
+        # share the same caption colour as the main window's title bar.
+        caption = ctypes.c_uint32(0x006B2D1F)
         text = ctypes.c_uint32(0x00FFF6E5)
         try:
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -1081,14 +1129,14 @@ class WalkthroughStartDialog(QDialog):
                 background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#startDialogCheckbox::indicator:checked {{
-                background-color: {self.config.accent_color};
+                background-color: transparent;
                 border: 2px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QCheckBox#startDialogCheckbox::indicator:checked:hover {{
-                background-color: #29F0C1;
+                background-color: rgba(29,233,182,0.10);
                 border: 2px solid #29F0C1;
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QPushButton#startDialogButton {{
                 background-color: {self.config.primary_color};
@@ -1149,7 +1197,10 @@ class WalkthroughStartDialog(QDialog):
             return
         DWMWA_CAPTION_COLOR = 35
         DWMWA_TEXT_COLOR = 36
-        caption = ctypes.c_uint32(0x00913D0B)
+        # COLORREF is 0x00BBGGRR for #1F2D6B → R=0x1F, G=0x2D, B=0x6B → 0x006B2D1F.
+        # Matches the in-window title bar (#1F2D6B, deep indigo) so popups
+        # share the same caption colour as the main window's title bar.
+        caption = ctypes.c_uint32(0x006B2D1F)
         text = ctypes.c_uint32(0x00FFF6E5)
         try:
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -1277,14 +1328,14 @@ class CameraSelectionDialog(QDialog):
                 background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#cameraDialogCheckbox::indicator:checked {{
-                background-color: {self.config.accent_color};
+                background-color: transparent;
                 border: 2px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QCheckBox#cameraDialogCheckbox::indicator:checked:hover {{
-                background-color: #29F0C1;
+                background-color: rgba(29,233,182,0.10);
                 border: 2px solid #29F0C1;
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QPushButton#cameraDialogButton {{
                 background-color: {self.config.primary_color};
@@ -4325,15 +4376,20 @@ class TouchlessNotice(QDialog):
         self.setWindowFlag(Qt.Tool, True)
         self.setMinimumWidth(360)
         self.setSizeGripEnabled(False)
-        # Match the app's body surface (#0F172A — the dark navy
-        # behind the START/END/SETTINGS row), not the brighter
-        # primary blue (#0B3D91) which is reserved for the title
-        # bar accent. The OS caption is colored to #0B3D91 in
-        # showEvent below so the popup looks like a small
-        # detached Touchless window: blue title bar + navy body.
+        # Match the app's body surface (the dark navy behind the
+        # START/END/SETTINGS row), not the brighter primary blue
+        # (#0B3D91) which is reserved for the title-bar accent. The
+        # OS caption is colored to #0B3D91 in showEvent below so
+        # the popup looks like a small detached Touchless window:
+        # blue title bar + navy body. Read surface from the parent's
+        # config so theme changes propagate here.
+        surface_color = "#0F172A"
+        parent_config = getattr(parent, "config", None)
+        if parent_config is not None:
+            surface_color = str(getattr(parent_config, "surface_color", "") or "#0F172A")
         self.setStyleSheet(
             "QDialog {"
-            "  background: #0F172A;"
+            f"  background: {surface_color};"
             "  color: #E5F6FF;"
             "}"
             "QLabel {"
@@ -4442,7 +4498,10 @@ class TouchlessNotice(QDialog):
         # Text color = #E5F6FF → 0x00FFF6E5.
         DWMWA_CAPTION_COLOR = 35
         DWMWA_TEXT_COLOR = 36
-        caption = ctypes.c_uint32(0x00913D0B)
+        # COLORREF is 0x00BBGGRR for #1F2D6B → R=0x1F, G=0x2D, B=0x6B → 0x006B2D1F.
+        # Matches the in-window title bar (#1F2D6B, deep indigo) so popups
+        # share the same caption colour as the main window's title bar.
+        caption = ctypes.c_uint32(0x006B2D1F)
         text = ctypes.c_uint32(0x00FFF6E5)
         try:
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -4532,16 +4591,42 @@ class TouchlessPrivacyDialog(QDialog):
         # parent until the user answers — fits the semantic ("we
         # need a yes/no before any data leaves").
         self.setWindowModality(Qt.ApplicationModal)
+        # WA_StyledBackground tells Qt to honour the QSS `background-
+        # color` rule below for THIS widget's background paint.
+        # Previously we ALSO set WA_OpaquePaintEvent — that flag
+        # tells Qt "the widget will paint its own background, don't
+        # auto-clear" — which in this dialog ended up showing the
+        # OS default (near-black) instead of the surface colour
+        # because Qt skipped the style-engine fill. Dropping it
+        # lets the QSS background actually paint.
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setSizeGripEnabled(False)
         self.setFixedWidth(460)
         self.setObjectName("privacyDialog")
+        # Match whatever surface color the rest of the app is using
+        # so a theme change in Settings → Colors propagates to this
+        # popup too. Falls back to the default navy if the parent
+        # doesn't expose config (shouldn't happen, but defensive).
+        surface_color = "#0F172A"
+        parent_config = getattr(parent, "config", None)
+        if parent_config is not None:
+            surface_color = str(getattr(parent_config, "surface_color", "") or "#0F172A")
+        # Pin the Window-role palette colour too. With
+        # WA_OpaquePaintEvent dropped Qt does its own background
+        # fill on the first paint pass and uses the palette colour
+        # for that initial fill — without this line the user
+        # briefly saw the system default (typically near-black)
+        # before the QSS engine took over.
+        palette = self.palette()
+        palette.setColor(palette.ColorRole.Window, QColor(surface_color))
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
         self.setStyleSheet(
             "TouchlessPrivacyDialog, QDialog#privacyDialog {"
-            "  background: #0F172A;"
+            f"  background-color: {surface_color};"
             "  color: #E5F6FF;"
             "}"
+            f"QDialog {{ background-color: {surface_color}; }}"
             "QLabel { color: #E5F6FF; background: transparent; }"
             "QPushButton#privacyAllow {"
             # Font family / weight / size are set programmatically
@@ -4551,19 +4636,19 @@ class TouchlessPrivacyDialog(QDialog):
             # if specified, QSS takes priority over setFont() and
             # the AA hints are ignored.
             #
-            # Teal dimmed ~15% from the previous #1DE9B6 / #29f0c1
-            # pair. Brighter teal was visually loud against the
-            # dark dialog body and made the black text feel harsh.
-            # The dimmer shade still reads clearly as the primary
-            # action without screaming.
+            # Accent-green fill with a charcoal label. The grey text
+            # tones down the brightness of pure-green-on-black-text
+            # so the button reads as a primary action without
+            # screaming.
             "  background: #16C9A0;"
-            "  color: #000000;"
+            "  color: #374151;"
             "  border: none;"
             "  border-radius: 8px;"
             "  padding: 8px 22px;"
             "  min-width: 110px;"
             "}"
-            "QPushButton#privacyAllow:hover { background: #1FD3AC; }"
+            "QPushButton#privacyAllow:hover { background: #1FD3AC; color: #2F3640; }"
+            "QPushButton#privacyAllow:pressed { background: #13B58F; color: #2F3640; }"
             "QPushButton#privacyDeny {"
             # Solid colors (not rgba) — the dialog uses
             # WA_OpaquePaintEvent so Qt doesn't auto-clear the
@@ -4608,8 +4693,7 @@ class TouchlessPrivacyDialog(QDialog):
         # That's the user's biggest concern; addressing it first
         # makes the analytics ask easier to evaluate.
         lead = QLabel(
-            "Camera, microphone, and dictation stay on your PC and "
-            "never leave it.\n\n"
+            "Camera, microphone, and hand marks stay on your PC.\n\n"
             "Optionally, share anonymous usage data so I can see what "
             "features get used and where bugs happen. No audio, no "
             "video, no personal info."
@@ -4759,7 +4843,10 @@ class TouchlessPrivacyDialog(QDialog):
                 from ctypes import wintypes
                 hwnd = int(self.winId())
                 if hwnd:
-                    caption = ctypes.c_uint32(0x00913D0B)
+                    # COLORREF is 0x00BBGGRR for #1F2D6B → 0x006B2D1F.
+                    # Matches the in-window title bar so popups share
+                    # the same caption colour as the main window.
+                    caption = ctypes.c_uint32(0x006B2D1F)
                     text = ctypes.c_uint32(0x00FFF6E5)
                     ctypes.windll.dwmapi.DwmSetWindowAttribute(
                         wintypes.HWND(hwnd), ctypes.c_uint32(35),
@@ -5014,6 +5101,20 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(700, 540)
         self.resize(1020, 740)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        # Restore the user's last window geometry if we have one
+        # saved. closeEvent persists this via saveGeometry() ->
+        # base64 ASCII -> config.main_window_geometry_b64. The
+        # restoreGeometry call also restores maximized state, which
+        # users invariably want preserved across launches. Falls
+        # back silently to the resize() default if the blob is
+        # missing or corrupt.
+        try:
+            saved_geom = str(getattr(self.config, "main_window_geometry_b64", "") or "")
+            if saved_geom:
+                from PySide6.QtCore import QByteArray
+                self.restoreGeometry(QByteArray.fromBase64(saved_geom.encode("ascii")))
+        except Exception:
+            pass
         self._build_ui()
         self._install_button_hover_refresh()
         self.apply_theme()
@@ -5682,6 +5783,13 @@ class MainWindow(QMainWindow):
         content_scroll.viewport().setStyleSheet("background: transparent;")
 
         content_scroll.setWidget(self.settings_content_stack)
+        # Cached so the currentChanged handler below can scroll-
+        # reset to the top whenever the user clicks a different
+        # settings page. Without that reset, the new page opens
+        # at whatever vertical offset the previous page was at —
+        # surprising and easy to miss the page header on long
+        # tabs (Camera, Microphone, Save Locations).
+        self._settings_content_scroll = content_scroll
 
         # Walk-through pill + Next button — both are FLOATING overlay
         # children of the settings page. Anchored to the top-right of
@@ -5779,6 +5887,27 @@ class MainWindow(QMainWindow):
         try:
             self.settings_content_stack.currentChanged.connect(
                 lambda _idx: self._position_walkthrough_overlay()
+            )
+        except Exception:
+            pass
+        # When the user navigates to a different settings page,
+        # discard any unsaved changes from the page they're
+        # leaving. Reverts the Save button to its neutral / off
+        # state, and rolls the page's controls back to their
+        # baseline so a returning user sees a clean page (no
+        # ghost edits showing while the Save button is greyed).
+        try:
+            self.settings_content_stack.currentChanged.connect(
+                lambda _idx: self._discard_pending_settings_changes()
+            )
+        except Exception:
+            pass
+        # Scroll-reset on page change. Each settings page should
+        # open at the top, not at whatever vertical offset the
+        # previous page was scrolled to.
+        try:
+            self.settings_content_stack.currentChanged.connect(
+                lambda _idx: self._reset_settings_scroll_to_top()
             )
         except Exception:
             pass
@@ -6288,32 +6417,42 @@ class MainWindow(QMainWindow):
         )
 
     def _settings_panel_button_stylesheet(self) -> str:
-        # Translucent grey + green outline default, blue-fill hover,
-        # accent-tinted pressed/checked. Mirrors the b5 look the user
-        # confirmed in the b5 release screenshots — the whole BUTTON
-        # changes color on hover/press, not just the border. Save
-        # Changes button has its own rules in the global stylesheet
-        # (`#settingsSaveButton[pendingSave="true"]`) that override
-        # to solid primary-blue when there's a pending change.
+        # Translucent grey default with a soft NEUTRAL border (no
+        # green outline at rest). Hover/press/checked bring in the
+        # primary-blue fill and accent border so the affordance is
+        # still obvious when the user moves their mouse over it.
+        # The Save Changes button is identical at rest — when a
+        # pending save is queued, a separate property
+        # (`#settingsSaveButton[pendingSave="true"]`) in the global
+        # QSS overrides to solid primary-blue.
         is_light = self._palette_is_light()
         text_color = str(self.config.text_color)
         accent = str(self.config.accent_color or "#1DE9B6")
-        accent_outline = _with_alpha(QColor(accent), 170).name(QColor.HexArgb)
         accent_outline_strong = _with_alpha(QColor(accent), 230).name(QColor.HexArgb)
         # Visible grey default — same value the global stylesheet
         # uses for the rest of the settings buttons so per-button
         # overrides don't downgrade to nearly-transparent card_bg.
         button_bg = "rgba(0,0,0,0.18)" if is_light else "rgba(255,255,255,0.08)"
+        # Neutral soft border at rest — drops the previous green
+        # outline that made every settings button look like it was
+        # the primary action. Hover swaps to the accent so the
+        # actionability still reads clearly when the user is aiming.
+        neutral_border = "rgba(15,23,42,0.20)" if is_light else "rgba(255,255,255,0.18)"
         hover_bg = _with_alpha(QColor(self.config.primary_color).lighter(118), 170).name(QColor.HexArgb)
         active_bg = _with_alpha(QColor(self.config.primary_color).lighter(122), 205).name(QColor.HexArgb)
         soft_text = "rgba(15,23,42,0.55)" if is_light else "rgba(255,255,255,0.55)"
-        disabled_bg = "rgba(127,127,127,0.10)"
-        disabled_border = "rgba(127,127,127,0.18)"
+        # Disabled = "off". No visible outline at rest, faint
+        # background tint, soft text. With border-color: transparent
+        # the button reads as "this isn't actionable right now"
+        # (Save Changes when nothing is pending) without a faint
+        # ring still drawing the user's attention.
+        disabled_bg = "rgba(127,127,127,0.08)"
+        disabled_border = "transparent"
         return (
             f"QPushButton {{"
             f"  background-color: {button_bg};"
             f"  color: {text_color};"
-            f"  border: 1px solid {accent_outline};"
+            f"  border: 1px solid {neutral_border};"
             f"  border-radius: 14px;"
             f"  padding: 12px 18px;"
             f"  font-weight: 800;"
@@ -6369,10 +6508,15 @@ class MainWindow(QMainWindow):
         # the border color change while the background stayed
         # translucent. The inline sheet bypasses that quirk.
         if pending:
+            button.setEnabled(True)
             button.setStyleSheet(self._settings_save_button_pending_stylesheet())
         else:
-            # Clear the inline sheet so the global QSS rule (neutral
-            # translucent default + blue hover) takes back over.
+            # Nothing to save → DISABLE the button so it reads as
+            # greyed/off (no visible outline, soft text, no hover
+            # effect). User explicitly asked for this: a neutral
+            # off look at rest, lit blue only when there are
+            # unsaved changes.
+            button.setEnabled(False)
             button.setStyleSheet("")
         self._repolish_widget(button)
 
@@ -6896,34 +7040,37 @@ class MainWindow(QMainWindow):
             f"}}"
         )
 
+    def _checkmark_image_path(self) -> str:
+        """Instance method — delegates to the module-level helper.
+        Kept so MainWindow's existing call sites
+        (`self._checkmark_image_path()`) keep working without
+        rewriting them all."""
+        return _checkmark_image_path()
+
     def _general_checkbox_qss(self) -> str:
         """Unified checkbox style used across the whole app.
 
-          - Box is ALWAYS visibly green (accent color) — outline
-            only when unchecked, fully filled when checked.
-          - Checked state shows a white checkmark (inline SVG via
-            data: URI so it scales clean across DPIs and ships
-            embedded with no resource file).
-          - Hover lifts the box slightly so the affordance is
-            obvious without changing the green identity.
+          - Box is a HOLLOW square with a green (accent) outline.
+          - Checked: a white checkmark appears inside; the box
+            stays hollow (transparent fill) so the green outline
+            still defines the shape — clicking adds the check
+            rather than flooding the box with colour.
+          - Hover lifts the border to a brighter green so the
+            affordance is obvious without filling the box.
           - Disabled state desaturates so users can tell the box
             isn't currently interactive.
         """
         text_color = str(self.config.text_color or "#E5F6FF")
         accent = str(self.config.accent_color or "#1DE9B6")
         accent_hover = "#29F0C1"   # +6% lightness from the default accent
-        accent_dim = "rgba(29,233,182,0.18)"  # accent at 18% alpha for hover-unchecked tint
-        # White checkmark — shown only in the :checked state. The
-        # %23 is URL-encoded "#" because data: URIs can't carry a
-        # raw "#".
-        check_svg = (
-            "url(\"data:image/svg+xml;utf8,"
-            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' "
-            "stroke-width='2.6' fill='none' "
-            "stroke-linecap='round' stroke-linejoin='round'/>"
-            "</svg>\")"
-        )
+        accent_dim = "rgba(29,233,182,0.10)"  # subtle hover-only tint, no fill
+        # White checkmark — shown only in the :checked state.
+        # Loaded from a real PNG file generated at runtime under
+        # tempdir; QSS data: URIs (utf8 OR base64) didn't render
+        # reliably on the user's PySide6/Qt build, leaving the
+        # box visually empty when checked.
+        check_path = _checkmark_image_path()
+        check_svg = f'url("{check_path}")' if check_path else "none"
         return (
             f"QCheckBox {{"
             f"  color: {text_color};"
@@ -6943,22 +7090,22 @@ class MainWindow(QMainWindow):
             f"  background-color: {accent_dim};"
             f"}}"
             f"QCheckBox::indicator:checked {{"
-            f"  background-color: {accent};"
+            f"  background-color: transparent;"
             f"  border: 2px solid {accent};"
             f"  image: {check_svg};"
             f"}}"
             f"QCheckBox::indicator:checked:hover {{"
-            f"  background-color: {accent_hover};"
+            f"  background-color: {accent_dim};"
             f"  border: 2px solid {accent_hover};"
             f"  image: {check_svg};"
             f"}}"
             f"QCheckBox::indicator:disabled {{"
             f"  border: 2px solid rgba(127,127,127,0.45);"
-            f"  background-color: rgba(127,127,127,0.12);"
+            f"  background-color: transparent;"
             f"  image: none;"
             f"}}"
             f"QCheckBox::indicator:checked:disabled {{"
-            f"  background-color: rgba(127,127,127,0.40);"
+            f"  background-color: transparent;"
             f"  border: 2px solid rgba(127,127,127,0.45);"
             f"  image: {check_svg};"
             f"}}"
@@ -6980,24 +7127,108 @@ class MainWindow(QMainWindow):
             self._general_pending[key] = new_value
         self._update_general_save_state()
 
+    def _reset_settings_scroll_to_top(self) -> None:
+        """Scroll the settings outer content area back to the top.
+        Wired to settings_content_stack.currentChanged so every
+        navigation lands at row 0 instead of inheriting the
+        previous page's scroll position.
+
+        Some panels (Camera, Microphone) have their own internal
+        scroll areas — those each manage their own offsets and
+        aren't affected by this reset, which is exactly the
+        desired behaviour."""
+        scroll = getattr(self, "_settings_content_scroll", None)
+        if scroll is None:
+            return
+        try:
+            bar = scroll.verticalScrollBar()
+            if bar is not None:
+                bar.setValue(0)
+            hbar = scroll.horizontalScrollBar()
+            if hbar is not None:
+                hbar.setValue(0)
+        except Exception:
+            pass
+
+    def _discard_pending_settings_changes(self) -> None:
+        """Called on settings-page navigation. Drops any unsaved
+        edits the user made on the page they're leaving and
+        re-syncs the visible controls to their baseline so the
+        Save button returns to its neutral / off state.
+
+        Wraps each panel's reset in its own try/except so a panel
+        that hasn't been built yet (or doesn't track pending state)
+        doesn't break navigation.
+        """
+        # General panel — most common pending-state owner.
+        try:
+            general_pending = getattr(self, "_general_pending", None)
+            if general_pending:
+                baseline = getattr(self, "_general_baseline", {}) or {}
+                controls = getattr(self, "_general_controls", {}) or {}
+                # Roll the visible widgets back to baseline. We
+                # block signals so the rollback doesn't re-fire
+                # `_on_general_control_changed` and re-add the keys
+                # to _general_pending — we want a clean reset.
+                for key, value in baseline.items():
+                    widget = controls.get(key)
+                    if widget is None:
+                        continue
+                    try:
+                        was_blocked = widget.blockSignals(True)
+                        if hasattr(widget, "setChecked"):
+                            widget.setChecked(bool(value))
+                        elif hasattr(widget, "setCurrentIndex"):
+                            try:
+                                widget.setCurrentIndex(int(value))
+                            except (TypeError, ValueError):
+                                pass
+                        elif hasattr(widget, "setValue"):
+                            widget.setValue(value)
+                        elif hasattr(widget, "setText"):
+                            widget.setText(str(value))
+                        widget.blockSignals(was_blocked)
+                    except Exception:
+                        pass
+                self._general_pending.clear()
+                self._update_general_save_state()
+        except Exception:
+            pass
+        # Other panels each have their own pending state but they
+        # all funnel save-button visuals through
+        # _set_settings_save_button_pending. Force any of those
+        # buttons back to "not pending" — the helper now also
+        # disables them, which is the visible "neutral / off" the
+        # user asked for. Resetting their underlying control state
+        # back to baseline is a heavier change we can iterate on
+        # if real users ask for it; this at minimum makes the
+        # Save button reflect the correct state on re-entry.
+        for attr in (
+            "save_camera_button",
+            "save_microphone_button",
+            "save_locations_button",
+        ):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    self._set_settings_save_button_pending(btn, False)
+                except Exception:
+                    pass
+
     def _update_general_save_state(self) -> None:
         dirty = bool(self._general_pending)
         for attr in ("_general_save_button", "_general_save_button_top"):
             button = getattr(self, attr, None)
             if button is None:
                 continue
-            # Stay clickable but no-op when nothing is pending --
-            # _save_general_changes already short-circuits on
-            # empty _general_pending. Keeps the button in its
-            # muted "nothing to do" neutral state rather than
-            # going to the grayed-out :disabled style; matches
-            # the user's reference screenshot exactly.
-            button.setEnabled(True)
-            # Route through the shared helper so General's save
-            # buttons get the same inline-stylesheet workaround
-            # other panels use -- avoids the Qt repaint quirk
-            # where the property selector alone doesn't reliably
-            # repaint on some Windows builds.
+            # Save button is DISABLED when nothing is pending — it
+            # reads as greyed/off, doesn't respond to hover, and
+            # makes it obvious there's nothing to save. Becomes
+            # ENABLED + lit (primary blue) the moment any control
+            # changes from baseline. The shared helper applies the
+            # pending stylesheet (or clears it) so the visual lit/
+            # neutral state is in sync with the enabled flag.
+            button.setEnabled(dirty)
             self._set_settings_save_button_pending(button, dirty)
 
     def _save_general_changes(self) -> None:
@@ -7637,15 +7868,16 @@ class MainWindow(QMainWindow):
         header_row.addStretch(1)
         save_btn = QPushButton("Save Changes")
         save_btn.setObjectName("settingsSaveButton")
-        # Start neutral — the button only becomes primary blue once
-        # the user actually has a pending rebind queued. Mirrors the
-        # camera/microphone Save Changes flow.
         save_btn.setProperty("pendingSave", False)
         save_btn.setCursor(Qt.PointingHandCursor)
         save_btn.clicked.connect(self._save_gesture_bindings)
         header_row.addWidget(save_btn, 0, Qt.AlignTop)
         layout.insertLayout(0, header_row)
         self._gesture_binds_save_button = save_btn
+        # Match the General page's Save Changes default: disabled +
+        # muted grey at rest, becomes the bright primary-blue
+        # "pending" look only when there's actually something to save.
+        self._set_settings_save_button_pending(save_btn, False)
 
         # Rebind state — pending changes are held in _pending_changes until
         # the user clicks Save. _pending_action is the action being rebound
@@ -9003,6 +9235,8 @@ class MainWindow(QMainWindow):
         apply_button.setProperty("pendingSave", False)
         apply_button.clicked.connect(self.apply_current_settings)
         self._colors_apply_button = apply_button
+        # Match the General page's Save Changes default state.
+        self._set_settings_save_button_pending(apply_button, False)
         button_row.addWidget(revert_button)
         button_row.addWidget(apply_button)
         colors_layout.addLayout(button_row)
@@ -9173,6 +9407,8 @@ class MainWindow(QMainWindow):
         self.save_camera_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         header_row.addWidget(self.save_camera_button, 0, Qt.AlignTop)
         layout.insertLayout(0, header_row)
+        # Match the General page's Save Changes default state.
+        self._set_settings_save_button_pending(self.save_camera_button, False)
         self.clear_camera_button = None
 
         # The camera section has outgrown a single viewport. Wrap it in a
@@ -9254,14 +9490,14 @@ class MainWindow(QMainWindow):
             "  background-color: rgba(29,233,182,0.18);"
             "}}"
             "QCheckBox#{name}::indicator:checked {{"
-            "  background-color: {accent};"
+            "  background-color: transparent;"
             "  border: 2px solid {accent};"
-            "  image: url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>\");"
+            "  image: url(\"{check_path}\");"
             "}}"
             "QCheckBox#{name}::indicator:checked:hover {{"
-            "  background-color: #29F0C1;"
+            "  background-color: rgba(29,233,182,0.10);"
             "  border: 2px solid #29F0C1;"
-            "  image: url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>\");"
+            "  image: url(\"{check_path}\");"
             "}}"
             "QCheckBox#{name}::indicator:disabled {{"
             "  border: 2px solid rgba(127,127,127,0.45);"
@@ -9287,6 +9523,61 @@ class MainWindow(QMainWindow):
             return lbl
 
         # ============================================================
+        # 0. LIVE STATUS (tracking quality + FPS, engine-driven)
+        # ============================================================
+        box_layout.addWidget(_section_header("Live Status"))
+
+        status_hint = QLabel(
+            "Real-time signals from the gesture engine. Visible while the engine is running."
+        )
+        status_hint.setObjectName("cameraNote")
+        status_hint.setWordWrap(True)
+        box_layout.addWidget(status_hint)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        status_row.setContentsMargins(0, 4, 0, 0)
+
+        # Tracking-quality pill. Drives off (found, confidence) from
+        # the worker payload — green = clean detection, amber =
+        # marginal, red = no hand / very low confidence, idle =
+        # engine not running.
+        self.camera_health_quality_pill = QLabel("Engine not running")
+        self.camera_health_quality_pill.setObjectName("cameraHealthPill")
+        self.camera_health_quality_pill.setAlignment(Qt.AlignCenter)
+        self.camera_health_quality_pill.setFixedHeight(30)
+        self.camera_health_quality_pill.setMinimumWidth(170)
+        self._set_camera_health_pill_state("idle")
+        status_row.addWidget(self.camera_health_quality_pill)
+
+        # Live FPS readout. Pulled straight from the worker's
+        # per-frame measurement, so it reflects what the engine is
+        # actually achieving (not the camera's advertised rate).
+        self.camera_health_fps_label = QLabel("FPS: —")
+        self.camera_health_fps_label.setObjectName("cameraHealthFps")
+        self.camera_health_fps_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.camera_health_fps_label.setStyleSheet(
+            f"QLabel#cameraHealthFps {{"
+            f"  color: {self.config.text_color};"
+            f"  font-size: 14px;"
+            f"  font-weight: 700;"
+            f"  background: transparent;"
+            f"  padding: 0 4px;"
+            f"}}"
+        )
+        status_row.addWidget(self.camera_health_fps_label)
+        status_row.addStretch(1)
+        box_layout.addLayout(status_row)
+        # Throttle handle — debug_frame_ready fires at camera FPS
+        # (~30 Hz). Updating these widgets every frame is wasteful;
+        # 4 Hz reads as smooth without burning CPU on label sets.
+        self._camera_health_last_update_ts = 0.0
+        # Track when we last saw a hand so the pill goes red once
+        # the hand has been out of frame for >1.5 s.
+        self._camera_health_last_hand_ts = 0.0
+        box_layout.addSpacing(16)
+
+        # ============================================================
         # 1. CONNECTED DEVICES (local camera selection)
         # ============================================================
         box_layout.addWidget(_section_header("Connected Devices"))
@@ -9296,7 +9587,7 @@ class MainWindow(QMainWindow):
         self.camera_page_status.hide()
 
         note = QLabel(
-            "Choose from the list of cameras connected to your device. Preview shows the selected camera."
+            "Choose from the list of cameras connected to your device. Test Camera opens a quick live preview of the selected camera."
         )
         note.setObjectName("cameraNote")
         note.setWordWrap(True)
@@ -9318,12 +9609,15 @@ class MainWindow(QMainWindow):
         self.camera_combo.currentIndexChanged.connect(self._on_camera_settings_selection_changed)
         box_layout.addWidget(self.camera_combo)
 
-        # Preview button row — opens a Touchless-themed live preview of
-        # whichever camera is currently selected in the dropdown above.
+        # "Test Camera" button row — opens a Touchless-themed live
+        # preview of whichever camera is currently selected in the
+        # dropdown above. Renamed from "Preview" so the affordance is
+        # obvious for first-time users diagnosing "is the camera
+        # working" before they start the engine.
         preview_row = QHBoxLayout()
         preview_row.setContentsMargins(0, 0, 0, 0)
         preview_row.setSpacing(10)
-        self.camera_preview_button = QPushButton("Preview")
+        self.camera_preview_button = QPushButton("Test Camera")
         self.camera_preview_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.camera_preview_button.clicked.connect(self._open_camera_preview)
         self.camera_preview_button.setStyleSheet(camera_button_style)
@@ -9331,7 +9625,12 @@ class MainWindow(QMainWindow):
         self.camera_already_mirrored_checkbox = QCheckBox("Check this box to flip the camera view, if not mirroring")
         self.camera_already_mirrored_checkbox.setObjectName("cameraMirroredCheckbox")
         self.camera_already_mirrored_checkbox.setStyleSheet(
-            checkbox_style_tpl.format(name="cameraMirroredCheckbox", text=self.config.text_color, accent=self.config.accent_color)
+            checkbox_style_tpl.format(
+                name="cameraMirroredCheckbox",
+                text=self.config.text_color,
+                accent=self.config.accent_color,
+                check_path=_checkmark_image_path(),
+            )
         )
         self.camera_already_mirrored_checkbox.setChecked(
             not bool(getattr(self.config, "camera_source_is_mirrored", False))
@@ -9384,7 +9683,12 @@ class MainWindow(QMainWindow):
         self.use_phone_camera_qr_checkbox = QCheckBox("Use phone camera (QR) as source")
         self.use_phone_camera_qr_checkbox.setObjectName("usePhoneQrCheckbox")
         self.use_phone_camera_qr_checkbox.setStyleSheet(
-            checkbox_style_tpl.format(name="usePhoneQrCheckbox", text=self.config.text_color, accent=self.config.accent_color)
+            checkbox_style_tpl.format(
+                name="usePhoneQrCheckbox",
+                text=self.config.text_color,
+                accent=self.config.accent_color,
+                check_path=_checkmark_image_path(),
+            )
         )
         self.use_phone_camera_qr_checkbox.setChecked(bool(getattr(self.config, "phone_camera_qr_active", False)))
         self.use_phone_camera_qr_checkbox.setEnabled(already_paired)
@@ -9413,86 +9717,13 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(self.phone_camera_qr_status_label)
         box_layout.addSpacing(16)
 
-        # ============================================================
-        # 4. LOW FPS MODE
-        # ============================================================
-        box_layout.addWidget(_section_header("Low FPS Mode"))
-
-        low_fps_note = self._build_expandable_note(
-            "Keeps gestures registering when your camera frame rate drops.",
-            "Low FPS Mode loosens tracking thresholds so gestures still register when the camera runs slow (around 10-17 FPS). Touchless can also offer to turn this on automatically if your measured FPS stays low for too long.",
-        )
-        box_layout.addWidget(low_fps_note)
-
-        low_fps_row = QHBoxLayout()
-        self.low_fps_button = QPushButton()
-        self.low_fps_button.setCheckable(True)
-        self.low_fps_button.setChecked(bool(self.config.low_fps_mode))
-        self.low_fps_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.low_fps_button.clicked.connect(self._on_low_fps_button_toggled)
-        self.low_fps_button.setStyleSheet(camera_button_style)
-        low_fps_row.addWidget(self.low_fps_button)
-        low_fps_row.addStretch(1)
-        box_layout.addLayout(low_fps_row)
-        self._refresh_low_fps_button_label()
-        box_layout.addSpacing(16)
-
-        # ============================================================
-        # 5. LITE MODE
-        # ============================================================
-        box_layout.addWidget(_section_header("Lite Mode"))
-
-        lite_mode_note = self._build_expandable_note(
-            "Speeds up processing for simpler tracking on lighter hardware.",
-            "Lite Mode improves processing by about 2.5x for simple gestures and commands. For very extreme angles or heavy occlusion it may be slightly less stable. A \"Lite\" badge appears in live viewers when activated.",
-        )
-        box_layout.addWidget(lite_mode_note)
-
-        lite_mode_row = QHBoxLayout()
-        self.lite_mode_button = QPushButton()
-        self.lite_mode_button.setCheckable(True)
-        self.lite_mode_button.setChecked(bool(getattr(self.config, "lite_mode", False)))
-        self.lite_mode_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.lite_mode_button.clicked.connect(self._on_lite_mode_button_toggled)
-        self.lite_mode_button.setStyleSheet(camera_button_style)
-        lite_mode_row.addWidget(self.lite_mode_button)
-        lite_mode_row.addStretch(1)
-        box_layout.addLayout(lite_mode_row)
-        self._refresh_lite_mode_button_label()
-        box_layout.addSpacing(16)
-
-        # ============================================================
-        # 6. GPU MODE
-        # ============================================================
-        box_layout.addWidget(_section_header("GPU Mode"))
-
-        gpu_mode_note = self._build_expandable_note(
-            "Uses your graphics card for faster hand tracking when available.",
-            "If your machine can run GPU Mode, Touchless uses the graphics card to speed up hand tracking. If not, Touchless quietly falls back to the regular path so gestures keep working.",
-        )
-        box_layout.addWidget(gpu_mode_note)
-
-        gpu_mode_row = QHBoxLayout()
-        self.gpu_mode_button = QPushButton()
-        self.gpu_mode_button.setCheckable(True)
-        self.gpu_mode_button.setChecked(bool(getattr(self.config, "gpu_mode", False)))
-        self.gpu_mode_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.gpu_mode_button.clicked.connect(self._on_gpu_mode_button_toggled)
-        self.gpu_mode_button.setStyleSheet(camera_button_style)
-        gpu_mode_row.addWidget(self.gpu_mode_button)
-        gpu_mode_row.addStretch(1)
-        box_layout.addLayout(gpu_mode_row)
-        # Hover tooltip removed: the multi-line probe.path_summary()
-        # rendered as a large dark rectangle over the button, which
-        # read as a UI bug. The toggle still works the same way --
-        # the runtime loader falls back to CPU MediaPipe
-        # transparently if no GPU path is reachable, so toggling on
-        # with no GPU is at worst a no-op. The button stays
-        # enabled regardless of probe state (earlier versions
-        # disabled it on probe miss; that made GPU Mode appear
-        # permanently unavailable on some machines where the
-        # probe false-negatived).
-        self._refresh_gpu_mode_button_label()
+        # Lite Mode / Low FPS Mode / GPU Mode were removed from the
+        # Camera panel — they duplicated the toggles in
+        # Settings → General → System Modes (the source of truth).
+        # Other code paths still read self.low_fps_button /
+        # .lite_mode_button / .gpu_mode_button via getattr(..., None),
+        # so leaving these attributes unset is safe: those paths
+        # short-circuit on the None default.
 
         self._refresh_phone_camera_controls()
         self._refresh_camera_settings_save_state()
@@ -9547,6 +9778,140 @@ class MainWindow(QMainWindow):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not enabled)
+
+    def _set_camera_health_pill_state(self, state: str, *, custom_text: str | None = None) -> None:
+        """Apply one of four visual states to the Camera Settings
+        tracking-quality pill: 'good' (green), 'fair' (amber),
+        'poor' (red), 'idle' (muted). Caller can pass `custom_text`
+        to override the default label for that state."""
+        pill = getattr(self, "camera_health_quality_pill", None)
+        if pill is None:
+            return
+        states = {
+            "good": {
+                "text": "Tracking: Good",
+                "bg":   "rgba(29,233,182,0.18)",
+                "fg":   "#1DE9B6",
+                "border": "rgba(29,233,182,0.55)",
+            },
+            "fair": {
+                "text": "Tracking: Marginal",
+                "bg":   "rgba(245,180,80,0.18)",
+                "fg":   "#F5B450",
+                "border": "rgba(245,180,80,0.55)",
+            },
+            "poor": {
+                "text": "Tracking: No hand seen",
+                "bg":   "rgba(255,107,107,0.18)",
+                "fg":   "#FF8A8A",
+                "border": "rgba(255,107,107,0.55)",
+            },
+            "idle": {
+                "text": "Engine not running",
+                "bg":   "rgba(255,255,255,0.05)",
+                "fg":   "rgba(229,246,255,0.55)",
+                "border": "rgba(127,127,127,0.30)",
+            },
+        }
+        cfg = states.get(state, states["idle"])
+        pill.setText(custom_text if custom_text is not None else cfg["text"])
+        pill.setStyleSheet(
+            f"QLabel#cameraHealthPill {{"
+            f"  background: {cfg['bg']};"
+            f"  color: {cfg['fg']};"
+            f"  border: 1px solid {cfg['border']};"
+            f"  border-radius: 15px;"
+            f"  padding: 4px 14px;"
+            f"  font-size: 13px;"
+            f"  font-weight: 700;"
+            f"  letter-spacing: 0.3px;"
+            f"}}"
+        )
+
+    def _update_camera_health_widgets(self, info: dict) -> None:
+        """Throttled (~4 Hz) update of the Camera Settings Live Status
+        widgets. Reads `found`, `confidence`, and `fps` from the
+        per-frame worker payload. Safe to call on every debug frame —
+        the timestamp check short-circuits most calls."""
+        pill = getattr(self, "camera_health_quality_pill", None)
+        fps_label = getattr(self, "camera_health_fps_label", None)
+        if pill is None or fps_label is None:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_camera_health_last_update_ts", 0.0)
+        if (now - last) < 0.25:
+            # Still record the most recent "hand seen" timestamp so
+            # the next throttled update has fresh data.
+            if bool(info.get("found", False)):
+                self._camera_health_last_hand_ts = now
+            return
+        self._camera_health_last_update_ts = now
+        found = bool(info.get("found", False))
+        if found:
+            self._camera_health_last_hand_ts = now
+        try:
+            confidence = float(info.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        try:
+            fps_value = float(info.get("fps", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            fps_value = 0.0
+        # Tracking quality logic:
+        #   - good  : hand found AND confidence ≥ 0.65
+        #   - fair  : hand found AND confidence ≥ 0.45  (some flicker)
+        #   - poor  : hand not seen for ≥ 1.5 s
+        # Between "found=False" and 1.5 s timeout we keep showing
+        # the previous state so a single dropped frame doesn't
+        # flash the pill red.
+        time_since_hand = now - float(getattr(self, "_camera_health_last_hand_ts", 0.0))
+        if found and confidence >= 0.65:
+            self._set_camera_health_pill_state("good")
+        elif found and confidence >= 0.45:
+            self._set_camera_health_pill_state("fair")
+        elif time_since_hand >= 1.5:
+            self._set_camera_health_pill_state("poor")
+        # FPS readout — show one decimal, with colour hint when
+        # we drop below 15 (the threshold where Low FPS Mode helps).
+        if fps_value <= 0.0:
+            fps_label.setText("FPS: —")
+            return
+        if fps_value >= 22.0:
+            color = self.config.text_color or "#E5F6FF"
+        elif fps_value >= 15.0:
+            color = "#F5B450"
+        else:
+            color = "#FF8A8A"
+        fps_label.setStyleSheet(
+            f"QLabel#cameraHealthFps {{"
+            f"  color: {color};"
+            f"  font-size: 14px;"
+            f"  font-weight: 700;"
+            f"  background: transparent;"
+            f"  padding: 0 4px;"
+            f"}}"
+        )
+        fps_label.setText(f"FPS: {fps_value:.1f}")
+
+    def _reset_camera_health_widgets(self) -> None:
+        """Revert the Live Status widgets to their idle state. Called
+        from stop_engine() so the user doesn't see stale FPS / pill
+        values after they end a session."""
+        self._set_camera_health_pill_state("idle")
+        fps_label = getattr(self, "camera_health_fps_label", None)
+        if fps_label is not None:
+            fps_label.setStyleSheet(
+                f"QLabel#cameraHealthFps {{"
+                f"  color: {self.config.text_color};"
+                f"  font-size: 14px;"
+                f"  font-weight: 700;"
+                f"  background: transparent;"
+                f"  padding: 0 4px;"
+                f"}}"
+            )
+            fps_label.setText("FPS: —")
+        self._camera_health_last_hand_ts = 0.0
+        self._camera_health_last_update_ts = 0.0
 
     def _open_camera_preview(self) -> None:
         """Show a live preview of the camera currently selected in the
@@ -10144,6 +10509,8 @@ class MainWindow(QMainWindow):
         self.save_microphone_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         header_row.addWidget(self.save_microphone_button, 0, Qt.AlignTop)
         layout.insertLayout(0, header_row)
+        # Match the General page's Save Changes default state.
+        self._set_settings_save_button_pending(self.save_microphone_button, False)
         self.clear_microphone_button = None
 
         # Wrap the panel body in a scroll area so the mic selector +
@@ -10293,14 +10660,14 @@ class MainWindow(QMainWindow):
                 background-color: rgba(29,233,182,0.18);
             }}
             QCheckBox#usePhoneMicCheckbox::indicator:checked {{
-                background-color: {self.config.accent_color};
+                background-color: transparent;
                 border: 2px solid {self.config.accent_color};
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             QCheckBox#usePhoneMicCheckbox::indicator:checked:hover {{
-                background-color: #29F0C1;
+                background-color: rgba(29,233,182,0.10);
                 border: 2px solid #29F0C1;
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5 l3 3 l6-7' stroke='%23FFFFFF' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+                image: url("{_checkmark_image_path()}");
             }}
             """
         )
@@ -10650,13 +11017,12 @@ class MainWindow(QMainWindow):
         save_locations_button_style = self._settings_panel_button_stylesheet()
         self.save_locations_button = QPushButton("Save Changes")
         self.save_locations_button.setObjectName("settingsSaveButton")
-        # Start neutral — only flip to primary blue once the user
-        # actually edits a path or name. Mirrors the camera /
-        # microphone / gesture-binds Save flows.
         self.save_locations_button.setProperty("pendingSave", False)
         self.save_locations_button.clicked.connect(self._save_all_save_location_settings)
         self.save_locations_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         header_row.addWidget(self.save_locations_button, 0, Qt.AlignTop)
+        # Match the General page's Save Changes default state.
+        self._set_settings_save_button_pending(self.save_locations_button, False)
         layout.insertLayout(0, header_row)
 
         scroll = QScrollArea()
@@ -13956,11 +14322,6 @@ Admin elevation
                 self.stop_engine()
         except Exception:
             pass
-        if self.debugger_window is None:
-            self.debugger_window = StandaloneDebugWindow(self.config)
-            self.debugger_window.destroyed.connect(self._clear_debugger_reference)
-        else:
-            self.debugger_window.apply_theme(self.config)
 
     def _show_mini_debugger_for_running_engine(self) -> None:
         self._show_mini_live_viewer()
@@ -14866,11 +15227,28 @@ Admin elevation
         threading.Thread(target=_run_auth, name="spotify-authorize", daemon=True).start()
 
     def _on_spotify_auth_done(self, ok: bool, message: str) -> None:
+        if ok:
+            short = "Spotify connected"
+            label = "spotify_connect_ok"
+        else:
+            detail = message or "see browser"
+            short = f"Spotify connect failed — {detail}"
+            label = "spotify_connect_failed"
         if hasattr(self, "last_action_label"):
-            if ok:
-                self.last_action_label.setText("Last action: Spotify connected")
-            else:
-                self.last_action_label.setText(f"Last action: Spotify connect failed — {message or 'see browser'}")
+            self.last_action_label.setText(f"Last action: {short}")
+        # Append to the detailed Recent Actions log so the user can
+        # see what happened even if the last_action_label has
+        # already been overwritten by a subsequent action. Goes
+        # through the worker's _record_action so it shares the
+        # same throttling / history-emit machinery as engine-side
+        # actions. Falls back silently if no worker is up yet (the
+        # Connect button is reachable from a cold launch).
+        worker = getattr(self, "_worker", None)
+        if worker is not None:
+            try:
+                worker._record_action(label, short)
+            except Exception:
+                pass
 
     def _maybe_show_privacy_prompt(self) -> None:
         """First-run privacy & analytics opt-in dialog.
@@ -14992,6 +15370,143 @@ Admin elevation
             self._show_spotify_decline_pill()
 
     # ----- Spotify decline pill (bottom-center, auto-fade) ----------------
+
+    # ----- Auto-update success toast (4.1.4) -----------------------------
+
+    def _maybe_show_update_success_toast(self) -> None:
+        """Fire a one-time toast after an auto-update completes.
+
+        Compares the running app's `__version__` to the
+        `last_launched_version` saved in config. If they differ,
+        shows a bottom-right pill ("Updated to vX.Y.Z") that
+        fades after a few seconds, then writes the current
+        version back to config so the toast doesn't fire again
+        until the next update.
+
+        Empty stored value (the very first launch after this
+        tracking field was added) latches silently — we don't
+        pretend the user just updated when they didn't."""
+        try:
+            from ... import __version__ as APP_VERSION
+        except Exception:
+            return
+        running = str(APP_VERSION or "").strip()
+        if not running:
+            return
+        previous = str(getattr(self.config, "last_launched_version", "") or "").strip()
+        if previous and previous != running:
+            try:
+                self._show_update_success_toast(running)
+            except Exception:
+                pass
+        # Always update the stored value so future launches compare
+        # against the current version. Only writes if changed.
+        if previous != running:
+            try:
+                self.config.last_launched_version = running
+                save_config(self.config)
+            except Exception:
+                pass
+
+    def _show_update_success_toast(self, version: str) -> None:
+        """Build (lazily) and show the update-success pill at
+        bottom-right. Auto-fades after ~5 s."""
+        pill = getattr(self, "_update_toast_pill", None)
+        if pill is None:
+            pill = QFrame(self)
+            pill.setObjectName("updateToastPill")
+            pill.setAttribute(Qt.WA_StyledBackground, True)
+            accent = self.config.accent_color or "#1DE9B6"
+            surface = self.config.surface_color or "#0F172A"
+            pill.setStyleSheet(
+                "QFrame#updateToastPill {"
+                f"  background: {surface};"
+                f"  border: 1.5px solid {accent};"
+                "  border-radius: 14px;"
+                "}"
+                "QLabel { color: #E5F6FF; font-size: 13px; background: transparent; }"
+                "QLabel#updateToastIcon {"
+                f"  color: {accent};"
+                "  font-size: 16px;"
+                "  font-weight: 800;"
+                "}"
+            )
+            row = QHBoxLayout(pill)
+            row.setContentsMargins(16, 10, 18, 10)
+            row.setSpacing(10)
+            icon = QLabel("✓")
+            icon.setObjectName("updateToastIcon")
+            row.addWidget(icon, 0, Qt.AlignVCenter)
+            self._update_toast_label = QLabel("")
+            self._update_toast_label.setWordWrap(False)
+            row.addWidget(self._update_toast_label, 0, Qt.AlignVCenter)
+            pill.setVisible(False)
+            self._update_toast_pill = pill
+        # Set the text fresh each call so a future call with a
+        # different version updates the label without rebuilding.
+        try:
+            self._update_toast_label.setText(f"Updated to v{version}")
+        except Exception:
+            pass
+        pill.adjustSize()
+        self._position_update_toast()
+        pill.setVisible(True)
+        pill.raise_()
+        # Lazy fade infrastructure mirrors the Spotify decline
+        # pill — opacity effect + property animation.
+        effect = getattr(self, "_update_toast_fade_effect", None)
+        anim = getattr(self, "_update_toast_fade_anim", None)
+        if effect is None:
+            effect = QGraphicsOpacityEffect(pill)
+            effect.setOpacity(1.0)
+            pill.setGraphicsEffect(effect)
+            self._update_toast_fade_effect = effect
+        if anim is None:
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(900)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(QEasingCurve.InOutQuad)
+            anim.finished.connect(self._on_update_toast_fade_done)
+            self._update_toast_fade_anim = anim
+        if anim.state() == QPropertyAnimation.Running:
+            anim.stop()
+        effect.setOpacity(1.0)
+        timer = getattr(self, "_update_toast_hide_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._fade_update_toast)
+            self._update_toast_hide_timer = timer
+        # Visible 5 s then 0.9 s fade.
+        timer.start(5000)
+
+    def _position_update_toast(self) -> None:
+        pill = getattr(self, "_update_toast_pill", None)
+        if pill is None:
+            return
+        pill.adjustSize()
+        margin_right = 24
+        margin_bottom = 32
+        x = max(8, self.width() - pill.width() - margin_right)
+        y = max(8, self.height() - pill.height() - margin_bottom)
+        pill.move(x, y)
+
+    def _fade_update_toast(self) -> None:
+        anim = getattr(self, "_update_toast_fade_anim", None)
+        if anim is None:
+            return
+        if anim.state() == QPropertyAnimation.Running:
+            return
+        anim.start()
+
+    def _on_update_toast_fade_done(self) -> None:
+        pill = getattr(self, "_update_toast_pill", None)
+        if pill is not None:
+            pill.setVisible(False)
+        effect = getattr(self, "_update_toast_fade_effect", None)
+        if effect is not None:
+            effect.setOpacity(1.0)
 
     def _ensure_spotify_decline_pill(self) -> "QFrame":
         """Lazy-create the pill widget that surfaces after the user
@@ -15298,6 +15813,28 @@ Admin elevation
             self.last_action_label.setText("Last action: starting gesture and voice control")
             self.start_button.setEnabled(False)
             self.end_button.setEnabled(True)
+            # Visual "starting" pill at bottom-center of the monitor
+            # with animated loading dots. Reuses the existing
+            # ProcessingOverlay (same widget the clip-export flow
+            # uses) so the visual idiom is consistent. Hidden by
+            # _on_running_state_changed(True) once the engine is
+            # actually up; falls back to a 6 s timeout in case the
+            # running_state signal never fires (e.g., engine crash
+            # mid-init).
+            try:
+                self.processing_overlay.show_processing("Starting Touchless")
+                fallback_timer = getattr(self, "_starting_splash_fallback_timer", None)
+                if fallback_timer is None:
+                    fallback_timer = QTimer(self)
+                    fallback_timer.setSingleShot(True)
+                    fallback_timer.timeout.connect(
+                        lambda: self.processing_overlay.hide_processing()
+                    )
+                    self._starting_splash_fallback_timer = fallback_timer
+                fallback_timer.stop()
+                fallback_timer.start(6000)
+            except Exception:
+                pass
             self._worker.start()
             self._start_clip_cache()
             if (
@@ -15312,6 +15849,7 @@ Admin elevation
                 _telemetry.track("engine_stopped")
             except Exception:
                 pass
+            self._reset_camera_health_widgets()
             self._hide_mini_live_viewer()
             if self.live_view_window is not None:
                 self.live_view_window.detach_from_worker()
@@ -15341,29 +15879,27 @@ Admin elevation
 
     def open_debugger(self) -> None:
             self._hide_mini_live_viewer()
-            # Prefer the LiveViewWindow whenever a worker exists at all.
-            # Previously this required `worker.is_running` to be True,
-            # but during a hot-swap there's a 1-3s window after start()
-            # while the camera opens where the flag is still False —
-            # clicking enlarge in that gap fell into the standalone-
-            # debugger fallback (which has its own camera + Restart
-            # Camera button), surprising users who'd just saved a
-            # camera change and expected the normal live view.
-            if self._worker is not None:
-                self._ensure_live_view_window()
-                if self.live_view_window is None:
-                    return
+            # Always open the LiveViewWindow — whether or not the
+            # engine is running. When the worker is None or stopped,
+            # the live view shows an engine-required prompt instead
+            # of dead camera feed; previously this path tried to fall
+            # back to a standalone debugger that no longer exists.
+            self._ensure_live_view_window()
+            if self.live_view_window is None:
+                return
+            worker_active = self._worker is not None and bool(getattr(self._worker, "is_running", False))
+            if worker_active:
                 self.live_view_window.attach_to_worker(self._worker)
                 self.live_view_window.set_gestures_enabled(bool(getattr(self._worker, "gestures_enabled", True)))
-                self.live_view_window.show_window()
             else:
-                self._ensure_mini_debugger()
-                if self.debugger_window is None:
-                    return
-                self.debugger_window.restart_session()
-                self.debugger_window.show()
-                self.debugger_window.raise_()
-                self.debugger_window.activateWindow()
+                self.live_view_window.detach_from_worker()
+            # Show / hide the "start the engine" pill depending on
+            # whether gesture detection is actually live.
+            try:
+                self.live_view_window.set_engine_required_pill_visible(not worker_active)
+            except Exception:
+                pass
+            self.live_view_window.show_window()
             self.last_action_label.setText("Last action: opened live view")
 
     def _clear_debugger_reference(self, *args) -> None:
@@ -15624,6 +16160,19 @@ Admin elevation
             self.start_button.setEnabled(not is_running)
             self.end_button.setEnabled(is_running)
             self.debugger_button.setEnabled(True)
+            # Engine is up — kill the "Starting Touchless" splash
+            # pill. Cancels the 6 s safety-net fallback timer too.
+            if is_running:
+                try:
+                    self.processing_overlay.hide_processing()
+                except Exception:
+                    pass
+                timer = getattr(self, "_starting_splash_fallback_timer", None)
+                if timer is not None:
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
 
     def _on_command_detected(self, command: str) -> None:
         action_text = str(command or "").strip() or "none"
@@ -16275,17 +16824,21 @@ Admin elevation
         cancel = QPushButton("Cancel"); cancel.clicked.connect(dialog.reject)
         apply_btn = QPushButton("Apply"); apply_btn.clicked.connect(dialog.accept)
         buttons.addWidget(cancel); buttons.addWidget(apply_btn); root.addLayout(buttons)
+        # Pull surface from the live config so a theme change in
+        # Settings → Colors propagates to this dialog too. Matches
+        # the rest of the app's popups.
+        surface_color = str(getattr(self.config, "surface_color", "") or "#0F172A")
         dialog.setStyleSheet(
-            """
-            QDialog { background: #0F172A; color: #E5F6FF; border: 1px solid rgba(29,233,182,0.35); }
-            QLabel { color: #E5F6FF; }
-            QPushButton {
+            f"""
+            QDialog {{ background: {surface_color}; color: #E5F6FF; border: 1px solid rgba(29,233,182,0.35); }}
+            QLabel {{ color: #E5F6FF; }}
+            QPushButton {{
                 background-color: #0B3D91; color: #E5F6FF; border: 1px solid rgba(29,233,182,0.35);
                 border-radius: 12px; padding: 9px 14px; font-weight: 700;
-            }
-            QPushButton:hover { border: 1px solid #1DE9B6; }
-            QSlider::groove:horizontal { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.14); }
-            QSlider::handle:horizontal { width: 16px; margin: -5px 0; border-radius: 8px; background: #1DE9B6; }
+            }}
+            QPushButton:hover {{ border: 1px solid #1DE9B6; }}
+            QSlider::groove:horizontal {{ height: 6px; border-radius: 3px; background: rgba(255,255,255,0.14); }}
+            QSlider::handle:horizontal {{ width: 16px; margin: -5px 0; border-radius: 8px; background: #1DE9B6; }}
             """
         )
         if dialog.exec() == QDialog.Accepted:
@@ -19216,6 +19769,9 @@ Admin elevation
         self._update_home_status_card_width()
         if getattr(self, "_spotify_decline_pill", None) is not None and self._spotify_decline_pill.isVisible():
             self._position_spotify_decline_pill()
+        toast = getattr(self, "_update_toast_pill", None)
+        if toast is not None and toast.isVisible():
+            self._position_update_toast()
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API name)
         """Hook the first VISIBLE show to schedule one-time post-
@@ -19238,6 +19794,15 @@ Admin elevation
             # registered, then the modal lands. Reads as polite
             # rather than racing the splash.
             QTimer.singleShot(800, self._maybe_show_privacy_prompt)
+            # Auto-update success toast: when the launching version
+            # differs from the last-launched value stored in
+            # config, fire a one-time bottom-right toast saying
+            # "Updated to vX.Y.Z". Helps confirm the auto-update
+            # mechanism actually completed (4.1.4 in
+            # Touchless to-do.md). Schedule slightly later than
+            # the privacy prompt so the toast doesn't sit behind
+            # a modal the user is busy reading.
+            QTimer.singleShot(1400, self._maybe_show_update_success_toast)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         try:
@@ -20314,6 +20879,11 @@ def _stop_screen_recording(self) -> bool:
     def _on_worker_debug_frame(self, frame, info) -> None:
         if not isinstance(info, dict):
             return
+        # Throttled update for the Camera page's Live Status pill +
+        # FPS readout. The check is cheap (one time.monotonic()) so
+        # it's fine to call on every frame; the actual widget set
+        # only fires ~4× per second.
+        self._update_camera_health_widgets(info)
         drawing_target = str(info.get("drawing_render_target", self._drawing_render_target) or self._drawing_render_target)
         self._set_drawing_render_target(drawing_target)
         request_token = int(info.get("drawing_request_token", 0) or 0)
@@ -20788,6 +21358,19 @@ def _stop_screen_recording(self) -> bool:
             client = getattr(self, "_telemetry", None)
             if client is not None:
                 client.shutdown(timeout=2.0)
+        except Exception:
+            pass
+        # Persist window geometry (size, position, maximized) so the
+        # next launch restores the user's preferred layout instead of
+        # falling back to the hard-coded resize() default. saveGeometry
+        # round-trips through base64-ASCII into the JSON config.
+        try:
+            geom_b64 = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
+            self.config.main_window_geometry_b64 = geom_b64
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
         except Exception:
             pass
         super().closeEvent(event)

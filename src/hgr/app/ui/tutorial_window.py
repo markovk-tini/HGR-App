@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -780,6 +781,34 @@ class TutorialWindow(QDialog):
         self.resize(1020, 720)
         self.setMinimumSize(880, 640)
 
+        # In-window "Starting..." pill. Floating QLabel anchored at
+        # bottom-center of the tutorial dialog (NOT a desktop-level
+        # overlay -- per user spec, keep tutorial's loading
+        # indicator inside the dialog so it doesn't compete with the
+        # main app's desktop-pill if they overlap). Visible during
+        # _start_session() until the first camera frame arrives.
+        self._starting_pill = QLabel("Starting tutorial", self)
+        self._starting_pill.setObjectName("tutorialStartingPill")
+        self._starting_pill.setAlignment(Qt.AlignCenter)
+        self._starting_pill.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._starting_pill.setStyleSheet(
+            "QLabel#tutorialStartingPill {"
+            "  background: rgba(25, 73, 143, 0.92);"
+            "  color: #E8F6FF;"
+            "  border: 1px solid rgba(29, 233, 182, 0.65);"
+            "  border-radius: 22px;"
+            "  font-size: 15px;"
+            "  font-weight: 700;"
+            "  padding: 10px 22px;"
+            "}"
+        )
+        self._starting_pill.setVisible(False)
+        self._starting_pill_dot_count = 0
+        self._starting_pill_label_base = "Starting tutorial"
+        self._starting_pill_timer = QTimer(self)
+        self._starting_pill_timer.setInterval(380)
+        self._starting_pill_timer.timeout.connect(self._advance_starting_pill_dots)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1132,12 +1161,15 @@ class TutorialWindow(QDialog):
             "trigger voice listening when current command is processed."
         )
 
-    @staticmethod
-    def _voice_command_intro_header_text() -> str:
+    def _voice_command_intro_header_text(self) -> str:
+        # Branch on Spotify detection (same flag the rest of the
+        # voice step + play/pause uses) so the spoken example
+        # matches what the completion check actually verifies.
+        target = "Spotify" if getattr(self, "_has_spotify", False) else "YouTube"
         return (
             "Hold left-hand one until the microphone appears at the "
-            "bottom middle of your monitor, then say: \"Open "
-            "YouTube on Google Chrome\"."
+            f"bottom middle of your monitor, then say: “Play "
+            f"[a song] on {target}”."
         )
 
     def _voice_command_header_text(self, hold_active: bool) -> str:
@@ -1329,23 +1361,71 @@ class TutorialWindow(QDialog):
         dialog.raise_()
         dialog.activateWindow()
 
+    def _toggle_completion_more_tips(self) -> None:
+        """Flip the secondary tips container between hidden and shown.
+        Button label tracks state: 'More tips (N) …' when collapsed,
+        'Fewer tips' when expanded."""
+        container = getattr(self, "_completion_more_tips_container", None)
+        button = getattr(self, "_completion_more_tips_button", None)
+        if container is None or button is None:
+            return
+        now_visible = not container.isVisible()
+        container.setVisible(now_visible)
+        if now_visible:
+            button.setText("Fewer tips")
+        else:
+            n = getattr(self, "_completion_more_tips_secondary_count", 0)
+            button.setText(f"More tips ({n}) …")
+
     def _build_completion_guide_page(self) -> QWidget:
         """End-of-tutorial page. Title + a 'Quick Tips' card with
         discoverability hints the user wouldn't otherwise stumble
         across (where Connect Spotify lives, how to pause gestures
         without quitting, etc.), then the full gesture-guide
-        scroll area below for reference. Renamed from a plain
-        'Tutorial Completed' confirmation to a tips page because
-        first-pass users land here once and the gesture grid
-        alone wasn't surfacing the useful 'oh, that's where THAT
-        setting lives' moments."""
-        from .main_window import build_gesture_guide_scroll_area
+        widget below for reference. Renamed from a plain 'Tutorial
+        Completed' confirmation to a tips page because first-pass
+        users land here once and the gesture grid alone wasn't
+        surfacing the useful 'oh, that's where THAT setting lives'
+        moments.
+
+        The whole page is wrapped in a QScrollArea so a short
+        window doesn't clip the tips card or the gesture grid;
+        the user can scroll through everything end-to-end —
+        including expanded Static / Dynamic / Voice dropdowns
+        that grow the gesture-grid section vertically. We use
+        `build_gesture_guide_content_widget()` (raw widget, no
+        inner scroll area) rather than the scroll-area variant so
+        the outer page scrollbar can take over for the entire
+        height instead of fighting an inner scrollbar that would
+        only scroll the grid."""
+        from .main_window import build_gesture_guide_content_widget
+
+        outer = QWidget()
+        outer.setObjectName("tutorialCompletionPage")
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        completion_scroll = QScrollArea()
+        completion_scroll.setObjectName("tutorialCompletionScroll")
+        completion_scroll.setWidgetResizable(True)
+        completion_scroll.setFrameShape(QFrame.NoFrame)
+        completion_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        completion_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        completion_scroll.setStyleSheet(
+            "QScrollArea#tutorialCompletionScroll, "
+            "QScrollArea#tutorialCompletionScroll > QWidget, "
+            "QScrollArea#tutorialCompletionScroll QWidget#qt_scrollarea_viewport "
+            "{ background: transparent; border: none; }"
+        )
+        completion_scroll.viewport().setStyleSheet("background: transparent;")
+        outer_layout.addWidget(completion_scroll, 1)
 
         page = QWidget()
-        page.setObjectName("tutorialCompletionPage")
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(18, 18, 18, 18)
         page_layout.setSpacing(14)
+        completion_scroll.setWidget(page)
 
         self.completion_title_label = QLabel("Tutorial Completed — Quick Tips")
         self.completion_title_label.setObjectName("tutorialStepTitle")
@@ -1361,7 +1441,12 @@ class TutorialWindow(QDialog):
         page_layout.addWidget(self.completion_disclaimer_label)
 
         # ---- Tips card -----------------------------------------
-        tips = [
+        # The first three tips are the highest-leverage discoverability
+        # hints (pause without quitting, connect Spotify, adjust mouse
+        # sensitivity). The remaining five are hidden behind a "More
+        # tips" toggle so the completion page reads as a quick three-
+        # item primer; users who want the deep list expand it.
+        primary_tips = [
             (
                 "Pause gestures without quitting",
                 "Open the Live View widget (the small camera thumbnail) and "
@@ -1373,6 +1458,14 @@ class TutorialWindow(QDialog):
                 "Settings → General → Connect Spotify. After authorising once, "
                 "voice and gesture controls for Spotify just work.",
             ),
+            (
+                "Adjust mouse sensitivity",
+                "Settings → General → Mouse. Smaller control box = a tiny hand "
+                "movement covers the whole screen (high sensitivity); larger "
+                "box = more precision.",
+            ),
+        ]
+        secondary_tips = [
             (
                 "Use your phone as the camera",
                 "Settings → Camera → scan the QR code with your phone. Streams "
@@ -1397,12 +1490,6 @@ class TutorialWindow(QDialog):
                 "Mode. They loosen tracking thresholds for slower hardware.",
             ),
             (
-                "Adjust mouse sensitivity",
-                "Settings → General → Mouse. Smaller control box = a tiny hand "
-                "movement covers the whole screen (high sensitivity); larger "
-                "box = more precision.",
-            ),
-            (
                 "Replay this tutorial anytime",
                 "Settings → Tutorial. Or record your own gesture: Settings → "
                 "Custom Gesture (Beta).",
@@ -1411,48 +1498,110 @@ class TutorialWindow(QDialog):
         tips_card = QFrame()
         tips_card.setObjectName("tutorialCard")
         tips_card_layout = QVBoxLayout(tips_card)
-        tips_card_layout.setContentsMargins(14, 14, 14, 14)
-        tips_card_layout.setSpacing(12)
+        tips_card_layout.setContentsMargins(18, 18, 18, 18)
+        tips_card_layout.setSpacing(0)
         accent = self.config.accent_color or "#1DE9B6"
         text_color = self.config.text_color or "#E5F6FF"
-        for headline, body in tips:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(10)
-            bullet = QLabel("•")
-            bullet.setStyleSheet(
-                f"color: {accent}; font-size: 18px; font-weight: 800;"
-            )
-            bullet.setFixedWidth(14)
-            bullet.setAlignment(Qt.AlignTop)
-            row.addWidget(bullet, 0, Qt.AlignTop)
-            text_col = QVBoxLayout()
-            text_col.setContentsMargins(0, 0, 0, 0)
-            text_col.setSpacing(2)
+        divider_color = "rgba(29,233,182,0.18)"
+
+        def _add_tip(parent_layout, headline, body, is_first):
+            # Soft horizontal divider between tips so the eye can find
+            # each tip without straining.
+            if not is_first:
+                divider = QFrame()
+                divider.setFrameShape(QFrame.HLine)
+                divider.setStyleSheet(
+                    f"QFrame {{ background: {divider_color}; "
+                    f"border: none; max-height: 1px; min-height: 1px; "
+                    f"margin: 12px 0 12px 0; }}"
+                )
+                parent_layout.addWidget(divider)
             head_label = QLabel(headline)
+            head_label.setWordWrap(True)
             head_label.setStyleSheet(
-                f"color: {text_color}; font-size: 14px; font-weight: 700;"
+                f"color: {accent}; font-size: 15px; font-weight: 800; "
+                f"letter-spacing: 0.1px; background: transparent;"
             )
             body_label = QLabel(body)
             body_label.setWordWrap(True)
             body_label.setStyleSheet(
-                f"color: {text_color}; font-size: 13px; line-height: 150%;"
+                f"color: {text_color}; font-size: 13px; line-height: 150%; "
+                f"background: transparent; margin-top: 4px;"
             )
-            text_col.addWidget(head_label)
-            text_col.addWidget(body_label)
-            row.addLayout(text_col, 1)
-            tips_card_layout.addLayout(row)
+            parent_layout.addWidget(head_label)
+            parent_layout.addWidget(body_label)
+
+        for i, (headline, body) in enumerate(primary_tips):
+            _add_tip(tips_card_layout, headline, body, is_first=(i == 0))
+
+        # Hidden-by-default container for secondary tips. Toggled by
+        # the "More tips" / "Fewer tips" link below the card.
+        self._completion_more_tips_container = QWidget()
+        more_layout = QVBoxLayout(self._completion_more_tips_container)
+        more_layout.setContentsMargins(0, 0, 0, 0)
+        more_layout.setSpacing(0)
+        for headline, body in secondary_tips:
+            _add_tip(more_layout, headline, body, is_first=False)
+        self._completion_more_tips_container.setVisible(False)
+        tips_card_layout.addWidget(self._completion_more_tips_container)
+
         page_layout.addWidget(tips_card)
 
-        # ---- Gesture reference (kept as-is) --------------------
+        # Centered "More tips ..." toggle directly under the card.
+        toggle_row = QHBoxLayout()
+        toggle_row.setContentsMargins(0, 0, 0, 0)
+        toggle_row.addStretch(1)
+        self._completion_more_tips_button = QPushButton(
+            f"More tips ({len(secondary_tips)}) …"
+        )
+        self._completion_more_tips_button.setObjectName("completionMoreTips")
+        self._completion_more_tips_button.setCursor(Qt.PointingHandCursor)
+        self._completion_more_tips_button.setStyleSheet(
+            f"QPushButton#completionMoreTips {{ "
+            f"  color: {accent}; "
+            f"  background: transparent; "
+            f"  border: 1px solid rgba(29,233,182,0.30); "
+            f"  border-radius: 999px; "
+            f"  padding: 7px 18px; "
+            f"  font-size: 13px; "
+            f"  font-weight: 700; "
+            f"}}"
+            f"QPushButton#completionMoreTips:hover {{ "
+            f"  border: 1px solid {accent}; "
+            f"  background: rgba(29,233,182,0.08); "
+            f"}}"
+        )
+        self._completion_more_tips_button.clicked.connect(
+            self._toggle_completion_more_tips
+        )
+        self._completion_more_tips_secondary_count = len(secondary_tips)
+        toggle_row.addWidget(self._completion_more_tips_button)
+        toggle_row.addStretch(1)
+        page_layout.addLayout(toggle_row)
+
+        # ---- Gesture reference --------------------------------
+        # Use the raw content widget (no inner scroll area). The
+        # outer completion_scroll already provides scrolling, so
+        # nesting another scroll area inside would trap the
+        # dropdown expansions to a small inner viewport instead of
+        # letting the page grow naturally as the user opens
+        # Static / Dynamic / Voice. SizePolicy is set to
+        # MinimumExpanding so the page can grow vertically with
+        # the dropdowns without forcing the rest of the layout to
+        # shrink.
         guide_card = QFrame()
         guide_card.setObjectName("tutorialCard")
         guide_card_layout = QVBoxLayout(guide_card)
         guide_card_layout.setContentsMargins(14, 14, 14, 14)
         guide_card_layout.setSpacing(10)
-        guide_card_layout.addWidget(build_gesture_guide_scroll_area(), 1)
-        page_layout.addWidget(guide_card, 1)
-        return page
+        guide_content = build_gesture_guide_content_widget()
+        guide_content.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
+        guide_card_layout.addWidget(guide_content)
+        page_layout.addWidget(guide_card)
+        page_layout.addStretch(0)
+        return outer
 
     def apply_theme(self, config: AppConfig) -> None:
         self.config = config
@@ -1697,6 +1846,7 @@ class TutorialWindow(QDialog):
 
     def _start_session(self) -> None:
         self._stop_session()
+        self._show_starting_pill("Starting tutorial")
         shared_worker = self._resolve_parent_worker()
         if shared_worker is not None:
             self._owns_worker = False
@@ -1792,8 +1942,16 @@ class TutorialWindow(QDialog):
             return
         if "spotify" in text:
             self._last_spotify_tutorial_action = text
-        if self._practice_steps[self._step_index].key == "voice_command" and "youtube" in text and "chrome" in text:
-            self._last_voice_success_text = text
+        if self._practice_steps[self._step_index].key == "voice_command":
+            # Voice step succeeds when the command targets the
+            # detected media app: Spotify when installed (status
+            # mentions spotify / play), otherwise the previous
+            # YouTube-on-Chrome combo.
+            spotify_present = bool(getattr(self, "_has_spotify", False))
+            if spotify_present and ("spotify" in text or "play" in text):
+                self._last_voice_success_text = text
+            elif not spotify_present and "youtube" in text and "chrome" in text:
+                self._last_voice_success_text = text
 
     def _tutorial_nav_from_payload(self, payload: dict, now: float) -> None:
         if payload.get("mouse_mode_enabled"):
@@ -1874,7 +2032,13 @@ class TutorialWindow(QDialog):
         step = self._practice_steps[self._step_index]
         if self._show_completion_page:
             self.body_stack.setCurrentIndex(1)
-            self.progress_badge.setText("Tutorial Completed")
+            # Hide the per-page hero + subtitle + badge so the only
+            # header on the completion page is the in-body
+            # "Tutorial Completed — Quick Tips" title (no double
+            # header).
+            self.hero_label.hide()
+            self.hero_subtitle.hide()
+            self.progress_badge.hide()
             self.guide_button.hide()
             self.example_button.hide()
             self.prev_button.setEnabled(True)
@@ -1886,6 +2050,10 @@ class TutorialWindow(QDialog):
             return
 
         self.body_stack.setCurrentIndex(0)
+        # Restore the header on regular step pages.
+        self.hero_label.show()
+        self.hero_subtitle.show()
+        self.progress_badge.show()
         self.guide_button.show()
         self.example_button.show()
         self.progress_badge.setText(f"Step {self._step_index + 1} of {len(self._practice_steps)}")
@@ -2567,7 +2735,11 @@ class TutorialWindow(QDialog):
     # the visible clip content's top-right edge sits hard against
     # the frame's top-right edge.
     _INSET_W_FRAC = 0.26
-    _INSET_MARGIN = 6
+    # No margin — the inset's outer edges sit flush against the
+    # frame's top and right edges. Previous 6 px gap left a thin
+    # band of camera content visible above and to the right of
+    # the demo, which the user reported as a misalignment.
+    _INSET_MARGIN = 0
     _INSET_MAX_H_FRAC = 0.55
 
     def _inset_rect(self, frame_w: int, frame_h: int,
@@ -2721,6 +2893,26 @@ class TutorialWindow(QDialog):
                                         fallback_scale=0.62, now=now)
             if mouse_state is not None and mouse_state.get("camera_control_bounds") is not None:
                 self._draw_tutorial_mouse_overlays(frame, mouse_state)
+        elif step_key == "volume":
+            # Volume tutorial has two phases:
+            #   Phase A (raise + lower volume): show the animated
+            #     volume-pose clip so the user can mirror the pose.
+            #   Phase B (mute / unmute): swap to the static Mute.png
+            #     so the user knows they're now on the mute pinch
+            #     part of the step.
+            tracker = getattr(self, "_volume_step_state", None) or {}
+            up_done = bool(tracker.get("up_done"))
+            down_done = bool(tracker.get("down_done"))
+            mute_done = int(tracker.get("mute_count", 0)) >= 2
+            if up_done and down_done and not mute_done:
+                # On the mute phase — show the mute pose.
+                self._draw_static_demo(frame, None, "mute_pose",
+                                        fallback_scale=0.85, now=now)
+            else:
+                # Default / adjust phase — show the volume-pose
+                # demo. Animated VolControl.mp4.
+                self._draw_static_demo(frame, None, "volume_pose",
+                                        fallback_scale=1.00, now=now)
         elif step_key == "voice_command":
             # Smaller inset for the Left Hand One pose: it's a static
             # reminder, not an animated demo, so it doesn't need to
@@ -2768,30 +2960,71 @@ class TutorialWindow(QDialog):
                 else:
                     self._voice_overlay_widget().show_result("Command not understood", command_text=heard_text, duration=1.9)
                 normalized = heard_text.lower()
-                if self._practice_steps[self._step_index].key == "voice_command" and (
-                    "youtube" in normalized or "you tube" in normalized
-                ):
-                    QTimer.singleShot(3000, self._check_youtube_opened)
+                if self._practice_steps[self._step_index].key == "voice_command":
+                    spotify_present = bool(getattr(self, "_has_spotify", False))
+                    if spotify_present and (
+                        "spotify" in normalized
+                        or "play" in normalized
+                    ):
+                        # Wait briefly so Spotify has time to start
+                        # the track before we poll its playback state.
+                        QTimer.singleShot(3000, self._check_voice_media_playing)
+                    elif not spotify_present and (
+                        "youtube" in normalized or "you tube" in normalized
+                    ):
+                        QTimer.singleShot(3000, self._check_voice_media_playing)
 
-    def _check_youtube_opened(self) -> None:
+    def _check_voice_media_playing(self) -> None:
+        """First-pass media-played check. Branches on Spotify
+        presence: if installed, ask the Spotify Web API for the
+        current playback state; otherwise look for a YouTube tab in
+        Chrome."""
         if self._step_completed:
             return
         if self._practice_steps[self._step_index].key != "voice_command":
             return
-        if self._chrome_controller.has_youtube_open():
-            self._complete_step(f"YouTube opened in Chrome! Part {self._step_index + 1}/6 completed!")
+        spotify_present = bool(getattr(self, "_has_spotify", False))
+        if spotify_present:
+            if self._is_spotify_playing_safe():
+                self._complete_step(f"Spotify is playing! Part {self._step_index + 1}/5 completed!")
+                return
         else:
-            QTimer.singleShot(2000, self._check_youtube_opened_final)
+            if self._chrome_controller.has_youtube_open():
+                self._complete_step(f"YouTube opened in Chrome! Part {self._step_index + 1}/5 completed!")
+                return
+        # Either Spotify isn't playing yet or the YouTube tab isn't
+        # up — give it another 2 s before falling back.
+        QTimer.singleShot(2000, self._check_voice_media_playing_final)
 
-    def _check_youtube_opened_final(self) -> None:
+    def _check_voice_media_playing_final(self) -> None:
+        """Final media-played check. Same branch as the first pass,
+        but if neither Spotify-playing nor YouTube-open succeeds we
+        still mark the step completed because the voice command
+        itself was heard — better than leaving the user stuck."""
         if self._step_completed:
             return
         if self._practice_steps[self._step_index].key != "voice_command":
             return
-        if self._chrome_controller.has_youtube_open():
-            self._complete_step(f"YouTube opened in Chrome! Part {self._step_index + 1}/6 completed!")
+        spotify_present = bool(getattr(self, "_has_spotify", False))
+        if spotify_present:
+            if self._is_spotify_playing_safe():
+                self._complete_step(f"Spotify is playing! Part {self._step_index + 1}/5 completed!")
+                return
         else:
-            self._complete_step(f"Voice command detected. Part {self._step_index + 1}/6 completed!")
+            if self._chrome_controller.has_youtube_open():
+                self._complete_step(f"YouTube opened in Chrome! Part {self._step_index + 1}/5 completed!")
+                return
+        self._complete_step(f"Voice command detected. Part {self._step_index + 1}/5 completed!")
+
+    def _is_spotify_playing_safe(self) -> bool:
+        """Wrap SpotifyController.get_playback_state in a try/except
+        so a missing token / offline network doesn't crash the
+        tutorial — returns False in that case."""
+        try:
+            state = self._spotify_controller.get_playback_state()
+            return state is True
+        except Exception:
+            return False
 
     def _try_adopt_parent_voice_listener(self) -> None:
         worker = self._resolve_parent_worker()
@@ -2911,6 +3144,9 @@ class TutorialWindow(QDialog):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_worker_debug_frame(self, frame, payload) -> None:
+        # First frame in -> camera is up -> kill the starting pill.
+        # Hide on EVERY frame is a cheap no-op (just checks visible).
+        self._hide_starting_pill()
         monotonic_now = time.monotonic()
         current_step_key = self._practice_steps[self._step_index].key
         visual_ready = self._update_step_progress_from_payload(payload, monotonic_now)
@@ -3116,9 +3352,13 @@ class TutorialWindow(QDialog):
                     "up_done": False,
                     "down_done": False,
                     "last_muted": muted,
-                    "mute_toggled": False,
+                    # Two mute toggles required (mute, then unmute)
+                    # so the user practises both directions — mirrors
+                    # the play/pause step which requires two fists.
+                    "mute_count": 0,
                 }
                 self._volume_step_state = tracker
+            mute_target = 2
             if volume_active and not tracker["engaged"]:
                 tracker["engaged"] = True
                 tracker["last_level"] = level
@@ -3132,9 +3372,11 @@ class TutorialWindow(QDialog):
                     self._trigger_encouragement(now)
                 tracker["last_level"] = level
             if muted != tracker["last_muted"]:
-                tracker["mute_toggled"] = True
+                tracker["mute_count"] = min(mute_target, tracker.get("mute_count", 0) + 1)
                 tracker["last_muted"] = muted
                 self._trigger_encouragement(now)
+            mute_count = int(tracker.get("mute_count", 0))
+            mute_done = mute_count >= mute_target
             visual_ready = volume_active
             if not tracker["engaged"]:
                 self._set_step_progress("Hold the volume pose to begin.")
@@ -3145,14 +3387,16 @@ class TutorialWindow(QDialog):
                 progress_bits.append("✓" if tracker["down_done"] else "—")
                 progress_bits.append(" lower volume")
                 self._set_step_progress("".join(progress_bits))
-            elif not tracker["mute_toggled"]:
-                self._set_step_progress("Now pinch thumb to index tip to mute / unmute.")
+            elif not mute_done:
+                self._set_step_progress(
+                    f"Pinch thumb to index tip to mute / unmute. {mute_count}/{mute_target} completed."
+                )
             else:
                 self._set_step_progress("All three! Swipe right to move on!")
             if (
                 tracker["up_done"]
                 and tracker["down_done"]
-                and tracker["mute_toggled"]
+                and mute_done
                 and not self._step_completed
             ):
                 self._complete_step("Completed! Swipe right to move on!")
@@ -3288,10 +3532,20 @@ class TutorialWindow(QDialog):
                 except Exception:
                     pass
                 visual_ready = True
-            if "youtube" in self._last_voice_success_text and "chrome" in self._last_voice_success_text:
-                self._complete_step("Completed! Swipe right to move on!")
-            elif "youtube" in voice_heard and "chrome" in voice_heard and ("execut" in voice_control or "chrome open" in voice_control):
-                self._complete_step("Completed! Swipe right to move on!")
+            spotify_present = bool(getattr(self, "_has_spotify", False))
+            if spotify_present:
+                # Spotify branch: command success text already
+                # records "play"/"spotify" matches; if the playback
+                # state is currently playing the step is done.
+                if self._last_voice_success_text and self._is_spotify_playing_safe():
+                    self._complete_step("Completed! Swipe right to move on!")
+                elif "spotify" in voice_heard and ("execut" in voice_control or "play" in voice_control):
+                    self._complete_step("Completed! Swipe right to move on!")
+            else:
+                if "youtube" in self._last_voice_success_text and "chrome" in self._last_voice_success_text:
+                    self._complete_step("Completed! Swipe right to move on!")
+                elif "youtube" in voice_heard and "chrome" in voice_heard and ("execut" in voice_control or "chrome open" in voice_control):
+                    self._complete_step("Completed! Swipe right to move on!")
             return visual_ready or voice_listening
 
         return False
@@ -3565,6 +3819,50 @@ class TutorialWindow(QDialog):
         if arrow is not None:
             arrow.setGeometry(0, 0, self.width(), self.height())
             arrow.update_target_from_screen()
+        # Re-anchor the starting-pill to bottom-center of the
+        # dialog on resize so it stays put if the user drags the
+        # window to a new size mid-load.
+        self._reposition_starting_pill()
+
+    # ----- Starting pill -----------------------------------------------
+    def _reposition_starting_pill(self) -> None:
+        pill = getattr(self, "_starting_pill", None)
+        if pill is None or not pill.isVisible():
+            return
+        pill.adjustSize()
+        x = max(8, (self.width() - pill.width()) // 2)
+        y = max(8, self.height() - pill.height() - 64)
+        pill.move(x, y)
+
+    def _advance_starting_pill_dots(self) -> None:
+        self._starting_pill_dot_count = (self._starting_pill_dot_count + 1) % 4
+        pill = getattr(self, "_starting_pill", None)
+        if pill is None:
+            return
+        dots = "." * self._starting_pill_dot_count
+        pill.setText(self._starting_pill_label_base + dots)
+        self._reposition_starting_pill()
+
+    def _show_starting_pill(self, label: str = "Starting tutorial") -> None:
+        pill = getattr(self, "_starting_pill", None)
+        if pill is None:
+            return
+        self._starting_pill_label_base = str(label or "Starting tutorial")
+        self._starting_pill_dot_count = 0
+        pill.setText(self._starting_pill_label_base)
+        pill.adjustSize()
+        self._reposition_starting_pill()
+        pill.setVisible(True)
+        pill.raise_()
+        self._starting_pill_timer.start()
+
+    def _hide_starting_pill(self) -> None:
+        timer = getattr(self, "_starting_pill_timer", None)
+        if timer is not None:
+            timer.stop()
+        pill = getattr(self, "_starting_pill", None)
+        if pill is not None:
+            pill.setVisible(False)
 
     def moveEvent(self, event) -> None:  # noqa: N802 — Qt naming
         super().moveEvent(event)
